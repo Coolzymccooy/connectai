@@ -1,0 +1,8 @@
+{
+  "name": "ConnectAI - SMB CCaaS MVP",
+  "description": "A focused AI-powered contact center solution for SMBs featuring softphone, live transcription simulation, and AI-driven call analysis using Gemini 2.5 Flash.",
+  "requestFramePermissions": [
+    "microphone",
+    "camera"
+  ]
+}
