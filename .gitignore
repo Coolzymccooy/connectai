@@ -1,24 +1,61 @@
-# Logs
-logs
-*.log
+### General ###
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+### VS Code ###
+.vscode/
+*.code-workspace
+.history/
+.localhistory/
+
+### Node / React ###
+node_modules/
+dist/
+.idea/
+server/data/
+!server/data/store.cjs
+build/
+out/
+coverage/
+.npm/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+package-lock.json
+pnpm-lock.yaml
 
-node_modules
-dist
-dist-ssr
-*.local
+### Environment ###
+.env
+.env.local
+.env.development.local
+.env.production.local
+.env.test.local
+server/.env
+server/.env.local
 
-# Editor directories and files
-.vscode/*
-!.vscode/extensions.json
-.idea
-.DS_Store
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.sw?
+### Logs + temp ###
+*.log
+*.tmp
+*.temp
+*.swp
+*.pid
+*.tsbuildinfo
+
+### Python ###
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+### IDEs ###
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+### Docker ###
+docker-storage/
+docker-data/
