@@ -1,13 +1,150 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import compression from 'compression';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import mongoose from 'mongoose';
 import { GoogleGenAI, Type } from '@google/genai';
+import { authenticate, authorize, UserRole } from './rbacMiddleware.js';
+import { globalQueue } from './services/queueManager.js';
+import { startDialer } from './services/dialerEngine.js';
 
 dotenv.config({ path: '.env.local' });
 
+// --- DB CONNECTION ---
+if (process.env.MONGO_URI) {
+  mongoose.connect(process.env.MONGO_URI)
+    .then(() => console.log('✅ MongoDB Connected'))
+    .catch(err => console.error('❌ DB Error:', err));
+}
+
 const app = express();
-app.use(cors());
+
+// --- GLOBAL SECURITY & PERFORMANCE ---
+app.use(helmet()); // Secure HTTP headers
+app.use(compression()); // Compress responses for faster load
+app.use(cors({
+  origin: process.env.CLIENT_URL || '*', // Allow Vercel frontend in prod
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// --- RATE LIMITING (DDoS Protection) ---
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/api/', limiter);
+
 app.use(express.json({ limit: '2mb' }));
+
+// --- PROTECTED ROUTES ---
+
+// Supervisor Stats (Protected)
+app.get('/api/supervisor/stats', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
+  // Mock Stats for the dashboard
+  res.json({
+    activeAgents: 12,
+    queueSize: 45,
+    avgWaitTime: 120, // seconds
+    sentimentTrend: [65, 70, 72, 68, 75, 80],
+    riskAlerts: 2
+  });
+});
+
+// --- VECTOR STORE (In-Memory MVP) ---
+// In production, swap this Map for Pinecone/Weaviate
+let VECTOR_DB = []; 
+
+const getEmbeddings = async (text) => {
+  const ai = getClient();
+  try {
+    const result = await ai.models.embedContent({
+      model: 'text-embedding-004',
+      contents: [{ parts: [{ text }] }],
+    });
+    return result.embedding.values;
+  } catch (err) {
+    console.error('Embedding error:', err);
+    return null;
+  }
+};
+
+const cosineSimilarity = (vecA, vecB) => {
+  const dotProduct = vecA.reduce((sum, a, i) => sum + a * vecB[i], 0);
+  const magA = Math.sqrt(vecA.reduce((sum, a) => sum + a * a, 0));
+  const magB = Math.sqrt(vecB.reduce((sum, b) => sum + b * b, 0));
+  return dotProduct / (magA * magB);
+};
+
+app.post('/api/rag/ingest', async (req, res) => {
+  if (!ensureGemini(res)) return;
+  const { documents } = req.body; // Expects [{ id, content, metadata }]
+  if (!Array.isArray(documents)) return res.status(400).json({ error: 'documents array required' });
+
+  const processed = [];
+  for (const doc of documents) {
+    const vector = await getEmbeddings(doc.content);
+    if (vector) {
+      // Upsert logic
+      const existingIdx = VECTOR_DB.findIndex(v => v.id === doc.id);
+      const record = { id: doc.id, vector, content: doc.content, metadata: doc.metadata };
+      if (existingIdx >= 0) {
+        VECTOR_DB[existingIdx] = record;
+      } else {
+        VECTOR_DB.push(record);
+      }
+      processed.push(doc.id);
+    }
+  }
+  console.log(`[RAG] Ingested ${processed.length} documents. Total DB size: ${VECTOR_DB.length}`);
+  res.json({ success: true, count: processed.length });
+});
+
+app.post('/api/rag/query', async (req, res) => {
+  if (!ensureGemini(res)) return;
+  const { query } = req.body;
+  if (!query) return res.status(400).json({ error: 'query required' });
+
+  // 1. Vector Search
+  const queryVector = await getEmbeddings(query);
+  if (!queryVector) return res.status(500).json({ error: 'Failed to embed query' });
+
+  const matches = VECTOR_DB.map(doc => ({
+    ...doc,
+    score: cosineSimilarity(queryVector, doc.vector)
+  }))
+  .sort((a, b) => b.score - a.score)
+  .slice(0, 3); // Top 3 chunks
+
+  // 2. LLM Synthesis (RAG)
+  const ai = getClient();
+  const context = matches.map(m => `- ${m.content} (Source: ${m.metadata?.title || 'Unknown'})`).join('\n');
+  const prompt = `Context:\n${context}\n\nUser Query: "${query}"\n\nAnswer the query strictly using the provided context. If the answer isn't in the context, say "I don't have that info". Keep it concise for a call center agent.`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: TEXT_MODEL,
+      contents: prompt,
+    });
+    
+    res.json({
+      answer: response.text,
+      sources: matches.map(m => ({ 
+        id: m.id, 
+        title: m.metadata?.title, 
+        score: m.score,
+        content: m.content
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'RAG Synthesis Failed' });
+  }
+});
+
 
 const PORT = Number(process.env.SERVER_PORT || 8787);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;

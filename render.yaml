@@ -1,0 +1,14 @@
+{
+  "buildCommand": "npm install",
+  "startCommand": "node server/index.js",
+  "envVars": [
+    {
+      "key": "GEMINI_API_KEY",
+      "sync": false
+    },
+    {
+      "key": "PORT",
+      "value": "8787"
+    }
+  ]
+}

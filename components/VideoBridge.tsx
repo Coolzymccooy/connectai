@@ -1,5 +1,6 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo, useLayoutEffect } from 'react';
+import Peer, { MediaConnection } from 'peerjs';
 import { 
   Mic, MicOff, Video, VideoOff, Monitor, PhoneOff, Settings, 
   MessageSquare, Users, Sparkles, Smile, Hand, Grid, Layout, 
@@ -14,7 +15,7 @@ import { Call, User, MeetingMessage, Reaction, ToolAction, CallStatus, Attachmen
 import { getStrategicIntelligence, extractToolActions, analyzeCallTranscript } from '../services/geminiService';
 
 // --- SUB-COMPONENT: PRODUCTION-GRADE VIDEO SLOT ---
-const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean, effect?: 'none' | 'blur' | 'virtual' }> = ({ stream, mirrored, effect }) => {
+const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean, effect?: 'none' | 'blur' | 'virtual', isLocal?: boolean }> = ({ stream, mirrored, effect, isLocal }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<'standby' | 'admitted' | 'error'>('standby');
 
@@ -29,7 +30,9 @@ const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean
       try {
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          // Ensure we try to play. Calling play() ensures the buffer is ready for swift toggling.
+          if (isLocal) {
+              videoRef.current.muted = true;
+          }
           await videoRef.current.play();
           if (active) setStatus('admitted');
         }
@@ -41,7 +44,7 @@ const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean
 
     bind();
     return () => { active = false; };
-  }, [stream]);
+  }, [stream, isLocal]);
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-slate-900 flex items-center justify-center">
@@ -55,7 +58,6 @@ const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean
         ref={videoRef} 
         autoPlay 
         playsInline 
-        muted 
         className={`w-full h-full object-cover transition-opacity duration-700 ${status === 'admitted' ? 'opacity-100' : 'opacity-0'} ${mirrored ? 'mirror' : ''}`} 
       />
       {effect === 'blur' && <div className="absolute inset-0 backdrop-blur-2xl bg-slate-950/30 pointer-events-none"></div>}
@@ -100,7 +102,12 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   // Streams
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [audioLevel, setAudioLevel] = useState(0);
+  
+  // PeerJS
+  const peerRef = useRef<Peer | null>(null);
+  const [peerId, setPeerId] = useState<string>('');
   
   // Feature States
   const [intelligence, setIntelligence] = useState<{ text: string, links: {title: string, uri: string}[] } | null>(null);
@@ -109,6 +116,40 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [chatInput, setChatInput] = useState('');
   const [messages, setMessages] = useState<MeetingMessage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // --- PEERJS INITIALIZATION ---
+  useEffect(() => {
+    const id = `connectai-user-${currentUser.id}`; // Deterministic ID
+    const peer = new Peer(id, {
+        debug: 1
+    });
+
+    peer.on('open', (id) => {
+        console.log('My peer ID is: ' + id);
+        setPeerId(id);
+    });
+
+    peer.on('call', (call) => {
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+            .then((stream) => {
+                setLocalStream(stream); // Ensure we have local stream
+                call.answer(stream); // Answer the call with an A/V stream.
+                call.on('stream', (remoteStream) => {
+                    // Extract user ID from peer ID if possible, or just use call.peer
+                    const remoteUserId = call.peer.replace('connectai-user-', '');
+                    setRemoteStreams(prev => new Map(prev).set(remoteUserId, remoteStream));
+                });
+            }, (err) => {
+                console.error('Failed to get local stream', err);
+            });
+    });
+
+    peerRef.current = peer;
+
+    return () => {
+        peer.destroy();
+    };
+  }, [currentUser.id]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -282,6 +323,17 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     return `${h > 0 ? h + ':' : ''}${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  // --- CALL LOGIC ---
+  const callUser = (targetUserId: string) => {
+      if (!peerRef.current || !localStream) return;
+      const targetPeerId = `connectai-user-${targetUserId}`;
+      const call = peerRef.current.call(targetPeerId, localStream);
+      
+      call.on('stream', (remoteStream) => {
+          setRemoteStreams(prev => new Map(prev).set(targetUserId, remoteStream));
+      });
+  };
+
   return (
     <div className="fixed inset-0 z-[100] bg-slate-950 flex flex-col overflow-hidden text-white font-sans selection:bg-brand-500/30">
       
@@ -295,7 +347,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
             <h2 className="text-sm font-black uppercase italic tracking-tighter text-white">Neural Hub / {activeCall.customerName}</h2>
             <div className="flex items-center gap-2">
               <span className={`w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse`}></span>
-              <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Bridged Cluster Active</p>
+              <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Bridged Cluster Active • {peerId ? 'Node Online' : 'Connecting...'}</p>
             </div>
           </div>
         </div>
@@ -323,7 +375,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                  <div key={p.id} className="relative bg-slate-900 rounded-[2.5rem] border border-white/5 overflow-hidden group shadow-2xl aspect-video flex items-center justify-center">
                     {p.id === currentUser.id ? (
                       activeCall.isVideo ? (
-                        <NeuralVideoSlot stream={localStream} mirrored={mirrorVideo} effect={backgroundEffect} />
+                        <NeuralVideoSlot stream={localStream} mirrored={mirrorVideo} effect={backgroundEffect} isLocal={true} />
                       ) : (
                         <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
                            <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl opacity-40 grayscale" />
@@ -334,10 +386,16 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                         </div>
                       )
                     ) : (
-                       <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
-                          <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl" />
-                          {showNames && <p className="text-xs font-black text-slate-400 uppercase tracking-widest italic">{p.name}</p>}
-                       </div>
+                       // REMOTE PARTICIPANT RENDER
+                       remoteStreams.get(p.id) ? (
+                           <NeuralVideoSlot stream={remoteStreams.get(p.id)!} isLocal={false} />
+                       ) : (
+                           <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
+                              <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl" />
+                              {showNames && <p className="text-xs font-black text-slate-400 uppercase tracking-widest italic">{p.name}</p>}
+                              <p className="text-[9px] text-slate-600 animate-pulse">Waiting for Stream...</p>
+                           </div>
+                       )
                     )}
                     
                     {/* Name Tag Overlay */}
@@ -614,7 +672,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                  {team.filter(t => !activeCall.participants?.includes(t.id) && t.id !== currentUser.id).map(user => (
                     <button 
                       key={user.id} 
-                      onClick={() => { onInviteParticipant(user.id); setShowInviteModal(false); }}
+                      onClick={() => { 
+                          onInviteParticipant(user.id); 
+                          callUser(user.id); // Trigger real call
+                          setShowInviteModal(false); 
+                      }}
                       className="w-full p-6 bg-white/[0.03] border border-white/5 rounded-2xl flex items-center gap-6 hover:bg-brand-600 hover:border-brand-500 transition-all group"
                     >
                        <img src={user.avatarUrl} className="w-12 h-12 rounded-xl border-2 border-slate-800" />

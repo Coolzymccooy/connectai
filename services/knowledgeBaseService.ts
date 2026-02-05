@@ -1,7 +1,8 @@
 
 import { KbArticle, AiSuggestion } from '../types';
 
-const MOCK_KB: KbArticle[] = [
+// Initial Data for Bootstrapping the Vector DB
+export const INITIAL_KB_DATA: KbArticle[] = [
   {
     id: 'kb_1',
     title: 'Refund Policy (2025)',
@@ -44,36 +45,57 @@ const MOCK_KB: KbArticle[] = [
   }
 ];
 
-export const searchKnowledgeBase = async (query: string): Promise<AiSuggestion[]> => {
-  // Simulate network latency for realism
-  await new Promise(resolve => setTimeout(resolve, 400));
-
-  const lowerQuery = query.toLowerCase();
-  
-  // Simple keyword matching simulation (in real life, this would be vector embedding search)
-  const results = MOCK_KB.map(article => {
-    let score = 0;
+export const ingestInitialData = async () => {
+  try {
+    console.log('[RAG] Bootstrapping Vector Store...');
+    const documents = INITIAL_KB_DATA.map(doc => ({
+      id: doc.id,
+      content: `${doc.title}\n${doc.content}`,
+      metadata: { title: doc.title, tags: doc.tags, category: doc.category }
+    }));
     
-    // Exact tag match
-    article.tags.forEach(tag => {
-      if (lowerQuery.includes(tag)) score += 30;
+    await fetch('/api/rag/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ documents })
     });
+    console.log('[RAG] Ingestion Complete.');
+  } catch (err) {
+    console.error('[RAG] Ingestion Failed:', err);
+  }
+};
 
-    // Content match
-    if (article.content.toLowerCase().includes(lowerQuery)) score += 10;
+export const searchKnowledgeBase = async (query: string): Promise<AiSuggestion[]> => {
+  try {
+    const res = await fetch('/api/rag/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query })
+    });
     
-    return { article, score };
-  })
-  .filter(item => item.score > 0)
-  .sort((a, b) => b.score - a.score)
-  .slice(0, 3); // Top 3
-
-  return results.map(r => ({
-    id: r.article.id,
-    title: r.article.title,
-    content: r.article.content,
-    triggerPhrase: 'Relevant Topic',
-    type: r.article.category === 'script' ? 'script' : 'info',
-    confidence: Math.min(99, r.score * 2) // Fake confidence %
-  }));
+    if (!res.ok) throw new Error('RAG Query Failed');
+    
+    const data = await res.json();
+    
+    // Transform backend RAG response into UI Suggestion format
+    // data = { answer: string, sources: [] }
+    
+    return [{
+      id: `rag_${Date.now()}`,
+      title: 'AI Suggested Answer',
+      content: data.answer,
+      triggerPhrase: query,
+      type: 'script',
+      confidence: 95
+    }];
+  } catch (err) {
+    console.error(err);
+    return [{
+      id: 'err',
+      title: 'Search Unavailable',
+      content: 'Unable to query knowledge base.',
+      type: 'info',
+      confidence: 0
+    }];
+  }
 };
