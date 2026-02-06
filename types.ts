@@ -161,6 +161,9 @@ export interface AppSettings {
     paymentMethod: string;
   };
   ivr: IvrConfig;
+  voice: {
+    allowedNumbers: string[];
+  };
   bot: BotConfig;
   team: User[];
   workflows: WorkflowRule[];

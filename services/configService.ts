@@ -1,4 +1,5 @@
 import { QueueConfig, DispositionConfig } from '../types';
+import { apiGet } from './apiClient';
 
 // Mock Queues - In a real app, this comes from GET /api/queues
 const MOCK_QUEUES: QueueConfig[] = [
@@ -20,13 +21,19 @@ const MOCK_DISPOSITIONS: DispositionConfig[] = [
 ];
 
 export const fetchQueues = async (): Promise<QueueConfig[]> => {
-  // Simulate API call
-  await new Promise(resolve => setTimeout(resolve, 300));
-  return MOCK_QUEUES;
+  try {
+    const data = await apiGet('/queues');
+    return data || MOCK_QUEUES;
+  } catch {
+    return MOCK_QUEUES;
+  }
 };
 
 export const fetchDispositions = async (): Promise<DispositionConfig[]> => {
-  // Simulate API call
-  await new Promise(resolve => setTimeout(resolve, 300));
-  return MOCK_DISPOSITIONS;
+  try {
+    const data = await apiGet('/dispositions');
+    return data || MOCK_DISPOSITIONS;
+  } catch {
+    return MOCK_DISPOSITIONS;
+  }
 };

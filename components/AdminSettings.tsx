@@ -13,6 +13,8 @@ import { AppSettings, Role, Notification, User, WorkflowRule, MigrationProvider,
 import { VisualIvr } from './VisualIvr';
 import { startLegacyMigration } from '../services/migrationService';
 import { exportClusterData, downloadJson } from '../services/exportService';
+import { getIntegrationsStatus, startGoogleOAuth, startMicrosoftOAuth, connectCrmProvider, syncCrmProvider, connectMarketingProvider, syncMarketingProvider } from '../services/integrationService';
+import { saveSettingsApi } from '../services/settingsService';
 
 const PERSONA_TEMPLATES = [
   { name: 'Professional Concierge', prompt: 'Welcome to ConnectAI Corporate. Your call is vital to our cluster. For technical admitting, press 1. For account stewardship, press 2.' },
@@ -55,6 +57,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const [isIvrEditing, setIsIvrEditing] = useState(false);
   const [isScaling, setIsScaling] = useState(false);
   const [geminiConfigured, setGeminiConfigured] = useState(false);
+  const [integrationStatus, setIntegrationStatus] = useState<any>({ calendar: {}, crm: {}, marketing: {} });
 
   // Export Hub State
   const [isScanning, setIsScanning] = useState(false);
@@ -64,6 +67,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   // Form States
   const [newUser, setNewUser] = useState({ name: '', email: '', role: Role.AGENT });
   const [editIvr, setEditIvr] = useState<IvrConfig>(settings.ivr);
+  const [editAllowedNumbers, setEditAllowedNumbers] = useState(settings.voice.allowedNumbers.join('\n'));
   const [scalePlan, setScalePlan] = useState(settings.subscription.plan);
   const [scaleSeats, setScaleSeats] = useState(settings.subscription.seats);
 
@@ -80,6 +84,14 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     };
     checkHealth();
   }, []);
+
+  useEffect(() => {
+    getIntegrationsStatus().then(setIntegrationStatus).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    setEditAllowedNumbers(settings.voice.allowedNumbers.join('\n'));
+  }, [settings.voice.allowedNumbers]);
 
   const isDemoMode = useMemo(() => !geminiConfigured, [geminiConfigured]);
 
@@ -117,7 +129,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   };
 
   const handleSaveIvr = () => {
-    onUpdateSettings({ ...settings, ivr: editIvr });
+    const allowedNumbers = editAllowedNumbers
+      .split('\n')
+      .map(n => n.trim())
+      .filter(Boolean);
+    const nextSettings = { ...settings, ivr: editIvr, voice: { ...settings.voice, allowedNumbers } };
+    onUpdateSettings(nextSettings);
+    saveSettingsApi(nextSettings).catch(() => {});
     setIsIvrEditing(false);
     addNotification('success', 'Routing Architecture Deployed.');
   };
@@ -295,6 +313,73 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                   </div>
                 );
               })}
+
+              <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Calendar Sync</h4>
+                <div className="flex gap-4">
+                  <button
+                    onClick={async () => {
+                      try {
+                        const { url } = await startGoogleOAuth();
+                        if (url) window.open(url, '_blank', 'noopener,noreferrer');
+                      } catch {}
+                    }}
+                    className="px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                  >
+                    Connect Google
+                  </button>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const { url } = await startMicrosoftOAuth();
+                        if (url) window.open(url, '_blank', 'noopener,noreferrer');
+                      } catch {}
+                    }}
+                    className="px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                  >
+                    Connect Microsoft
+                  </button>
+                </div>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-4">
+                  Status: {integrationStatus?.calendar?.google ? 'Google Connected' : integrationStatus?.calendar?.microsoft ? 'Microsoft Connected' : 'Not Connected'}
+                </p>
+              </div>
+
+              <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">CRM Sync</h4>
+                <div className="flex gap-4 flex-wrap">
+                  {['hubspot', 'salesforce', 'pipedrive'].map((provider) => (
+                    <button
+                      key={provider}
+                      onClick={async () => {
+                        await connectCrmProvider(provider as any, { apiKey: 'REPLACE_ME' });
+                        await syncCrmProvider(provider as any);
+                      }}
+                      className="px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                    >
+                      Sync {provider}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Marketing Sync</h4>
+                <div className="flex gap-4 flex-wrap">
+                  {['hubspot', 'mailchimp', 'marketo'].map((provider) => (
+                    <button
+                      key={provider}
+                      onClick={async () => {
+                        await connectMarketingProvider(provider, { apiKey: 'REPLACE_ME' });
+                        await syncMarketingProvider(provider);
+                      }}
+                      className="px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                    >
+                      Sync {provider}
+                    </button>
+                  ))}
+                </div>
+              </div>
            </div>
         )}
 
@@ -330,22 +415,32 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                           onChange={e => setEditIvr({...editIvr, phoneNumber: e.target.value})}
                          />
                        </div>
-                       <div className="space-y-4">
-                         <div className="flex justify-between items-center">
-                            <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Sparkles size={14}/> Neural Atmosphere</label>
-                            <div className="flex gap-2">
-                               {PERSONA_TEMPLATES.map((p, i) => (
-                                 <button key={i} title={p.name} onClick={() => setEditIvr({...editIvr, welcomeMessage: p.prompt})} className="p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-brand-50 hover:border-brand-500 transition-all text-slate-400 hover:text-brand-600"><Wand2 size={14}/></button>
-                               ))}
-                            </div>
-                         </div>
-                         <textarea 
-                          className="w-full bg-slate-50 p-8 rounded-[2rem] border-2 border-slate-100 font-medium italic text-lg outline-none focus:border-brand-500 resize-none h-64 leading-relaxed shadow-inner"
-                          value={editIvr.welcomeMessage}
-                          onChange={e => setEditIvr({...editIvr, welcomeMessage: e.target.value})}
-                         />
+                     <div className="space-y-4">
+                       <div className="flex justify-between items-center">
+                          <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Sparkles size={14}/> Neural Atmosphere</label>
+                          <div className="flex gap-2">
+                             {PERSONA_TEMPLATES.map((p, i) => (
+                               <button key={i} title={p.name} onClick={() => setEditIvr({...editIvr, welcomeMessage: p.prompt})} className="p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-brand-50 hover:border-brand-500 transition-all text-slate-400 hover:text-brand-600"><Wand2 size={14}/></button>
+                             ))}
+                          </div>
                        </div>
+                       <textarea 
+                        className="w-full bg-slate-50 p-8 rounded-[2rem] border-2 border-slate-100 font-medium italic text-lg outline-none focus:border-brand-500 resize-none h-64 leading-relaxed shadow-inner"
+                        value={editIvr.welcomeMessage}
+                        onChange={e => setEditIvr({...editIvr, welcomeMessage: e.target.value})}
+                       />
                      </div>
+                     <div className="space-y-4">
+                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Phone size={14}/> Allowed Outbound Numbers</label>
+                       <textarea
+                         className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-medium text-sm outline-none focus:border-brand-500 resize-none h-48 leading-relaxed shadow-inner"
+                         placeholder="+14155551234&#10;+447700900123&#10;+2348012345678"
+                         value={editAllowedNumbers}
+                         onChange={e => setEditAllowedNumbers(e.target.value)}
+                       />
+                       <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">One E.164 number per line. Leave empty to allow all.</p>
+                     </div>
+                   </div>
                      <div className="space-y-8">
                         <div className="flex justify-between items-center"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Layers3 size={14}/> Logic Branches</label><button onClick={handleAddIvrOption} className="text-brand-600 font-black text-[10px] uppercase tracking-widest flex items-center gap-2 hover:underline transition-all"><Plus size={16}/> Add Core Branch</button></div>
                         <div className="space-y-4 overflow-y-auto max-h-[600px] pr-4 scrollbar-hide">

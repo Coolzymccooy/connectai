@@ -14,6 +14,8 @@ import { LiveCallService } from './services/liveCallService';
 import { auth, db, onAuthStateChanged, signInAnonymously, signOut, collection, query, where, onSnapshot } from './services/firebase';
 import * as dbService from './services/dbService';
 import { synthesizeSpeech } from './services/geminiService';
+import { fetchCalendarEvents, createCalendarEvent } from './services/calendarService';
+import { fetchCampaigns, createCampaign } from './services/campaignService';
 
 const DEFAULT_SETTINGS: AppSettings = {
   integrations: { hubSpot: { enabled: true, syncContacts: true, syncDeals: true, syncTasks: false, logs: [] }, webhooks: [], schemaMappings: [], pipedrive: false, salesforce: false },
@@ -24,6 +26,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     paymentMethod: 'Mastercard •••• 9921'
   },
   ivr: { phoneNumber: '+1 (555) 012-3456', welcomeMessage: 'Welcome to ConnectAI. For sales, press 1. For support, press 2.', options: [{ key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' }, { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' }] },
+  voice: { allowedNumbers: [] },
   bot: { enabled: true, name: 'ConnectBot', persona: 'You are a helpful customer service assistant for ConnectAI.', deflectionGoal: 35 },
   team: [
     { id: 'u_agent', name: 'Sarah Agent', role: Role.AGENT, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sarah', status: 'active', extension: '101', currentPresence: AgentStatus.AVAILABLE, email: 'sarah@connectai.io' },
@@ -62,7 +65,8 @@ const App: React.FC = () => {
   const [isFirebaseConfigured, setIsFirebaseConfigured] = useState(false);
 
   useEffect(() => {
-    setIsFirebaseConfigured((auth as any).config?.apiKey !== "SIMULATED_KEY");
+    const apiKey = (auth as any)?.app?.options?.apiKey;
+    setIsFirebaseConfigured(Boolean(apiKey) && apiKey !== "SIMULATED_KEY");
   }, []);
 
   // --- Real-Time Colleague Signaling Listener ---
@@ -91,10 +95,29 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!currentUser) return;
+    fetchCampaigns().then((serverCampaigns) => {
+      if (serverCampaigns && serverCampaigns.length > 0) {
+        setCampaigns(serverCampaigns);
+      }
+    }).catch(() => {});
+    fetchCalendarEvents().then(setMeetings).catch(() => {});
     if (isFirebaseConfigured) {
-      const unsubCalls = dbService.fetchHistoricalCalls((calls) => setCallHistory(calls));
-      const unsubLeads = dbService.fetchLeads((leads) => setLeads(leads));
-      dbService.fetchSettings().then(saved => saved && setAppSettings(saved));
+      const handleFirebaseError = (error: Error) => {
+        console.warn('Firestore snapshot error, disabling Firebase:', error);
+        setIsFirebaseConfigured(false);
+        addNotification('info', 'Firestore permissions missing. Running in demo mode.');
+      };
+      const unsubCalls = dbService.fetchHistoricalCalls((calls) => setCallHistory(calls), handleFirebaseError);
+      const unsubLeads = dbService.fetchLeads((leads) => setLeads(leads), handleFirebaseError);
+      dbService.fetchSettings().then(saved => {
+        if (!saved) return;
+        const merged = {
+          ...DEFAULT_SETTINGS,
+          ...saved,
+          voice: { ...DEFAULT_SETTINGS.voice, ...(saved as any).voice },
+        };
+        setAppSettings(merged);
+      });
       return () => { unsubCalls(); unsubLeads(); };
     }
   }, [currentUser, isFirebaseConfigured]);
@@ -305,8 +328,32 @@ const App: React.FC = () => {
      addNotification('success', `Session for ${finalCall.customerName} archived to cluster.`);
   };
 
+  const handleUpdateCampaigns = (nextCampaigns: Campaign[]) => {
+    setCampaigns(nextCampaigns);
+    const newest = nextCampaigns[0];
+    if (newest) {
+      createCampaign(newest).catch(() => {});
+    }
+  };
+
+  const handleUpdateMeetings = (nextMeetings: Meeting[]) => {
+    setMeetings(nextMeetings);
+    const newest = nextMeetings[0];
+    if (newest) {
+      createCalendarEvent(newest).catch(() => {});
+    }
+  };
+
   const handleLogin = async (role: Role) => {
-    if (isFirebaseConfigured) await signInAnonymously(auth);
+    if (isFirebaseConfigured) {
+      try {
+        await signInAnonymously(auth);
+      } catch (err) {
+        console.warn('Anonymous sign-in failed, continuing in demo mode:', err);
+        setIsFirebaseConfigured(false);
+        addNotification('info', 'Firebase disabled (auth configuration not ready). Running in demo mode.');
+      }
+    }
     const user = appSettings.team.find(u => u.role === role) || { id: `u_${role.toLowerCase()}`, name: `${role.charAt(0) + role.slice(1).toLowerCase()} User`, role, avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${role}`, status: 'active' as const, email: `${role.toLowerCase()}@connectai.io` };
     setCurrentUser(user);
     setView(role === Role.SUPERVISOR ? 'supervisor' : role === Role.ADMIN ? 'admin' : 'agent');
@@ -351,10 +398,20 @@ const App: React.FC = () => {
             />
           ) : (
             <>
-              {view === 'agent' && <div className="p-8 h-full"><AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={setCampaigns} meetings={meetings} onUpdateMeetings={setMeetings} user={currentUser} onAddParticipant={addParticipantToCall} /></div>}
+              {view === 'agent' && (
+                <div className="p-8 h-full">
+                  <div className="h-full flex gap-8">
+                    <div className="flex-1 min-w-0">
+                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} />
+                    </div>
+                    <div className="shrink-0">
+                      <Softphone userExtension={currentUser?.extension} allowedNumbers={appSettings.voice.allowedNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} />
+                    </div>
+                  </div>
+                </div>
+              )}
               {view === 'supervisor' && <div className="p-8 h-full"><SupervisorDashboard calls={callHistory} team={appSettings.team} addNotification={addNotification} activeCall={activeCall} /></div>}
               {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} />}
-              <Softphone activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} />
             </>
           )}
         </main>
@@ -388,3 +445,5 @@ const App: React.FC = () => {
     </div>
   );
 };
+
+export default App;

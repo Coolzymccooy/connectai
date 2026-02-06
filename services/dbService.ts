@@ -22,11 +22,14 @@ export const saveCall = async (call: Call) => {
   }
 };
 
-export const fetchHistoricalCalls = (callback: (calls: Call[]) => void) => {
+export const fetchHistoricalCalls = (callback: (calls: Call[]) => void, onError?: (error: Error) => void) => {
   const q = query(collection(db, CALLS_COLLECTION), orderBy('startTime', 'desc'), limit(100));
   return onSnapshot(q, (snapshot) => {
     const calls = snapshot.docs.map(doc => doc.data() as Call);
     callback(calls);
+  }, (error) => {
+    if (onError) onError(error as Error);
+    else console.warn('fetchHistoricalCalls snapshot error:', error);
   });
 };
 
@@ -51,11 +54,14 @@ export const syncLead = async (lead: Lead) => {
   await setDoc(leadRef, lead, { merge: true });
 };
 
-export const fetchLeads = (callback: (leads: Lead[]) => void) => {
+export const fetchLeads = (callback: (leads: Lead[]) => void, onError?: (error: Error) => void) => {
   const q = query(collection(db, LEADS_COLLECTION));
   return onSnapshot(q, (snapshot) => {
     const leads = snapshot.docs.map(doc => doc.data() as Lead);
     callback(leads);
+  }, (error) => {
+    if (onError) onError(error as Error);
+    else console.warn('fetchLeads snapshot error:', error);
   });
 };
 
