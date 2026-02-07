@@ -1,4 +1,4 @@
-
+﻿
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { LayoutDashboard, Phone, Settings, LogOut, Sparkles, Mic, PlayCircle, Bot, Shield, MessageSquare, Bell, X, CheckCircle, Info, AlertTriangle, Trash2, Mail, PhoneIncoming } from 'lucide-react';
 import { Role, User, Call, CallStatus, AgentStatus, AppSettings, Notification, Lead, Campaign, Meeting, CallDirection } from './types';
@@ -24,7 +24,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   subscription: { 
     plan: 'Growth', seats: 20, balance: 420.50, autoTopUp: true, nextBillingDate: 'Nov 01, 2025',
     usage: { aiTokens: 450000, aiTokenLimit: 1000000, voiceMinutes: 1250, voiceMinuteLimit: 5000 },
-    paymentMethod: 'Mastercard •••• 9921'
+    paymentMethod: 'Mastercard â€¢â€¢â€¢â€¢ 9921'
   },
   ivr: { phoneNumber: '+1 (555) 012-3456', welcomeMessage: 'Welcome to ConnectAI. For sales, press 1. For support, press 2.', options: [{ key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' }, { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' }] },
   voice: { allowedNumbers: [] },
@@ -414,13 +414,11 @@ const App: React.FC = () => {
             <>
               {view === 'agent' && (
                 <div className="p-8 h-full">
-                  <div className="h-full flex gap-8">
-                    <div className="flex-1 min-w-0">
+                  <div className="h-full relative">
+                    <div className="h-full">
                       <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} isFirebaseConfigured={isFirebaseConfigured} />
                     </div>
-                    <div className="shrink-0">
-                      <Softphone userExtension={currentUser?.extension} allowedNumbers={appSettings.voice.allowedNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} />
-                    </div>
+                    <Softphone userExtension={currentUser?.extension} allowedNumbers={appSettings.voice.allowedNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating />
                   </div>
                 </div>
               )}
@@ -461,3 +459,4 @@ const App: React.FC = () => {
 };
 
 export default App;
+

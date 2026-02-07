@@ -1,7 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Phone, PhoneOff, Mic, MicOff, Volume2, User, Delete } from 'lucide-react';
+﻿import React, { useState, useEffect, useRef } from 'react';
+import { Phone, PhoneOff, Mic, MicOff, Volume2, User, Delete, Minimize2, Maximize2, GripHorizontal, History } from 'lucide-react';
 import { Device, Call as TwilioCall } from '@twilio/voice-sdk';
 import type { AgentStatus, Call as AppCall, Lead, User as TeamUser } from '../types';
+
+type DialHistoryItem = {
+  id: string;
+  number: string;
+  direction: 'incoming' | 'outgoing';
+  status: 'dialing' | 'ringing' | 'connected' | 'ended' | 'missed' | 'failed';
+  startedAt: number;
+  durationSeconds?: number;
+};
 
 interface SoftphoneProps {
   userExtension?: string;
@@ -21,9 +30,10 @@ interface SoftphoneProps {
   onManualDial?: (target: Lead | string) => void;
   onTestTts?: () => void;
   onOpenFreeCall?: () => void;
+  floating?: boolean;
 }
 
-export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumbers = [] }) => {
+export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = true }) => {
   const [number, setNumber] = useState('');
   const [status, setStatus] = useState<'idle' | 'dialing' | 'connected' | 'incoming'>('idle');
   const [isMuted, setIsMuted] = useState(false);
@@ -35,6 +45,11 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
   const [clientError, setClientError] = useState<string | null>(null);
   const deviceRef = useRef<Device | null>(null);
   const identity = userExtension || 'agent';
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [position, setPosition] = useState({ x: 0, y: 120 });
+  const dragRef = useRef<{ active: boolean; startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const [history, setHistory] = useState<DialHistoryItem[]>([]);
+  const activeHistoryIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,8 +107,23 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
         nextDevice.on('incoming', (incomingCall) => {
           setCall(incomingCall);
           setStatus('incoming');
+          const incomingNumber = incomingCall?.parameters?.From || 'Unknown';
+          const historyId = `in_${Date.now()}`;
+          activeHistoryIdRef.current = historyId;
+          setHistory(prev => [{
+            id: historyId,
+            number: incomingNumber,
+            direction: 'incoming',
+            status: 'ringing',
+            startedAt: Date.now()
+          }, ...prev].slice(0, 25));
           incomingCall.on('accept', () => {
             setStatus('connected');
+            if (activeHistoryIdRef.current) {
+              setHistory(prev => prev.map(entry => entry.id === activeHistoryIdRef.current
+                ? { ...entry, status: 'connected', startedAt: Date.now() }
+                : entry));
+            }
             if (timerRef.current) window.clearInterval(timerRef.current);
             timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
           });
@@ -121,6 +151,41 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
       }
     };
   }, [identity]);
+
+  useEffect(() => {
+    if (!floating) return;
+    const setInitialPosition = () => {
+      const width = isMinimized ? 180 : 320;
+      const height = isMinimized ? 72 : 620;
+      const x = Math.max(16, window.innerWidth - width - 32);
+      const y = Math.max(80, Math.min(140, window.innerHeight - height - 32));
+      setPosition({ x, y });
+    };
+    setInitialPosition();
+  }, [floating]);
+
+  useEffect(() => {
+    if (!floating) return;
+    const onMove = (event: PointerEvent) => {
+      if (!dragRef.current?.active) return;
+      const deltaX = event.clientX - dragRef.current.startX;
+      const deltaY = event.clientY - dragRef.current.startY;
+      const panelWidth = isMinimized ? 180 : 320;
+      const panelHeight = isMinimized ? 72 : 620;
+      const nextX = Math.min(Math.max(8, dragRef.current.originX + deltaX), window.innerWidth - panelWidth - 8);
+      const nextY = Math.min(Math.max(8, dragRef.current.originY + deltaY), window.innerHeight - panelHeight - 8);
+      setPosition({ x: nextX, y: nextY });
+    };
+    const onUp = () => {
+      if (dragRef.current) dragRef.current.active = false;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, [floating, isMinimized]);
 
   const normalizeNumber = (value: string) => {
     const trimmed = value.trim();
@@ -150,20 +215,25 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
     const normalized = normalizeNumber(number);
     if (!normalized) return;
 
-    if (allowedNumbers.length > 0) {
-      const allowed = allowedNumbers.map(n => normalizeNumber(n));
-      if (!allowed.includes(normalized)) {
-        alert('This number is not in the allowed list.');
-        setStatus('idle');
-        return;
-      }
-    }
-
     try {
+      const historyId = `out_${Date.now()}`;
+      activeHistoryIdRef.current = historyId;
+      setHistory(prev => [{
+        id: historyId,
+        number: normalized,
+        direction: 'outgoing',
+        status: 'dialing',
+        startedAt: Date.now()
+      }, ...prev].slice(0, 25));
       const newCall = await device.connect({ params: { To: normalized } });
       setCall(newCall);
       newCall.on('accept', () => {
         setStatus('connected');
+        if (activeHistoryIdRef.current) {
+          setHistory(prev => prev.map(entry => entry.id === activeHistoryIdRef.current
+            ? { ...entry, status: 'connected', startedAt: Date.now() }
+            : entry));
+        }
         if (timerRef.current) window.clearInterval(timerRef.current);
         timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
       });
@@ -172,6 +242,11 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
       newCall.on('reject', handleHangup);
     } catch (err) {
       console.error('Twilio call failed:', err);
+      if (activeHistoryIdRef.current) {
+        setHistory(prev => prev.map(entry => entry.id === activeHistoryIdRef.current
+          ? { ...entry, status: 'failed', durationSeconds: 0 }
+          : entry));
+      }
       setStatus('idle');
     }
   };
@@ -189,6 +264,16 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
     }
     setCall(null);
     device?.disconnectAll();
+    if (activeHistoryIdRef.current) {
+      const endedAt = Date.now();
+      setHistory(prev => prev.map(entry => {
+        if (entry.id !== activeHistoryIdRef.current) return entry;
+        const durationSeconds = Math.max(0, Math.floor((endedAt - entry.startedAt) / 1000));
+        const nextStatus = entry.status === 'connected' ? 'ended' : (entry.direction === 'incoming' ? 'missed' : 'failed');
+        return { ...entry, status: nextStatus, durationSeconds };
+      }));
+      activeHistoryIdRef.current = null;
+    }
   };
 
   const formatTime = (seconds: number) => {
@@ -197,10 +282,88 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
     return `${m}:${s.toString().padStart(2, '0')}`;
   };
 
+  const renderHistory = () => (
+    <div className="w-full mt-6">
+      <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.3em] text-slate-500 mb-3">
+        <span className="flex items-center gap-2"><History size={12}/> Recent Calls</span>
+        <span>{history.length}</span>
+      </div>
+      <div className="space-y-2 max-h-36 overflow-auto pr-1">
+        {history.slice(0, 6).map(entry => (
+          <div key={entry.id} className="flex items-center justify-between bg-white/5 rounded-xl px-3 py-2">
+            <div className="flex flex-col">
+              <span className="text-xs text-white font-semibold">{entry.number}</span>
+              <span className="text-[9px] uppercase tracking-widest text-slate-500">
+                {entry.direction} • {entry.status}
+              </span>
+            </div>
+            <span className="text-[10px] text-slate-400">
+              {entry.durationSeconds ? formatTime(entry.durationSeconds) : '--:--'}
+            </span>
+          </div>
+        ))}
+        {history.length === 0 && (
+          <div className="text-[10px] text-slate-500 text-center py-4">No calls yet.</div>
+        )}
+      </div>
+    </div>
+  );
+
+  const handleDragStart = (event: React.PointerEvent<HTMLButtonElement | HTMLDivElement>) => {
+    if (!floating) return;
+    dragRef.current = {
+      active: true,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: position.x,
+      originY: position.y
+    };
+  };
+
+  if (floating && isMinimized) {
+    return (
+      <div
+        className="fixed z-[80] bg-slate-900/95 border border-white/10 shadow-2xl rounded-2xl px-4 py-3 flex items-center gap-3"
+        style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)` }}
+      >
+        <button onPointerDown={handleDragStart} className="text-slate-400 hover:text-white">
+          <GripHorizontal size={16}/>
+        </button>
+        <div className="flex flex-col">
+          <span className="text-xs text-white font-semibold">Softphone</span>
+          <span className="text-[10px] uppercase tracking-widest text-slate-500">{clientStatus}</span>
+        </div>
+        <button
+          onClick={() => setIsMinimized(false)}
+          className="ml-2 p-2 rounded-xl bg-white/10 text-white hover:bg-white/20"
+          title="Restore"
+        >
+          <Maximize2 size={14}/>
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="w-[320px] bg-slate-900 rounded-[3rem] p-8 shadow-2xl border border-white/10 flex flex-col items-center relative overflow-hidden">
+    <div
+      className={`${floating ? 'fixed z-[70]' : 'relative'} w-[320px] bg-slate-900 rounded-[3rem] p-8 shadow-2xl border border-white/10 flex flex-col items-center overflow-hidden`}
+      style={floating ? { transform: `translate3d(${position.x}px, ${position.y}px, 0)` } : undefined}
+    >
       {/* Dynamic Island / Status */}
       <div className="absolute top-0 left-0 w-full h-32 bg-gradient-to-b from-black/50 to-transparent pointer-events-none"></div>
+
+      <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-20">
+        <button onPointerDown={handleDragStart} className="text-slate-400 hover:text-white">
+          <GripHorizontal size={18}/>
+        </button>
+        <button
+          onClick={() => setIsMinimized(true)}
+          className="p-2 rounded-xl bg-white/5 text-slate-300 hover:bg-white/10"
+          title="Minimize"
+        >
+          <Minimize2 size={14}/>
+        </button>
+      </div>
 
       <div className="mb-8 w-full text-center relative z-10">
          <div className="flex justify-center mb-4">
@@ -218,7 +381,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
            />
          )}
          <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">{status === 'idle' ? 'Ready to Admit' : status.toUpperCase()}</p>
-         <p className="text-[9px] uppercase tracking-widest text-slate-600 mt-2">{clientStatus} � {identity}</p>
+         <p className="text-[9px] uppercase tracking-widest text-slate-600 mt-2">{clientStatus} • {identity}</p>
          {clientError && (
            <div className="mt-1 flex items-center justify-center gap-2">
              <p className="text-[9px] text-red-400">{clientError}</p>
@@ -261,7 +424,8 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
              const nextMuted = !isMuted;
              setIsMuted(nextMuted);
              call?.mute(nextMuted);
-           }} className={`p-6 rounded-[2rem] transition-all ${isMuted ? 'bg-white text-slate-900' : 'bg-slate-800 text-white'}`}>
+           }} className={`p-6 rounded-[2rem] transition-all ${isMuted ? 'bg-white text-slate-900' : 'bg-slate-800 text-white'}`}
+           >
              {isMuted ? <MicOff size={24}/> : <Mic size={24}/>}
            </button>
          )}
@@ -287,6 +451,8 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, allowedNumb
             </button>
          )}
       </div>
+
+      {renderHistory()}
     </div>
   );
 };
