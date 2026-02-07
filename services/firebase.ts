@@ -14,9 +14,16 @@ import {
   addDoc,
   where,
   getDocs,
-  deleteDoc
+  deleteDoc,
+  setLogLevel
 } from "firebase/firestore";
 import { getAuth, onAuthStateChanged, signInAnonymously, signOut } from "firebase/auth";
+
+const FIREBASE_DISABLED = (import.meta.env as any).VITE_FIREBASE_DISABLED === 'true';
+const FIREBASE_SILENT = (import.meta.env as any).VITE_FIREBASE_SILENT === 'true';
+if (FIREBASE_DISABLED || FIREBASE_SILENT) {
+  setLogLevel('silent');
+}
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,

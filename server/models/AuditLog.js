@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 
 const AuditLogSchema = new mongoose.Schema({
+  tenantId: { type: String, index: true, required: true },
   timestamp: { type: Date, default: Date.now },
   actorId: String,
   actorName: String,

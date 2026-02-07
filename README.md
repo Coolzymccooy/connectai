@@ -2,11 +2,15 @@
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
-# Run and deploy your AI Studio app
+# ConnectAI End-to-End Guide
 
-This contains everything you need to run your app locally.
+This README documents how to run, configure, and deploy the ConnectAI app end-to-end.
 
-View your app in AI Studio: https://ai.studio/apps/drive/1UwMWtsoL6InToOzYaMxz5_rbnXg7Cwhe
+## Architecture Overview
+- **Frontend:** Vite + React (Agent Console, Softphone, Wrap-up, Campaigns, Inbox, Video)
+- **Backend:** Express (Twilio Voice, AI endpoints, campaigns, dispositions, recordings, reports)
+- **Data:** MongoDB in production (JSON fallback in dev)
+- **AI:** Gemini (summaries, QA analysis, draft replies, TTS)
 
 ## Run Locally
 
@@ -15,10 +19,123 @@ View your app in AI Studio: https://ai.studio/apps/drive/1UwMWtsoL6InToOzYaMxz5_
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set the `GEMINI_API_KEY` in [.env.local](.env.local)
 3. Start the backend + frontend together:
    `npm run dev:all`
 
    Or run them separately:
    - Backend: `npm run dev:server`
    - Frontend: `npm run dev`
+
+## Core Flows
+### 1) Inbound Voice Call (Twilio → App → Agent)
+1. Twilio sends webhook to `/twilio/voice/incoming`
+2. Server routes to available agent **extension** (e.g., `101`)
+3. If no answer, server retries next agent
+4. Call state + metrics are persisted
+
+### 2) Outbound Call (Agent → Twilio)
+1. Agent dials a number
+2. Twilio webhook `/twilio/voice` handles call
+3. Call state persisted + recordings stored
+
+### 3) Wrap-Up Cluster
+- QA Admission → stored as `qaEvaluation`
+- Disposition Link → stored in call analysis
+- CRM Sync → stored in call `crmData`
+- Follow-up meeting → stored in Calendar events
+
+### 4) AI Jobs (Background)
+- Transcription → Summary → Report (queued jobs every 30 seconds)
+- Job status can be checked via `/api/jobs`
+
+## Twilio Webhook URLs
+**Production default:**
+```
+POST https://YOUR_PUBLIC_URL/twilio/voice/incoming
+```
+
+**Force routing to a single client (testing only):**
+```
+POST https://YOUR_PUBLIC_URL/twilio/voice/incoming?identity=agent
+```
+
+Remove `identity=` for production routing across multiple agents.
+
+## Backend Environment Variables (Render)
+**Required**
+- `PUBLIC_URL` (Render URL)
+- `TWILIO_AUTH_TOKEN` (webhook verification)
+- `AUTH_MODE` (`strict`)
+- `AUTH_JWT_SECRET` (JWT validation)
+- `DEFAULT_TENANT_ID`
+- `MONGO_URI`
+- `TWILIO_ACCOUNT_SID`
+- `TWILIO_API_KEY`
+- `TWILIO_API_SECRET`
+- `TWILIO_TWIML_APP_SID`
+- `TWILIO_CALLER_ID`
+- `GEMINI_API_KEY`
+- `RECORDINGS_SIGNING_SECRET`
+
+**Optional**
+- `RECORDING_RETENTION_DAYS`
+- `CLIENT_URL` (CORS allowlist)
+
+## Frontend Environment Variables (Vercel / Local)
+Set these in Vercel or `.env.local`:
+- `VITE_FIREBASE_API_KEY`
+- `VITE_FIREBASE_AUTH_DOMAIN`
+- `VITE_FIREBASE_PROJECT_ID`
+- `VITE_FIREBASE_STORAGE_BUCKET`
+- `VITE_FIREBASE_MESSAGING_SENDER_ID`
+- `VITE_FIREBASE_APP_ID`
+- `VITE_FIREBASE_MEASUREMENT_ID` (optional)
+- `VITE_FIREBASE_DISABLED` (optional)
+- `VITE_FIREBASE_SILENT` (optional)
+
+## Auth (JWT) Setup
+This backend expects a JWT in the header:
+```
+Authorization: Bearer <JWT>
+```
+JWT payload must include:
+```
+{
+  "sub": "user-id",
+  "email": "user@domain.com",
+  "role": "ADMIN",
+  "tenantId": "tenant-1"
+}
+```
+
+## Rate Limits
+- `/twilio/*`: 120 req/min
+- `/api/gemini/*` and `/api/rag/*`: 60 req/min
+
+## Metrics
+- `GET /api/metrics/calls` (Admin/Supervisor)
+
+## Jobs
+- `GET /api/jobs`
+- `POST /api/jobs`
+
+## Deployment (Vercel + Render)
+### Backend (Render)
+1. Build: `npm install`
+2. Start: `node server/index.js`
+3. Add env vars listed above
+
+### Frontend (Vercel)
+1. Build: `npm run build`
+2. Output: `dist`
+3. Set env vars listed above
+4. `vercel.json` rewrites `/api/*` and `/twilio/*` to backend
+
+## Beta Testing Checklist
+- `TWILIO_AUTH_TOKEN` set and verified
+- `PUBLIC_URL` correct
+- MongoDB connected
+- `AUTH_MODE=strict` enabled
+- JWTs being issued and attached by frontend
+- Twilio spend limits set

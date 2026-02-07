@@ -14,6 +14,8 @@ import twilio from 'twilio';
 import { authenticate, authorize, UserRole } from './rbacMiddleware.js';
 import { globalQueue } from './services/queueManager.js';
 import { startDialer } from './services/dialerEngine.js';
+import { AuditLog } from './models/AuditLog.js';
+import { User, Call, Campaign, Disposition, Recording, Setting, Conversation, Message, Tenant, Job } from './models/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,6 +30,7 @@ if (process.env.MONGO_URI) {
 }
 
 const app = express();
+app.set('trust proxy', 1);
 
 // --- GLOBAL SECURITY & PERFORMANCE ---
 app.use(helmet()); // Secure HTTP headers
@@ -47,8 +50,272 @@ const limiter = rateLimit({
 });
 app.use('/api/', limiter);
 
+const twilioLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+const aiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use('/twilio', twilioLimiter);
+app.use('/api/gemini', aiLimiter);
+app.use('/api/rag', aiLimiter);
+
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: '2mb' }));
+
+const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || 'default-tenant';
+const isMongoReady = () => mongoose.connection.readyState === 1;
+
+const getTenantId = (req) => {
+  const headerTenant = req.headers['x-tenant-id'];
+  return req.user?.tenantId || (headerTenant ? headerTenant.toString() : DEFAULT_TENANT_ID);
+};
+
+const log = (level, message, meta = {}) => {
+  const entry = { level, message, time: new Date().toISOString(), ...meta };
+  console.log(JSON.stringify(entry));
+};
+
+const toPublic = (doc) => {
+  if (!doc) return doc;
+  const obj = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+  const id = obj.externalId || obj.id || obj._id;
+  const cleaned = { ...obj, id };
+  delete cleaned._id;
+  delete cleaned.__v;
+  return cleaned;
+};
+
+const CALL_TRANSITIONS = {
+  DIALING: ['RINGING', 'ENDED'],
+  RINGING: ['ACTIVE', 'ENDED'],
+  ACTIVE: ['HOLD', 'ENDED'],
+  HOLD: ['ACTIVE', 'ENDED'],
+  ENDED: [],
+};
+
+const isValidCallTransition = (fromStatus, toStatus) => {
+  if (!fromStatus || fromStatus === toStatus) return true;
+  const allowed = CALL_TRANSITIONS[fromStatus] || [];
+  return allowed.includes(toStatus);
+};
+
+const writeAuditLog = async (req, action, target, metadata = {}) => {
+  if (!isMongoReady()) return;
+  try {
+    await AuditLog.create({
+      tenantId: req.tenantId,
+      actorId: req.user?.uid || 'system',
+      actorName: req.user?.name || req.user?.email || 'system',
+      action,
+      target,
+      metadata,
+    });
+  } catch {
+    // ignore audit failures
+  }
+};
+
+const getIntegrationsStore = (tenantId) => {
+  const found = stores.integrationsByTenant.find((i) => i.tenantId === tenantId);
+  if (found) return found;
+  const created = { tenantId, data: { calendar: {}, crm: {}, marketing: {} } };
+  stores.integrationsByTenant.push(created);
+  return created;
+};
+
+const saveIntegrationsStore = async () => {
+  await saveStore('integrations', stores.integrationsByTenant);
+};
+
+const metricsByTenant = new Map();
+const getMetrics = (tenantId) => {
+  if (!metricsByTenant.has(tenantId)) {
+    metricsByTenant.set(tenantId, {
+      inboundTotal: 0,
+      outboundTotal: 0,
+      routed: 0,
+      failed: 0,
+      retries: 0,
+      lastRouteAt: null,
+    });
+  }
+  return metricsByTenant.get(tenantId);
+};
+
+const getSettingsForTenant = async (tenantId) => {
+  if (isMongoReady()) {
+    const doc = await Setting.findOne({ tenantId }).lean();
+    return doc?.data || defaultSettings;
+  }
+  const stored = stores.settingsByTenant.find(s => s.tenantId === tenantId);
+  return stored?.data || defaultSettings;
+};
+
+const callRouteState = new Map();
+const buildRouteTargets = (settings, fallbackIdentity = 'agent') => {
+  const team = Array.isArray(settings?.team) ? settings.team : [];
+  const available = team.filter(t => t.currentPresence === 'AVAILABLE' || t.status === 'active');
+  const targets = (available.length ? available : team)
+    .map(t => t.extension || t.id || t.email)
+    .filter(Boolean);
+  if (targets.length === 0) return [fallbackIdentity];
+  return targets;
+};
+
+const buildDialTwiml = (identity, actionUrl) => `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial action="${actionUrl}" method="POST" timeout="20">
+    <Client>${identity}</Client>
+  </Dial>
+</Response>`;
+
+const getBaseUrl = (req) => process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+
+const enqueueJob = async (tenantId, type, payload = {}) => {
+  const job = {
+    tenantId,
+    type,
+    status: 'pending',
+    payload,
+    attempts: 0,
+    nextRunAt: Date.now(),
+  };
+  if (isMongoReady()) {
+    const created = await Job.create(job);
+    return toPublic(created);
+  }
+  const stored = { id: crypto.randomUUID(), ...job };
+  stores.jobs = upsertById(stores.jobs, stored);
+  await saveStore('jobs', stores.jobs);
+  return stored;
+};
+
+const updateJob = async (jobId, updates) => {
+  if (isMongoReady()) {
+    const updated = await Job.findByIdAndUpdate(jobId, updates, { new: true });
+    return updated ? toPublic(updated) : null;
+  }
+  const existing = stores.jobs.find(j => j.id === jobId);
+  if (!existing) return null;
+  const stored = { ...existing, ...updates };
+  stores.jobs = upsertById(stores.jobs, stored);
+  await saveStore('jobs', stores.jobs);
+  return stored;
+};
+
+const fetchPendingJobs = async (limit = 5) => {
+  const now = Date.now();
+  if (isMongoReady()) {
+    const jobs = await Job.find({ status: 'pending', nextRunAt: { $lte: now } })
+      .sort({ nextRunAt: 1 })
+      .limit(limit)
+      .lean();
+    return jobs.map(toPublic);
+  }
+  return stores.jobs.filter(j => j.status === 'pending' && j.nextRunAt <= now).slice(0, limit);
+};
+
+const getCallForJob = async (tenantId, callId) => {
+  if (isMongoReady()) {
+    const byExternal = await Call.findOne({ tenantId, externalId: callId }).lean();
+    if (byExternal) return byExternal;
+    const byId = await Call.findById(callId).lean();
+    return byId;
+  }
+  return stores.calls.find(c => c.tenantId === tenantId && c.id === callId);
+};
+
+const processJobs = async () => {
+  const jobs = await fetchPendingJobs(5);
+  for (const job of jobs) {
+    const jobId = job.id;
+    await updateJob(jobId, { status: 'running', attempts: (job.attempts || 0) + 1 });
+    try {
+      if (job.type === 'transcription') {
+        await updateJob(jobId, { status: 'completed', result: { ok: true, note: 'Transcript already provided.' } });
+        continue;
+      }
+      if (job.type === 'summary') {
+        const call = await getCallForJob(job.tenantId, job.payload?.callId);
+        if (!call) throw new Error('Call not found');
+        if (!GEMINI_API_KEY) throw new Error('Gemini not configured');
+        const ai = getClient();
+        const text = (call.transcript || []).map((t) => `${t.speaker}: ${t.text}`).join('\n');
+        const prompt = `Provide a concise call summary and action items.\nTranscript:\n${text}`;
+        const response = await ai.models.generateContent({ model: TEXT_MODEL, contents: prompt });
+        const summary = response.text || 'Summary unavailable.';
+        if (isMongoReady()) {
+          await Call.findOneAndUpdate(
+            { tenantId: job.tenantId, externalId: call.externalId || call.id },
+            { analysis: { ...(call.analysis || {}), summary } }
+          );
+        } else {
+          stores.calls = stores.calls.map(c => c.id === call.id ? { ...c, analysis: { ...(c.analysis || {}), summary } } : c);
+          await saveStore('calls', stores.calls);
+        }
+        await updateJob(jobId, { status: 'completed', result: { summary } });
+        continue;
+      }
+      if (job.type === 'report') {
+        const tenantId = job.tenantId;
+        const totalCalls = isMongoReady()
+          ? await Call.countDocuments({ tenantId })
+          : stores.calls.filter(c => c.tenantId === tenantId).length;
+        const totalRecordings = isMongoReady()
+          ? await Recording.countDocuments({ tenantId })
+          : stores.recordings.filter(r => r.tenantId === tenantId).length;
+        const totalCampaigns = isMongoReady()
+          ? await Campaign.countDocuments({ tenantId })
+          : stores.campaigns.filter(c => c.tenantId === tenantId).length;
+        await updateJob(jobId, { status: 'completed', result: { totalCalls, totalRecordings, totalCampaigns } });
+        continue;
+      }
+      await updateJob(jobId, { status: 'completed', result: { ok: true } });
+    } catch (err) {
+      const attempts = (job.attempts || 0) + 1;
+      const retry = attempts < 3;
+      await updateJob(jobId, {
+        status: retry ? 'pending' : 'failed',
+        error: err?.message || 'job failed',
+        nextRunAt: Date.now() + (retry ? 60_000 : 0),
+      });
+    }
+  }
+};
+
+setInterval(() => {
+  processJobs().catch(() => {});
+}, 30_000);
+
+app.use((req, res, next) => {
+  req.requestId = crypto.randomUUID();
+  res.setHeader('x-request-id', req.requestId);
+  next();
+});
+
+app.use((req, res, next) => {
+  res.on('finish', () => {
+    log('info', 'request.completed', {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.originalUrl,
+      status: res.statusCode,
+    });
+  });
+  next();
+});
+
+app.use((req, res, next) => {
+  req.tenantId = getTenantId(req);
+  next();
+});
 
 // --- PROTECTED ROUTES ---
 
@@ -66,7 +333,7 @@ app.get('/api/supervisor/stats', authenticate, authorize([UserRole.ADMIN, UserRo
 
 // --- VECTOR STORE (In-Memory MVP) ---
 // In production, swap this Map for Pinecone/Weaviate
-let VECTOR_DB = []; 
+const VECTOR_DB_BY_TENANT = new Map();
 
 // --- SIMPLE JSON STORE (MVP persistence) ---
 const dataDir = path.join(__dirname, 'data');
@@ -96,16 +363,31 @@ const saveStore = async (name, data) => {
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
 };
 
+const normalizeTenantArray = (items) => {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => item.tenantId ? item : { ...item, tenantId: DEFAULT_TENANT_ID });
+};
+
+const normalizeSettingsStore = (raw) => {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map((item) => item.tenantId ? item : { ...item, tenantId: DEFAULT_TENANT_ID });
+  return [{ tenantId: DEFAULT_TENANT_ID, data: raw }];
+};
+
 const stores = {
-  campaigns: await loadStore('campaigns', []),
-  dispositions: await loadStore('dispositions', []),
-  recordings: await loadStore('recordings', []),
-  calendarEvents: await loadStore('calendarEvents', []),
-  crmContacts: await loadStore('crmContacts', []),
-  crmTasks: await loadStore('crmTasks', []),
-  marketingCampaigns: await loadStore('marketingCampaigns', []),
-  integrations: await loadStore('integrations', { calendar: {}, crm: {}, marketing: {} }),
-  settings: await loadStore('settings', null),
+  calls: normalizeTenantArray(await loadStore('calls', [])),
+  tenants: await loadStore('tenants', []),
+  campaigns: normalizeTenantArray(await loadStore('campaigns', [])),
+  dispositions: normalizeTenantArray(await loadStore('dispositions', [])),
+  recordings: normalizeTenantArray(await loadStore('recordings', [])),
+  calendarEvents: normalizeTenantArray(await loadStore('calendarEvents', [])),
+  crmContacts: normalizeTenantArray(await loadStore('crmContacts', [])),
+  crmTasks: normalizeTenantArray(await loadStore('crmTasks', [])),
+  marketingCampaigns: normalizeTenantArray(await loadStore('marketingCampaigns', [])),
+  integrationsByTenant: normalizeSettingsStore(await loadStore('integrations', null)),
+  users: normalizeTenantArray(await loadStore('users', [])),
+  jobs: normalizeTenantArray(await loadStore('jobs', [])),
+  settingsByTenant: normalizeSettingsStore(await loadStore('settings', null)),
 };
 
 const QUEUES = [
@@ -155,6 +437,22 @@ const MS_OAUTH = {
 
 const AccessToken = twilio.jwt.AccessToken;
 const { VoiceGrant } = AccessToken;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
+
+const verifyTwilioSignature = (req, res, next) => {
+  if (!TWILIO_AUTH_TOKEN) return next();
+  const signature = req.headers['x-twilio-signature'];
+  if (!signature) return res.status(403).send('missing signature');
+  const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+  const valid = twilio.validateRequest(
+    TWILIO_AUTH_TOKEN,
+    signature,
+    url,
+    req.body || {}
+  );
+  if (!valid) return res.status(403).send('invalid signature');
+  next();
+};
 
 const upsertById = (items, item) => {
   const idx = items.findIndex(i => i.id === item.id);
@@ -199,40 +497,45 @@ const cosineSimilarity = (vecA, vecB) => {
   return dotProduct / (magA * magB);
 };
 
-app.post('/api/rag/ingest', async (req, res) => {
+app.post('/api/rag/ingest', authenticate, async (req, res) => {
   if (!ensureGemini(res)) return;
   const { documents } = req.body; // Expects [{ id, content, metadata }]
   if (!Array.isArray(documents)) return res.status(400).json({ error: 'documents array required' });
 
+  const tenantId = req.tenantId;
+  const vectorDb = VECTOR_DB_BY_TENANT.get(tenantId) || [];
   const processed = [];
   for (const doc of documents) {
     const vector = await getEmbeddings(doc.content);
     if (vector) {
       // Upsert logic
-      const existingIdx = VECTOR_DB.findIndex(v => v.id === doc.id);
+      const existingIdx = vectorDb.findIndex(v => v.id === doc.id);
       const record = { id: doc.id, vector, content: doc.content, metadata: doc.metadata };
       if (existingIdx >= 0) {
-        VECTOR_DB[existingIdx] = record;
+        vectorDb[existingIdx] = record;
       } else {
-        VECTOR_DB.push(record);
+        vectorDb.push(record);
       }
       processed.push(doc.id);
     }
   }
-  console.log(`[RAG] Ingested ${processed.length} documents. Total DB size: ${VECTOR_DB.length}`);
+  VECTOR_DB_BY_TENANT.set(tenantId, vectorDb);
+  console.log(`[RAG] Ingested ${processed.length} documents for ${tenantId}. Total DB size: ${vectorDb.length}`);
   res.json({ success: true, count: processed.length });
 });
 
-app.post('/api/rag/query', async (req, res) => {
+app.post('/api/rag/query', authenticate, async (req, res) => {
   if (!ensureGemini(res)) return;
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: 'query required' });
 
   // 1. Vector Search
+  const tenantId = req.tenantId;
+  const vectorDb = VECTOR_DB_BY_TENANT.get(tenantId) || [];
   const queryVector = await getEmbeddings(query);
   if (!queryVector) return res.status(500).json({ error: 'Failed to embed query' });
 
-  const matches = VECTOR_DB.map(doc => ({
+  const matches = vectorDb.map(doc => ({
     ...doc,
     score: cosineSimilarity(queryVector, doc.vector)
   }))
@@ -317,6 +620,11 @@ const createWavBuffer = (pcmBuffer, { sampleRate = 24000, channels = 1, bitDepth
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, geminiConfigured: Boolean(GEMINI_API_KEY) });
+});
+
+app.use('/api', (req, res, next) => {
+  if (req.path === '/health' || req.path === '/recordings/download') return next();
+  return authenticate(req, res, next);
 });
 
 app.post('/api/gemini/intel', async (req, res) => {
@@ -466,15 +774,135 @@ app.get('/api/queues', (req, res) => {
 
 // --- SETTINGS ---
 app.get('/api/settings', (req, res) => {
-  const settings = stores.settings || defaultSettings;
+  const tenantId = req.tenantId;
+  if (isMongoReady()) {
+    return Setting.findOne({ tenantId })
+      .then((doc) => res.json(doc?.data || defaultSettings))
+      .catch(() => res.json(defaultSettings));
+  }
+  const stored = stores.settingsByTenant.find(s => s.tenantId === tenantId);
+  const settings = stored?.data || defaultSettings;
   res.json(settings);
 });
 
 app.put('/api/settings', async (req, res) => {
   const incoming = req.body || {};
-  stores.settings = { ...(stores.settings || defaultSettings), ...incoming };
-  await saveStore('settings', stores.settings);
-  res.json(stores.settings);
+  const tenantId = req.tenantId;
+  if (isMongoReady()) {
+    const existing = await Setting.findOne({ tenantId });
+    const data = { ...(existing?.data || defaultSettings), ...incoming };
+    await Setting.findOneAndUpdate(
+      { tenantId },
+      { tenantId, data, updatedAt: Date.now() },
+      { upsert: true, new: true }
+    );
+    await writeAuditLog(req, 'SETTINGS_UPDATE', 'settings', { keys: Object.keys(incoming) });
+    res.json(data);
+    return;
+  }
+  const idx = stores.settingsByTenant.findIndex(s => s.tenantId === tenantId);
+  const merged = { ...((stores.settingsByTenant[idx]?.data) || defaultSettings), ...incoming };
+  if (idx >= 0) stores.settingsByTenant[idx] = { tenantId, data: merged };
+  else stores.settingsByTenant.push({ tenantId, data: merged });
+  await saveStore('settings', stores.settingsByTenant);
+  await writeAuditLog(req, 'SETTINGS_UPDATE', 'settings', { keys: Object.keys(incoming) });
+  res.json(merged);
+});
+
+// --- TENANTS & USERS (Admin) ---
+app.get('/api/tenants', authorize([UserRole.ADMIN]), async (req, res) => {
+  if (isMongoReady()) {
+    const tenants = await Tenant.find({}).lean();
+    return res.json(tenants.map(toPublic));
+  }
+  res.json(stores.tenants || []);
+});
+
+app.post('/api/tenants', authorize([UserRole.ADMIN]), async (req, res) => {
+  const payload = req.body || {};
+  const externalId = payload.id || crypto.randomUUID();
+  const tenant = { ...payload, externalId };
+  if (isMongoReady()) {
+    const created = await Tenant.create(tenant);
+    return res.json(toPublic(created));
+  }
+  const stored = { id: externalId, ...payload };
+  stores.tenants = stores.tenants || [];
+  stores.tenants = upsertById(stores.tenants, stored);
+  await saveStore('tenants', stores.tenants);
+  res.json(stored);
+});
+
+app.put('/api/tenants/:id', authorize([UserRole.ADMIN]), async (req, res) => {
+  const externalId = req.params.id;
+  const payload = req.body || {};
+  if (isMongoReady()) {
+    const updated = await Tenant.findOneAndUpdate(
+      { externalId },
+      { ...payload, externalId },
+      { upsert: true, new: true }
+    );
+    return res.json(toPublic(updated));
+  }
+  stores.tenants = stores.tenants || [];
+  const stored = { id: externalId, ...payload };
+  stores.tenants = upsertById(stores.tenants, stored);
+  await saveStore('tenants', stores.tenants);
+  res.json(stored);
+});
+
+app.get('/api/admin/users', authorize([UserRole.ADMIN]), async (req, res) => {
+  const tenantId = req.query?.tenantId || req.tenantId;
+  if (isMongoReady()) {
+    const users = await User.find({ tenantId }).lean();
+    return res.json(users.map(toPublic));
+  }
+  res.json(stores.users.filter(u => u.tenantId === tenantId));
+});
+
+app.post('/api/admin/users', authorize([UserRole.ADMIN]), async (req, res) => {
+  const payload = req.body || {};
+  const tenantId = payload.tenantId || req.tenantId;
+  const externalId = payload.id || crypto.randomUUID();
+  const user = { ...payload, tenantId, externalId };
+  if (isMongoReady()) {
+    const created = await User.create(user);
+    return res.json(toPublic(created));
+  }
+  const stored = { id: externalId, ...payload, tenantId };
+  stores.users = upsertById(stores.users, stored);
+  await saveStore('users', stores.users);
+  res.json(stored);
+});
+
+app.put('/api/admin/users/:id', authorize([UserRole.ADMIN]), async (req, res) => {
+  const tenantId = req.body?.tenantId || req.tenantId;
+  const externalId = req.params.id;
+  const payload = req.body || {};
+  if (isMongoReady()) {
+    const updated = await User.findOneAndUpdate(
+      { tenantId, externalId },
+      { ...payload, tenantId, externalId },
+      { upsert: true, new: true }
+    );
+    return res.json(toPublic(updated));
+  }
+  const stored = { id: externalId, ...payload, tenantId };
+  stores.users = upsertById(stores.users, stored);
+  await saveStore('users', stores.users);
+  res.json(stored);
+});
+
+app.delete('/api/admin/users/:id', authorize([UserRole.ADMIN]), async (req, res) => {
+  const tenantId = req.query?.tenantId || req.tenantId;
+  const externalId = req.params.id;
+  if (isMongoReady()) {
+    await User.findOneAndDelete({ tenantId, externalId });
+    return res.json({ ok: true });
+  }
+  stores.users = stores.users.filter(u => !(u.tenantId === tenantId && u.id === externalId));
+  await saveStore('users', stores.users);
+  res.json({ ok: true });
 });
 
 // --- TWILIO TOKEN (Client SDK) ---
@@ -505,122 +933,335 @@ app.get('/api/twilio/token', (req, res) => {
 });
 
 // --- CAMPAIGNS ---
-app.get('/api/campaigns', (req, res) => {
-  res.json(stores.campaigns);
+app.get('/api/campaigns', async (req, res) => {
+  const tenantId = req.tenantId;
+  if (isMongoReady()) {
+    const items = await Campaign.find({ tenantId }).lean();
+    return res.json(items.map(toPublic));
+  }
+  res.json(stores.campaigns.filter(c => c.tenantId === tenantId));
 });
 
 app.post('/api/campaigns', async (req, res) => {
+  const tenantId = req.tenantId;
   const payload = req.body || {};
-  const campaign = { id: payload.id || crypto.randomUUID(), ...payload, updatedAt: Date.now() };
-  stores.campaigns = upsertById(stores.campaigns, campaign);
+  const externalId = payload.id || crypto.randomUUID();
+  const campaign = { ...payload, tenantId, externalId, updatedAt: Date.now() };
+  if (isMongoReady()) {
+    const created = await Campaign.create(campaign);
+    await writeAuditLog(req, 'CAMPAIGN_CREATE', externalId, { name: created.name });
+    return res.json(toPublic(created));
+  }
+  const stored = { id: externalId, ...payload, tenantId, updatedAt: Date.now() };
+  stores.campaigns = upsertById(stores.campaigns, stored);
   await saveStore('campaigns', stores.campaigns);
-  res.json(campaign);
+  await writeAuditLog(req, 'CAMPAIGN_CREATE', externalId, { name: stored.name });
+  res.json(stored);
 });
 
 app.put('/api/campaigns/:id', async (req, res) => {
-  const campaign = { ...req.body, id: req.params.id, updatedAt: Date.now() };
-  stores.campaigns = upsertById(stores.campaigns, campaign);
+  const tenantId = req.tenantId;
+  const externalId = req.params.id;
+  const campaign = { ...req.body, tenantId, externalId, updatedAt: Date.now() };
+  if (isMongoReady()) {
+    const updated = await Campaign.findOneAndUpdate(
+      { tenantId, externalId },
+      campaign,
+      { upsert: true, new: true }
+    );
+    await writeAuditLog(req, 'CAMPAIGN_UPDATE', externalId, { name: updated?.name });
+    return res.json(toPublic(updated));
+  }
+  const stored = { ...req.body, id: externalId, tenantId, updatedAt: Date.now() };
+  stores.campaigns = upsertById(stores.campaigns, stored);
   await saveStore('campaigns', stores.campaigns);
-  res.json(campaign);
+  await writeAuditLog(req, 'CAMPAIGN_UPDATE', externalId, { name: stored.name });
+  res.json(stored);
 });
 
 app.delete('/api/campaigns/:id', async (req, res) => {
-  stores.campaigns = removeById(stores.campaigns, req.params.id);
+  const tenantId = req.tenantId;
+  const externalId = req.params.id;
+  if (isMongoReady()) {
+    await Campaign.findOneAndDelete({ tenantId, externalId });
+    await writeAuditLog(req, 'CAMPAIGN_DELETE', externalId);
+    return res.json({ ok: true });
+  }
+  stores.campaigns = removeById(stores.campaigns, externalId);
   await saveStore('campaigns', stores.campaigns);
+  await writeAuditLog(req, 'CAMPAIGN_DELETE', externalId);
   res.json({ ok: true });
 });
 
 // --- DISPOSITIONS ---
-app.get('/api/dispositions', (req, res) => {
-  res.json(stores.dispositions);
+app.get('/api/dispositions', async (req, res) => {
+  const tenantId = req.tenantId;
+  if (isMongoReady()) {
+    const items = await Disposition.find({ tenantId }).lean();
+    return res.json(items.map(toPublic));
+  }
+  res.json(stores.dispositions.filter(d => d.tenantId === tenantId));
 });
 
 app.post('/api/dispositions', async (req, res) => {
+  const tenantId = req.tenantId;
   const payload = req.body || {};
-  const disposition = { id: payload.id || crypto.randomUUID(), ...payload, updatedAt: Date.now() };
-  stores.dispositions = upsertById(stores.dispositions, disposition);
+  const externalId = payload.id || crypto.randomUUID();
+  const disposition = { ...payload, tenantId, externalId, updatedAt: Date.now() };
+  if (isMongoReady()) {
+    const created = await Disposition.create(disposition);
+    await writeAuditLog(req, 'DISPOSITION_CREATE', externalId, { label: created.label });
+    return res.json(toPublic(created));
+  }
+  const stored = { id: externalId, ...payload, tenantId, updatedAt: Date.now() };
+  stores.dispositions = upsertById(stores.dispositions, stored);
   await saveStore('dispositions', stores.dispositions);
-  res.json(disposition);
+  await writeAuditLog(req, 'DISPOSITION_CREATE', externalId, { label: stored.label });
+  res.json(stored);
 });
 
 app.put('/api/dispositions/:id', async (req, res) => {
-  const disposition = { ...req.body, id: req.params.id, updatedAt: Date.now() };
-  stores.dispositions = upsertById(stores.dispositions, disposition);
+  const tenantId = req.tenantId;
+  const externalId = req.params.id;
+  const disposition = { ...req.body, tenantId, externalId, updatedAt: Date.now() };
+  if (isMongoReady()) {
+    const updated = await Disposition.findOneAndUpdate(
+      { tenantId, externalId },
+      disposition,
+      { upsert: true, new: true }
+    );
+    await writeAuditLog(req, 'DISPOSITION_UPDATE', externalId, { label: updated?.label });
+    return res.json(toPublic(updated));
+  }
+  const stored = { ...req.body, id: externalId, tenantId, updatedAt: Date.now() };
+  stores.dispositions = upsertById(stores.dispositions, stored);
   await saveStore('dispositions', stores.dispositions);
-  res.json(disposition);
+  await writeAuditLog(req, 'DISPOSITION_UPDATE', externalId, { label: stored.label });
+  res.json(stored);
 });
 
 app.delete('/api/dispositions/:id', async (req, res) => {
-  stores.dispositions = removeById(stores.dispositions, req.params.id);
+  const tenantId = req.tenantId;
+  const externalId = req.params.id;
+  if (isMongoReady()) {
+    await Disposition.findOneAndDelete({ tenantId, externalId });
+    await writeAuditLog(req, 'DISPOSITION_DELETE', externalId);
+    return res.json({ ok: true });
+  }
+  stores.dispositions = removeById(stores.dispositions, externalId);
   await saveStore('dispositions', stores.dispositions);
+  await writeAuditLog(req, 'DISPOSITION_DELETE', externalId);
   res.json({ ok: true });
 });
 
+// --- CALLS ---
+app.get('/api/calls', authenticate, async (req, res) => {
+  const tenantId = req.tenantId;
+  const { status, limit = 100 } = req.query || {};
+  const filter = { tenantId };
+  if (status) filter.status = status;
+  if (isMongoReady()) {
+    const items = await Call.find(filter)
+      .sort({ startTime: -1 })
+      .limit(Math.min(Number(limit) || 100, 500))
+      .lean();
+    return res.json(items.map(toPublic));
+  }
+  const items = stores.calls ? stores.calls.filter(c => c.tenantId === tenantId) : [];
+  res.json(items);
+});
+
+app.post('/api/calls', authenticate, async (req, res) => {
+  const tenantId = req.tenantId;
+  const payload = req.body || {};
+  const externalId = payload.id || crypto.randomUUID();
+  const call = {
+    ...payload,
+    tenantId,
+    externalId,
+    startTime: payload.startTime || Date.now(),
+    status: payload.status || 'DIALING',
+  };
+  if (isMongoReady()) {
+    const created = await Call.create(call);
+    await writeAuditLog(req, 'CALL_CREATE', externalId, { status: call.status });
+    return res.json(toPublic(created));
+  }
+  stores.calls = stores.calls || [];
+  const stored = { id: externalId, ...call };
+  stores.calls = upsertById(stores.calls, stored);
+  await saveStore('calls', stores.calls);
+  res.json(stored);
+});
+
+app.put('/api/calls/:id', authenticate, async (req, res) => {
+  const tenantId = req.tenantId;
+  const externalId = req.params.id;
+  const payload = req.body || {};
+  if (isMongoReady()) {
+    const existing = await Call.findOne({ tenantId, externalId });
+    if (existing && payload.status && !isValidCallTransition(existing.status, payload.status)) {
+      return res.status(400).json({ error: `Invalid status transition ${existing.status} -> ${payload.status}` });
+    }
+    const updated = await Call.findOneAndUpdate(
+      { tenantId, externalId },
+      { ...payload, tenantId, externalId },
+      { upsert: true, new: true }
+    );
+    if (payload.status) {
+      await writeAuditLog(req, 'CALL_STATUS_UPDATE', externalId, { from: existing?.status, to: payload.status });
+    }
+    if (payload.status === 'ENDED') {
+      await enqueueJob(tenantId, 'transcription', { callId: externalId });
+      await enqueueJob(tenantId, 'summary', { callId: externalId });
+      await enqueueJob(tenantId, 'report', { callId: externalId });
+    }
+    return res.json(toPublic(updated));
+  }
+  stores.calls = stores.calls || [];
+  const existing = stores.calls.find(c => c.id === externalId && c.tenantId === tenantId);
+  if (existing && payload.status && !isValidCallTransition(existing.status, payload.status)) {
+    return res.status(400).json({ error: `Invalid status transition ${existing.status} -> ${payload.status}` });
+  }
+  const stored = { ...(existing || {}), ...payload, id: externalId, tenantId };
+  stores.calls = upsertById(stores.calls, stored);
+  await saveStore('calls', stores.calls);
+  if (payload.status === 'ENDED') {
+    await enqueueJob(tenantId, 'transcription', { callId: externalId });
+    await enqueueJob(tenantId, 'summary', { callId: externalId });
+    await enqueueJob(tenantId, 'report', { callId: externalId });
+  }
+  res.json(stored);
+});
+
+// --- JOBS ---
+app.get('/api/jobs', authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
+  const tenantId = req.tenantId;
+  if (isMongoReady()) {
+    const jobs = await Job.find({ tenantId }).sort({ createdAt: -1 }).limit(200).lean();
+    return res.json(jobs.map(toPublic));
+  }
+  res.json(stores.jobs.filter(j => j.tenantId === tenantId));
+});
+
+app.post('/api/jobs', authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
+  const tenantId = req.tenantId;
+  const { type, payload } = req.body || {};
+  if (!type) return res.status(400).json({ error: 'type required' });
+  const job = await enqueueJob(tenantId, type, payload || {});
+  res.json(job);
+});
+
 // --- RECORDINGS ---
-app.get('/api/recordings', (req, res) => {
-  res.json(stores.recordings);
+app.get('/api/recordings', async (req, res) => {
+  const tenantId = req.tenantId;
+  if (isMongoReady()) {
+    const items = await Recording.find({ tenantId }).lean();
+    return res.json(items.map(toPublic));
+  }
+  res.json(stores.recordings.filter(r => r.tenantId === tenantId));
 });
 
 app.post('/api/recordings', async (req, res) => {
+  const tenantId = req.tenantId;
   const payload = req.body || {};
-  const recording = { id: payload.id || crypto.randomUUID(), ...payload, createdAt: Date.now() };
-  stores.recordings = upsertById(stores.recordings, recording);
+  const externalId = payload.id || crypto.randomUUID();
+  const recording = { ...payload, tenantId, externalId, createdAt: Date.now() };
+  if (isMongoReady()) {
+    const created = await Recording.create(recording);
+    await writeAuditLog(req, 'RECORDING_CREATE', externalId, { callId: created.callId });
+    return res.json(toPublic(created));
+  }
+  const stored = { id: externalId, ...payload, tenantId, createdAt: Date.now() };
+  stores.recordings = upsertById(stores.recordings, stored);
   await saveStore('recordings', stores.recordings);
-  res.json(recording);
+  await writeAuditLog(req, 'RECORDING_CREATE', externalId, { callId: stored.callId });
+  res.json(stored);
 });
 
 app.put('/api/recordings/:id', async (req, res) => {
-  const recording = { ...req.body, id: req.params.id, updatedAt: Date.now() };
-  stores.recordings = upsertById(stores.recordings, recording);
+  const tenantId = req.tenantId;
+  const externalId = req.params.id;
+  const recording = { ...req.body, tenantId, externalId, updatedAt: Date.now() };
+  if (isMongoReady()) {
+    const updated = await Recording.findOneAndUpdate(
+      { tenantId, externalId },
+      recording,
+      { upsert: true, new: true }
+    );
+    await writeAuditLog(req, 'RECORDING_UPDATE', externalId);
+    return res.json(toPublic(updated));
+  }
+  const stored = { ...req.body, id: externalId, tenantId, updatedAt: Date.now() };
+  stores.recordings = upsertById(stores.recordings, stored);
   await saveStore('recordings', stores.recordings);
-  res.json(recording);
+  await writeAuditLog(req, 'RECORDING_UPDATE', externalId);
+  res.json(stored);
 });
 
 app.post('/api/recordings/upload', async (req, res) => {
+  const tenantId = req.tenantId;
   const { base64, mimeType = 'audio/wav', filename, callId } = req.body || {};
   if (!base64) return res.status(400).json({ error: 'base64 required' });
   await ensureRecordingsDir();
-  const id = crypto.randomUUID();
+  const externalId = crypto.randomUUID();
   const ext = (filename && filename.includes('.')) ? filename.split('.').pop() : 'wav';
-  const filePath = path.join(recordingsDir, `${id}.${ext}`);
+  const filePath = path.join(recordingsDir, `${externalId}.${ext}`);
   const buffer = Buffer.from(base64, 'base64');
   await fs.writeFile(filePath, buffer);
+  const retentionDays = Number(process.env.RECORDING_RETENTION_DAYS || 30);
+  const expiresAt = Date.now() + retentionDays * 24 * 60 * 60 * 1000;
   const recording = {
-    id,
+    tenantId,
+    externalId,
     callId: callId || null,
     mimeType,
-    filename: filename || `${id}.${ext}`,
-    bytes: buffer.length,
-    filePath,
+    filename: filename || `${externalId}.${ext}`,
+    size: buffer.length,
+    storagePath: filePath,
     createdAt: Date.now(),
+    expiresAt,
   };
-  stores.recordings = upsertById(stores.recordings, recording);
+  if (isMongoReady()) {
+    const created = await Recording.create(recording);
+    await writeAuditLog(req, 'RECORDING_UPLOAD', externalId, { callId });
+    return res.json(toPublic(created));
+  }
+  const stored = { id: externalId, ...recording };
+  stores.recordings = upsertById(stores.recordings, stored);
   await saveStore('recordings', stores.recordings);
-  res.json(recording);
+  await writeAuditLog(req, 'RECORDING_UPLOAD', externalId, { callId });
+  res.json(stored);
 });
 
-app.post('/api/recordings/:id/signed-url', (req, res) => {
+app.post('/api/recordings/:id/signed-url', async (req, res) => {
+  const tenantId = req.tenantId;
   const { ttlSeconds = 3600 } = req.body || {};
-  const rec = stores.recordings.find(r => r.id === req.params.id);
+  const externalId = req.params.id;
+  const rec = isMongoReady()
+    ? await Recording.findOne({ tenantId, externalId }).lean()
+    : stores.recordings.find(r => r.tenantId === tenantId && r.id === externalId);
   if (!rec) return res.status(404).json({ error: 'recording not found' });
   const expires = Date.now() + Number(ttlSeconds) * 1000;
-  const payload = `${rec.id}:${expires}`;
+  const payload = `${tenantId}:${externalId}:${expires}`;
   const sig = signToken(payload);
-  const url = `/api/recordings/download?token=${rec.id}.${expires}.${sig}`;
+  const url = `/api/recordings/download?token=${tenantId}.${externalId}.${expires}.${sig}`;
   res.json({ url, expiresAt: expires });
 });
 
 app.get('/api/recordings/download', async (req, res) => {
   const token = req.query?.token || '';
-  const [id, expires, sig] = String(token).split('.');
-  if (!id || !expires || !sig) return res.status(400).send('invalid token');
-  const expected = signToken(`${id}:${expires}`);
+  const [tenantId, externalId, expires, sig] = String(token).split('.');
+  if (!tenantId || !externalId || !expires || !sig) return res.status(400).send('invalid token');
+  const expected = signToken(`${tenantId}:${externalId}:${expires}`);
   if (expected !== sig) return res.status(403).send('invalid signature');
   if (Date.now() > Number(expires)) return res.status(403).send('token expired');
-  const rec = stores.recordings.find(r => r.id === id);
+  const rec = isMongoReady()
+    ? await Recording.findOne({ tenantId, externalId }).lean()
+    : stores.recordings.find(r => r.tenantId === tenantId && r.id === externalId);
   if (!rec) return res.status(404).send('not found');
   try {
-    const data = await fs.readFile(rec.filePath);
+    const data = await fs.readFile(rec.storagePath || rec.filePath);
     res.setHeader('Content-Type', rec.mimeType || 'audio/wav');
     res.send(data);
   } catch {
@@ -630,7 +1271,8 @@ app.get('/api/recordings/download', async (req, res) => {
 
 // --- CALENDAR ---
 app.get('/api/calendar/events', (req, res) => {
-  res.json(stores.calendarEvents);
+  const tenantId = req.tenantId;
+  res.json(stores.calendarEvents.filter(e => e.tenantId === tenantId));
 });
 
 app.get('/api/oauth/google/start', (req, res) => {
@@ -670,8 +1312,9 @@ app.get('/api/oauth/google/callback', async (req, res) => {
       }),
     });
     const token = await tokenRes.json();
-    stores.integrations.calendar.google = { token, updatedAt: now() };
-    await saveStore('integrations', stores.integrations);
+    const store = getIntegrationsStore(req.tenantId);
+    store.data.calendar.google = { token, updatedAt: now() };
+    await saveIntegrationsStore();
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: 'Google OAuth failed' });
@@ -715,8 +1358,9 @@ app.get('/api/oauth/microsoft/callback', async (req, res) => {
       }),
     });
     const token = await tokenRes.json();
-    stores.integrations.calendar.microsoft = { token, updatedAt: now() };
-    await saveStore('integrations', stores.integrations);
+    const store = getIntegrationsStore(req.tenantId);
+    store.data.calendar.microsoft = { token, updatedAt: now() };
+    await saveIntegrationsStore();
     res.json({ ok: true });
   } catch {
     res.status(500).json({ error: 'Microsoft OAuth failed' });
@@ -724,30 +1368,34 @@ app.get('/api/oauth/microsoft/callback', async (req, res) => {
 });
 
 app.post('/api/calendar/events', async (req, res) => {
+  const tenantId = req.tenantId;
   const payload = req.body || {};
-  const event = { id: payload.id || crypto.randomUUID(), ...payload, updatedAt: Date.now() };
+  const event = { id: payload.id || crypto.randomUUID(), tenantId, ...payload, updatedAt: Date.now() };
   stores.calendarEvents = upsertById(stores.calendarEvents, event);
   await saveStore('calendarEvents', stores.calendarEvents);
   res.json(event);
 });
 
 app.put('/api/calendar/events/:id', async (req, res) => {
-  const event = { ...req.body, id: req.params.id, updatedAt: Date.now() };
+  const tenantId = req.tenantId;
+  const event = { ...req.body, id: req.params.id, tenantId, updatedAt: Date.now() };
   stores.calendarEvents = upsertById(stores.calendarEvents, event);
   await saveStore('calendarEvents', stores.calendarEvents);
   res.json(event);
 });
 
 app.delete('/api/calendar/events/:id', async (req, res) => {
-  stores.calendarEvents = removeById(stores.calendarEvents, req.params.id);
+  const tenantId = req.tenantId;
+  stores.calendarEvents = stores.calendarEvents.filter(e => !(e.id === req.params.id && e.tenantId === tenantId));
   await saveStore('calendarEvents', stores.calendarEvents);
   res.json({ ok: true });
 });
 
 app.post('/api/calendar/sync', async (req, res) => {
   const { provider, accountId, status = 'connected' } = req.body || {};
-  stores.integrations.calendar[accountId || provider || 'default'] = { provider, status, updatedAt: Date.now() };
-  await saveStore('integrations', stores.integrations);
+  const store = getIntegrationsStore(req.tenantId);
+  store.data.calendar[accountId || provider || 'default'] = { provider, status, updatedAt: Date.now() };
+  await saveIntegrationsStore();
   res.json({ ok: true });
 });
 
@@ -757,30 +1405,34 @@ app.post('/api/calendar/webhook', (req, res) => {
 
 // --- CRM ---
 app.get('/api/crm/contacts', (req, res) => {
+  const tenantId = req.tenantId;
   const { phone } = req.query || {};
   if (phone) {
-    const hit = stores.crmContacts.find(c => c.phone === phone);
+    const hit = stores.crmContacts.find(c => c.tenantId === tenantId && c.phone === phone);
     res.json({ contact: hit || null });
     return;
   }
-  res.json(stores.crmContacts);
+  res.json(stores.crmContacts.filter(c => c.tenantId === tenantId));
 });
 
 app.post('/api/crm/contacts', async (req, res) => {
+  const tenantId = req.tenantId;
   const payload = req.body || {};
-  const contact = { id: payload.id || crypto.randomUUID(), ...payload, updatedAt: Date.now() };
+  const contact = { id: payload.id || crypto.randomUUID(), tenantId, ...payload, updatedAt: Date.now() };
   stores.crmContacts = upsertById(stores.crmContacts, contact);
   await saveStore('crmContacts', stores.crmContacts);
   res.json(contact);
 });
 
 app.get('/api/crm/tasks', (req, res) => {
-  res.json(stores.crmTasks);
+  const tenantId = req.tenantId;
+  res.json(stores.crmTasks.filter(t => t.tenantId === tenantId));
 });
 
 app.post('/api/crm/tasks', async (req, res) => {
+  const tenantId = req.tenantId;
   const payload = req.body || {};
-  const task = { id: payload.id || crypto.randomUUID(), ...payload, updatedAt: Date.now() };
+  const task = { id: payload.id || crypto.randomUUID(), tenantId, ...payload, updatedAt: Date.now() };
   stores.crmTasks = upsertById(stores.crmTasks, task);
   await saveStore('crmTasks', stores.crmTasks);
   res.json(task);
@@ -788,8 +1440,9 @@ app.post('/api/crm/tasks', async (req, res) => {
 
 app.post('/api/crm/sync', async (req, res) => {
   const { platform, status = 'queued' } = req.body || {};
-  stores.integrations.crm[platform || 'default'] = { platform, status, updatedAt: Date.now() };
-  await saveStore('integrations', stores.integrations);
+  const store = getIntegrationsStore(req.tenantId);
+  store.data.crm[platform || 'default'] = { platform, status, updatedAt: Date.now() };
+  await saveIntegrationsStore();
   res.json({ ok: true });
 });
 
@@ -800,40 +1453,46 @@ app.post('/api/crm/webhook', (req, res) => {
 app.post('/api/crm/:provider/connect', async (req, res) => {
   const { provider } = req.params;
   const credentials = req.body || {};
-  stores.integrations.crm[provider] = { provider, credentials, status: 'connected', updatedAt: Date.now() };
-  await saveStore('integrations', stores.integrations);
+  const store = getIntegrationsStore(req.tenantId);
+  store.data.crm[provider] = { provider, credentials, status: 'connected', updatedAt: Date.now() };
+  await saveIntegrationsStore();
   res.json({ ok: true });
 });
 
 app.post('/api/crm/:provider/sync', async (req, res) => {
   const { provider } = req.params;
-  stores.integrations.crm[provider] = { ...(stores.integrations.crm[provider] || {}), status: 'syncing', updatedAt: Date.now() };
-  await saveStore('integrations', stores.integrations);
+  const store = getIntegrationsStore(req.tenantId);
+  store.data.crm[provider] = { ...(store.data.crm[provider] || {}), status: 'syncing', updatedAt: Date.now() };
+  await saveIntegrationsStore();
   res.json({ ok: true });
 });
 
 // --- MARKETING ---
 app.get('/api/marketing/campaigns', (req, res) => {
-  res.json(stores.marketingCampaigns);
+  const tenantId = req.tenantId;
+  res.json(stores.marketingCampaigns.filter(c => c.tenantId === tenantId));
 });
 
 app.post('/api/marketing/campaigns', async (req, res) => {
+  const tenantId = req.tenantId;
   const payload = req.body || {};
-  const campaign = { id: payload.id || crypto.randomUUID(), ...payload, updatedAt: Date.now() };
+  const campaign = { id: payload.id || crypto.randomUUID(), tenantId, ...payload, updatedAt: Date.now() };
   stores.marketingCampaigns = upsertById(stores.marketingCampaigns, campaign);
   await saveStore('marketingCampaigns', stores.marketingCampaigns);
   res.json(campaign);
 });
 
 app.put('/api/marketing/campaigns/:id', async (req, res) => {
-  const campaign = { ...req.body, id: req.params.id, updatedAt: Date.now() };
+  const tenantId = req.tenantId;
+  const campaign = { ...req.body, id: req.params.id, tenantId, updatedAt: Date.now() };
   stores.marketingCampaigns = upsertById(stores.marketingCampaigns, campaign);
   await saveStore('marketingCampaigns', stores.marketingCampaigns);
   res.json(campaign);
 });
 
 app.delete('/api/marketing/campaigns/:id', async (req, res) => {
-  stores.marketingCampaigns = removeById(stores.marketingCampaigns, req.params.id);
+  const tenantId = req.tenantId;
+  stores.marketingCampaigns = stores.marketingCampaigns.filter(c => !(c.id === req.params.id && c.tenantId === tenantId));
   await saveStore('marketingCampaigns', stores.marketingCampaigns);
   res.json({ ok: true });
 });
@@ -841,32 +1500,46 @@ app.delete('/api/marketing/campaigns/:id', async (req, res) => {
 app.post('/api/marketing/:provider/connect', async (req, res) => {
   const { provider } = req.params;
   const credentials = req.body || {};
-  stores.integrations.marketing[provider] = { provider, credentials, status: 'connected', updatedAt: Date.now() };
-  await saveStore('integrations', stores.integrations);
+  const store = getIntegrationsStore(req.tenantId);
+  store.data.marketing[provider] = { provider, credentials, status: 'connected', updatedAt: Date.now() };
+  await saveIntegrationsStore();
   res.json({ ok: true });
 });
 
 app.post('/api/marketing/:provider/sync', async (req, res) => {
   const { provider } = req.params;
-  stores.integrations.marketing[provider] = { ...(stores.integrations.marketing[provider] || {}), status: 'syncing', updatedAt: Date.now() };
-  await saveStore('integrations', stores.integrations);
+  const store = getIntegrationsStore(req.tenantId);
+  store.data.marketing[provider] = { ...(store.data.marketing[provider] || {}), status: 'syncing', updatedAt: Date.now() };
+  await saveIntegrationsStore();
   res.json({ ok: true });
 });
 
 // --- REPORTS ---
-app.get('/api/reports/summary', (req, res) => {
-  const totalCalls = stores.recordings.length;
-  const totalCampaigns = stores.campaigns.length;
-  res.json({
-    totalCalls,
-    totalCampaigns,
-    totalRecordings: stores.recordings.length,
-    generatedAt: Date.now(),
-  });
+app.get('/api/reports/summary', async (req, res) => {
+  const tenantId = req.tenantId;
+  if (isMongoReady()) {
+    const [totalCalls, totalCampaigns, totalRecordings] = await Promise.all([
+      Call.countDocuments({ tenantId }),
+      Campaign.countDocuments({ tenantId }),
+      Recording.countDocuments({ tenantId }),
+    ]);
+    return res.json({ totalCalls, totalCampaigns, totalRecordings, generatedAt: Date.now() });
+  }
+  const totalCalls = stores.calls.filter(c => c.tenantId === tenantId).length;
+  const totalCampaigns = stores.campaigns.filter(c => c.tenantId === tenantId).length;
+  const totalRecordings = stores.recordings.filter(r => r.tenantId === tenantId).length;
+  res.json({ totalCalls, totalCampaigns, totalRecordings, generatedAt: Date.now() });
 });
 
 app.get('/api/integrations/status', (req, res) => {
-  res.json(stores.integrations);
+  const tenantId = req.tenantId;
+  const store = getIntegrationsStore(tenantId);
+  res.json(store.data);
+});
+
+app.get('/api/metrics/calls', authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
+  const tenantId = req.tenantId;
+  res.json(getMetrics(tenantId));
 });
 
 const extractE164 = (value = '') => {
@@ -877,16 +1550,45 @@ const extractE164 = (value = '') => {
   return match[0].startsWith('+') ? match[0] : `+${match[0]}`;
 };
 
-app.post('/twilio/voice', (req, res) => {
+const extractClientIdentity = (value = '') => {
+  const trimmed = String(value).trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('client:')) {
+    return trimmed.replace('client:', '');
+  }
+  return '';
+};
+
+app.post('/twilio/voice', verifyTwilioSignature, async (req, res) => {
+  const tenantId = req.tenantId || DEFAULT_TENANT_ID;
   const toRaw = req.body?.To || req.body?.Called || '';
+  const clientIdentity = extractClientIdentity(toRaw) || req.body?.identity || req.query?.identity;
   const dialTo = extractE164(toRaw);
   const callerId = process.env.TWILIO_CALLER_ID;
+
+  if (clientIdentity) {
+    const safeIdentity = String(clientIdentity || 'agent').trim() || 'agent';
+    const metrics = getMetrics(tenantId);
+    metrics.outboundTotal += 1;
+    metrics.routed += 1;
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial>
+    <Client>${safeIdentity}</Client>
+  </Dial>
+</Response>`;
+    res.type('text/xml').send(twiml);
+    return;
+  }
 
   if (dialTo) {
     if (!callerId) {
       res.status(500).type('text/plain').send('TWILIO_CALLER_ID missing');
       return;
     }
+    const metrics = getMetrics(tenantId);
+    metrics.outboundTotal += 1;
+    metrics.routed += 1;
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Dial callerId="${callerId}">
@@ -897,10 +1599,10 @@ app.post('/twilio/voice', (req, res) => {
     return;
   }
 
-  const settings = stores.settings || defaultSettings;
-  const ivr = settings.ivr || defaultSettings.ivr;
-  const prompt = ivr.welcomeMessage || defaultSettings.ivr.welcomeMessage;
-  const options = Array.isArray(ivr.options) ? ivr.options : defaultSettings.ivr.options;
+  const settings = await getSettingsForTenant(tenantId);
+  const ivrSettings = settings.ivr || defaultSettings.ivr;
+  const prompt = ivrSettings.welcomeMessage || defaultSettings.ivr.welcomeMessage;
+  const options = Array.isArray(ivrSettings.options) ? ivrSettings.options : defaultSettings.ivr.options;
   const gather = options.map((o) => `Press ${o.key} for ${o.label}.`).join(' ');
 
   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -914,8 +1616,98 @@ app.post('/twilio/voice', (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
-app.post('/twilio/voice/handle', (req, res) => {
-  const settings = stores.settings || defaultSettings;
+app.post('/twilio/voice/incoming', verifyTwilioSignature, async (req, res) => {
+  const tenantId = req.tenantId || DEFAULT_TENANT_ID;
+  const identityOverride = (req.query?.identity || req.body?.identity || '').toString().trim();
+  const settings = await getSettingsForTenant(tenantId);
+  const targets = identityOverride ? [identityOverride] : buildRouteTargets(settings, 'agent');
+  const callSid = req.body?.CallSid || crypto.randomUUID();
+  callRouteState.set(callSid, { targets, index: 0, tenantId });
+
+  const metrics = getMetrics(tenantId);
+  metrics.inboundTotal += 1;
+  metrics.routed += 1;
+  metrics.lastRouteAt = Date.now();
+
+  if (isMongoReady()) {
+    await Call.findOneAndUpdate(
+      { tenantId, externalId: callSid },
+      {
+        tenantId,
+        externalId: callSid,
+        direction: 'inbound',
+        customerName: req.body?.From || 'Inbound Caller',
+        phoneNumber: req.body?.From || '',
+        queue: settings?.ivr?.phoneNumber || 'Inbound',
+        startTime: Date.now(),
+        status: 'RINGING',
+      },
+      { upsert: true, new: true }
+    );
+  } else {
+    const call = {
+      id: callSid,
+      tenantId,
+      direction: 'inbound',
+      customerName: req.body?.From || 'Inbound Caller',
+      phoneNumber: req.body?.From || '',
+      queue: settings?.ivr?.phoneNumber || 'Inbound',
+      startTime: Date.now(),
+      status: 'RINGING',
+    };
+    stores.calls = upsertById(stores.calls, call);
+    await saveStore('calls', stores.calls);
+  }
+
+  const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
+  res.type('text/xml').send(buildDialTwiml(targets[0], actionUrl));
+});
+
+app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const dialStatus = req.body?.DialCallStatus;
+  const state = callRouteState.get(callSid);
+  if (!state) {
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
+    return;
+  }
+  const { targets, index, tenantId } = state;
+  if (dialStatus === 'completed') {
+    callRouteState.delete(callSid);
+    if (isMongoReady()) {
+      await Call.findOneAndUpdate(
+        { tenantId, externalId: callSid },
+        { status: 'ENDED', endTime: Date.now() }
+      );
+    } else {
+      stores.calls = stores.calls.map(c => c.id === callSid ? { ...c, status: 'ENDED', endTime: Date.now() } : c);
+      await saveStore('calls', stores.calls);
+    }
+    await enqueueJob(tenantId, 'transcription', { callId: callSid });
+    await enqueueJob(tenantId, 'summary', { callId: callSid });
+    await enqueueJob(tenantId, 'report', { callId: callSid });
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
+    return;
+  }
+  const nextIndex = index + 1;
+  if (nextIndex >= targets.length) {
+    const metrics = getMetrics(tenantId);
+    metrics.failed += 1;
+    callRouteState.delete(callSid);
+    await enqueueJob(tenantId, 'report', { callId: callSid });
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>No agents available. Please try again later.</Say><Hangup/></Response>`);
+    return;
+  }
+  const metrics = getMetrics(tenantId);
+  metrics.retries += 1;
+  callRouteState.set(callSid, { targets, index: nextIndex, tenantId });
+  const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
+  res.type('text/xml').send(buildDialTwiml(targets[nextIndex], actionUrl));
+});
+
+app.post('/twilio/voice/handle', verifyTwilioSignature, async (req, res) => {
+  const tenantId = req.tenantId || DEFAULT_TENANT_ID;
+  const settings = await getSettingsForTenant(tenantId);
   const ivr = settings.ivr || defaultSettings.ivr;
   const options = Array.isArray(ivr.options) ? ivr.options : defaultSettings.ivr.options;
   const digit = req.body?.Digits;
@@ -926,17 +1718,63 @@ app.post('/twilio/voice/handle', (req, res) => {
       `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Say>Invalid selection. Goodbye.</Say>
+  <Hangup/>
 </Response>`
     );
     return;
   }
 
-  res.type('text/xml').send(
-    `<?xml version="1.0" encoding="UTF-8"?>
+  if (match.action === 'VOICEMAIL') {
+    res.type('text/xml').send(
+      `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say>You selected ${match.label}. We will connect you shortly.</Say>
+  <Say>Please leave a voicemail after the tone.</Say>
+  <Record maxLength="60"/>
 </Response>`
-  );
+    );
+    return;
+  }
+
+  const callSid = req.body?.CallSid || crypto.randomUUID();
+  const targets = buildRouteTargets(settings, 'agent');
+  callRouteState.set(callSid, { targets, index: 0, tenantId });
+
+  if (isMongoReady()) {
+    await Call.findOneAndUpdate(
+      { tenantId, externalId: callSid },
+      {
+        tenantId,
+        externalId: callSid,
+        direction: 'inbound',
+        customerName: req.body?.From || 'Inbound Caller',
+        phoneNumber: req.body?.From || '',
+        queue: match.label || match.target || 'Inbound',
+        startTime: Date.now(),
+        status: 'RINGING',
+      },
+      { upsert: true, new: true }
+    );
+  } else {
+    const call = {
+      id: callSid,
+      tenantId,
+      direction: 'inbound',
+      customerName: req.body?.From || 'Inbound Caller',
+      phoneNumber: req.body?.From || '',
+      queue: match.label || match.target || 'Inbound',
+      startTime: Date.now(),
+      status: 'RINGING',
+    };
+    stores.calls = upsertById(stores.calls, call);
+    await saveStore('calls', stores.calls);
+  }
+
+  const metrics = getMetrics(tenantId);
+  metrics.routed += 1;
+  metrics.lastRouteAt = Date.now();
+
+  const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
+  res.type('text/xml').send(buildDialTwiml(targets[0], actionUrl));
 });
 
 app.post('/api/gemini/tts', async (req, res) => {
@@ -999,6 +1837,15 @@ app.post('/api/gemini/live-token', async (req, res) => {
     console.error('Live token error:', error);
     res.status(500).json({ error: 'Unable to issue Live API token.' });
   }
+});
+
+app.use((err, req, res, next) => {
+  log('error', 'request.error', {
+    requestId: req.requestId,
+    path: req.originalUrl,
+    message: err?.message,
+  });
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 app.listen(PORT, () => {

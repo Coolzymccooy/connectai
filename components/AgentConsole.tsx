@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import { Call, CallStatus, TranscriptSegment, AppSettings, Notification, Lead, User, AiSuggestion, AgentStatus, Message, CallAnalysis, CrmContact, Campaign, Conversation, Meeting, ToolAction, Attachment, Role } from '../types';
 import { generateLeadBriefing, generateAiDraft, analyzeCallTranscript, extractToolActions } from '../services/geminiService';
+import * as dbService from '../services/dbService';
+import { buildInternalConversationId } from '../utils/chat';
 
 interface AgentConsoleProps {
   activeCall: Call | null;
@@ -27,15 +29,40 @@ interface AgentConsoleProps {
   meetings: Meeting[];
   onUpdateMeetings: (m: Meeting[]) => void;
   user: User;
+  isFirebaseConfigured?: boolean;
 }
 
 const HOURS = Array.from({ length: 14 }, (_, i) => i + 8); 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+const DEFAULT_CONVERSATIONS: Conversation[] = [
+  {
+    id: 'c1',
+    contactName: 'John Smith',
+    contactPhone: '+1 555-012-3456',
+    channel: 'sms',
+    lastMessage: 'Can we move the demo to 4pm?',
+    lastMessageTime: Date.now() - 3600000,
+    unreadCount: 1,
+    status: 'open',
+    messages: [{ id: 'm1', channel: 'sms', sender: 'customer', text: 'Can we move the demo to 4pm?', timestamp: Date.now() - 3600000 }]
+  },
+  {
+    id: 'c2',
+    contactName: 'Linda Core',
+    contactPhone: '+1 555-998-1122',
+    channel: 'whatsapp',
+    lastMessage: 'Is the API bridge active?',
+    lastMessageTime: Date.now() - 7200000,
+    unreadCount: 0,
+    status: 'open',
+    messages: [{ id: 'm2', channel: 'whatsapp', sender: 'customer', text: 'Is the API bridge active?', timestamp: Date.now() - 7200000 }]
+  }
+];
 
 export const AgentConsole: React.FC<AgentConsoleProps> = ({ 
   activeCall, agentStatus, onCompleteWrapUp, settings, addNotification,
   leads = [], onOutboundCall, onInternalCall, onAddParticipant, history = [],
-  campaigns, onUpdateCampaigns, meetings, onUpdateMeetings, user
+  campaigns, onUpdateCampaigns, meetings, onUpdateMeetings, user, isFirebaseConfigured = false
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -47,18 +74,17 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const [wrapUpAnalysis, setWrapUpAnalysis] = useState<CallAnalysis | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [lastEndedCall, setLastEndedCall] = useState<Call | null>(null);
+  const [wrapUpActions, setWrapUpActions] = useState({
+    qaApproved: false,
+    dispositionApplied: false,
+    crmSynced: false,
+    followUpScheduled: false,
+  });
 
   // Omnichannel States
-  const [conversations, setConversations] = useState<Conversation[]>([
-    {
-      id: 'c1', contactName: 'John Smith', contactPhone: '+1 555-012-3456', channel: 'sms', lastMessage: 'Can we move the demo to 4pm?', lastMessageTime: Date.now() - 3600000, unreadCount: 1, status: 'open',
-      messages: [{ id: 'm1', channel: 'sms', sender: 'customer', text: 'Can we move the demo to 4pm?', timestamp: Date.now() - 3600000 }]
-    },
-    {
-        id: 'c2', contactName: 'Linda Core', contactPhone: '+1 555-998-1122', channel: 'whatsapp', lastMessage: 'Is the API bridge active?', lastMessageTime: Date.now() - 7200000, unreadCount: 0, status: 'open',
-        messages: [{ id: 'm2', channel: 'whatsapp', sender: 'customer', text: 'Is the API bridge active?', timestamp: Date.now() - 7200000 }]
-    }
-  ]);
+  const [conversations, setConversations] = useState<Conversation[]>(DEFAULT_CONVERSATIONS);
+  const [messageMap, setMessageMap] = useState<Record<string, Message[]>>({});
+  const seededRef = useRef(false);
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
   const [messageInput, setMessageInput] = useState('');
   const [aiDraftText, setAiDraftText] = useState<string | null>(null);
@@ -81,11 +107,47 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const [newMeeting, setNewMeeting] = useState({ title: '', attendeeId: '', date: new Date().toISOString().split('T')[0], time: '10:00', isRecurring: false, pattern: 'weekly' as any });
 
   const activeConversation = conversations.find(c => c.id === selectedConvId);
+  const activeMessages = selectedConvId ? (messageMap[selectedConvId] || activeConversation?.messages || []) : (activeConversation?.messages || []);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) {
+      setConversations(DEFAULT_CONVERSATIONS);
+      return;
+    }
+    const unsubscribe = dbService.fetchConversations(user.id, async (convos) => {
+      if (convos.length === 0 && !seededRef.current) {
+        seededRef.current = true;
+        await Promise.all(DEFAULT_CONVERSATIONS.map(async (conv) => {
+          await dbService.upsertConversation({
+            ...conv,
+            participantIds: [user.id],
+            messages: [],
+          });
+          if (conv.messages[0]) {
+            await dbService.sendConversationMessage(conv.id, conv.messages[0]);
+          }
+        }));
+        return;
+      }
+      setConversations(convos);
+      if (!selectedConvId && convos[0]) {
+        setSelectedConvId(convos[0].id);
+      }
+    });
+    return () => unsubscribe();
+  }, [isFirebaseConfigured, user.id, selectedConvId]);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured || !selectedConvId) return;
+    return dbService.fetchConversationMessages(selectedConvId, (msgs) => {
+      setMessageMap(prev => ({ ...prev, [selectedConvId]: msgs }));
+    });
+  }, [isFirebaseConfigured, selectedConvId]);
 
   // Scroll logic
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [activeCall?.transcript, activeConversation?.messages, wrapUpAnalysis]);
+  }, [activeCall?.transcript, activeMessages, wrapUpAnalysis]);
 
   // Live Tool Extraction logic
   useEffect(() => {
@@ -103,11 +165,26 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       setLastEndedCall(lastCall);
       setIsAnalyzing(true);
       analyzeCallTranscript(lastCall.transcript)
-        .then(setWrapUpAnalysis)
+        .then((analysis) => {
+          setWrapUpAnalysis(analysis);
+          setLastEndedCall(prev => prev ? { ...prev, analysis } : prev);
+          setWrapUpActions({
+            qaApproved: false,
+            dispositionApplied: false,
+            crmSynced: false,
+            followUpScheduled: false,
+          });
+        })
         .finally(() => setIsAnalyzing(false));
     } else if (agentStatus !== AgentStatus.WRAP_UP) {
       setWrapUpAnalysis(null);
       setLastEndedCall(null);
+      setWrapUpActions({
+        qaApproved: false,
+        dispositionApplied: false,
+        crmSynced: false,
+        followUpScheduled: false,
+      });
     }
   }, [agentStatus, history, wrapUpAnalysis, isAnalyzing]);
 
@@ -124,7 +201,11 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const handleSendMessage = (text: string = messageInput, files: Attachment[] = []) => {
     if ((!text.trim() && files.length === 0) || !selectedConvId) return;
     const msg: Message = { id: `m_${Date.now()}`, channel: activeConversation?.channel || 'chat', sender: 'agent', text, timestamp: Date.now(), attachments: files };
-    setConversations(prev => prev.map(c => c.id === selectedConvId ? { ...c, messages: [...c.messages, msg], lastMessage: text || "Attachment Packet", lastMessageTime: Date.now() } : c));
+    if (isFirebaseConfigured) {
+      dbService.sendConversationMessage(selectedConvId, msg).catch(() => {});
+    } else {
+      setConversations(prev => prev.map(c => c.id === selectedConvId ? { ...c, messages: [...c.messages, msg], lastMessage: text || "Attachment Packet", lastMessageTime: Date.now() } : c));
+    }
     setMessageInput('');
     setAiDraftText(null);
   };
@@ -145,7 +226,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     if (!activeConversation) return;
     setIsDrafting(true);
     try {
-      const draft = await generateAiDraft(activeConversation.messages);
+      const draft = await generateAiDraft(activeMessages);
       setAiDraftText(draft);
     } finally { setIsDrafting(false); }
   };
@@ -176,7 +257,28 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     } finally { setIsLoadingBrief(false); }
   };
 
-  const handleMessageTeammate = (member: User) => {
+  const handleMessageTeammate = async (member: User) => {
+    const convId = buildInternalConversationId(user.id, member.id);
+    if (isFirebaseConfigured) {
+      const conv: Conversation = {
+        id: convId,
+        contactName: member.name,
+        contactPhone: `EXT ${member.extension}`,
+        channel: 'chat',
+        lastMessage: 'Neural Link Established',
+        lastMessageTime: Date.now(),
+        unreadCount: 0,
+        status: 'open',
+        teammateId: member.id,
+        participantIds: [user.id, member.id],
+        messages: [],
+      };
+      await dbService.upsertConversation(conv);
+      setSelectedConvId(convId);
+      setActiveTab('omnichannel');
+      return;
+    }
+
     let conv = conversations.find(c => c.teammateId === member.id);
     if (!conv) {
       conv = { 
@@ -204,6 +306,66 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
   const handleInternalLink = (member: User, video: boolean) => {
      onInternalCall?.({ ...member, isVideo: video } as any);
+  };
+
+  const persistWrapUpCall = async (updated: Call) => {
+    setLastEndedCall(updated);
+    if (isFirebaseConfigured) {
+      await dbService.saveCall(updated);
+    }
+  };
+
+  const handleApproveQa = async () => {
+    if (!lastEndedCall || !wrapUpAnalysis) return;
+    const qaEvaluation = {
+      id: `qa_${Date.now()}`,
+      callId: lastEndedCall.id,
+      totalScore: wrapUpAnalysis.qaScore,
+      overallFeedback: wrapUpAnalysis.summary,
+    };
+    const updated: Call = { ...lastEndedCall, qaEvaluation };
+    await persistWrapUpCall(updated);
+    setWrapUpActions(prev => ({ ...prev, qaApproved: true }));
+    addNotification('success', 'QA admission approved and archived.');
+  };
+
+  const handleApplyDisposition = async () => {
+    if (!lastEndedCall || !wrapUpAnalysis) return;
+    const updated: Call = { ...lastEndedCall, analysis: wrapUpAnalysis };
+    await persistWrapUpCall(updated);
+    setWrapUpActions(prev => ({ ...prev, dispositionApplied: true }));
+    addNotification('success', `Disposition linked: ${wrapUpAnalysis.dispositionSuggestion}.`);
+  };
+
+  const handleSyncCrm = async () => {
+    if (!lastEndedCall) return;
+    const updated: Call = {
+      ...lastEndedCall,
+      crmData: { platform: 'HubSpot', status: 'synced', syncedAt: Date.now() },
+    };
+    await persistWrapUpCall(updated);
+    setWrapUpActions(prev => ({ ...prev, crmSynced: true }));
+    addNotification('success', 'CRM sync queued and confirmed.');
+  };
+
+  const handleScheduleFollowUp = () => {
+    if (!lastEndedCall) return;
+    const date = new Date();
+    date.setDate(date.getDate() + 7);
+    date.setHours(10, 0, 0, 0);
+    const meeting: Meeting = {
+      id: `mtg_${Date.now()}`,
+      title: `Follow-up: ${lastEndedCall.customerName}`,
+      startTime: date.getTime(),
+      duration: 30,
+      organizerId: user.id,
+      attendees: [{ userId: user.id, status: 'accepted' }],
+      description: wrapUpAnalysis?.summary || 'Follow-up scheduled from wrap-up actions.',
+      status: 'upcoming',
+    };
+    onUpdateMeetings([meeting, ...meetings]);
+    setWrapUpActions(prev => ({ ...prev, followUpScheduled: true }));
+    addNotification('success', 'Follow-up meeting scheduled.');
   };
 
   const completeWrapUp = () => {
@@ -345,10 +507,24 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                        <span className="text-5xl font-black italic text-slate-800">{wrapUpAnalysis.qaScore}</span>
                                        <span className="text-xs font-bold text-slate-400 mb-2 uppercase tracking-widest">Protocol Grade</span>
                                     </div>
+                                    <button
+                                      onClick={handleApproveQa}
+                                      disabled={wrapUpActions.qaApproved}
+                                      className={`mt-6 w-full py-3 rounded-2xl text-[9px] font-black uppercase tracking-widest transition-all ${wrapUpActions.qaApproved ? 'bg-green-500/10 text-green-600 cursor-not-allowed' : 'bg-white border border-brand-200 text-brand-700 hover:bg-brand-600 hover:text-white shadow-lg active:scale-95'}`}
+                                    >
+                                      {wrapUpActions.qaApproved ? 'QA Admission Approved' : 'Approve QA Admission'}
+                                    </button>
                                  </div>
                                  <div className="p-8 bg-slate-100 rounded-[2.5rem] border border-slate-200 shadow-sm">
                                     <p className="text-[10px] font-black uppercase text-slate-600 tracking-widest mb-3 italic">DISPOSITION LINK</p>
                                     <p className="text-2xl font-black italic uppercase tracking-tighter text-slate-800">{wrapUpAnalysis.dispositionSuggestion}</p>
+                                    <button
+                                      onClick={handleApplyDisposition}
+                                      disabled={wrapUpActions.dispositionApplied}
+                                      className={`mt-6 w-full py-3 rounded-2xl text-[9px] font-black uppercase tracking-widest transition-all ${wrapUpActions.dispositionApplied ? 'bg-green-500/10 text-green-600 cursor-not-allowed' : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-900 hover:text-white shadow-lg active:scale-95'}`}
+                                    >
+                                      {wrapUpActions.dispositionApplied ? 'Disposition Applied' : 'Apply Disposition'}
+                                    </button>
                                  </div>
                               </div>
                            </div>
@@ -367,8 +543,20 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                  <div className="absolute top-0 right-0 w-48 h-48 bg-brand-500/10 blur-[60px] -mr-24 -mt-24"></div>
                                  <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-brand-400 mb-8 flex items-center gap-3"><Bot size={18}/> Post-Admission Actions</h4>
                                  <div className="space-y-4">
-                                    <button className="w-full py-5 bg-white text-slate-900 rounded-3xl text-[11px] font-black uppercase tracking-widest hover:bg-slate-100 transition-all shadow-xl flex items-center justify-center gap-3"><CheckCircle size={16}/> Synchronize to CRM Core</button>
-                                    <button className="w-full py-5 bg-white/5 border border-white/10 text-white rounded-3xl text-[11px] font-black uppercase tracking-widest hover:bg-white/10 transition-all">Schedule Cluster Sync</button>
+                                    <button
+                                      onClick={handleSyncCrm}
+                                      disabled={wrapUpActions.crmSynced}
+                                      className={`w-full py-5 rounded-3xl text-[11px] font-black uppercase tracking-widest transition-all shadow-xl flex items-center justify-center gap-3 ${wrapUpActions.crmSynced ? 'bg-green-500/20 text-green-200 cursor-not-allowed' : 'bg-white text-slate-900 hover:bg-slate-100'}`}
+                                    >
+                                      <CheckCircle size={16}/> {wrapUpActions.crmSynced ? 'CRM Core Synchronized' : 'Synchronize to CRM Core'}
+                                    </button>
+                                    <button
+                                      onClick={handleScheduleFollowUp}
+                                      disabled={wrapUpActions.followUpScheduled}
+                                      className={`w-full py-5 border rounded-3xl text-[11px] font-black uppercase tracking-widest transition-all ${wrapUpActions.followUpScheduled ? 'bg-green-500/10 text-green-200 border-green-500/20 cursor-not-allowed' : 'bg-white/5 border-white/10 text-white hover:bg-white/10'}`}
+                                    >
+                                      {wrapUpActions.followUpScheduled ? 'Follow-up Scheduled' : 'Schedule Cluster Sync'}
+                                    </button>
                                  </div>
                               </section>
                            </div>
@@ -692,7 +880,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                       </div>
                       
                       <div className="flex-1 overflow-y-auto p-12 space-y-10 scrollbar-hide bg-slate-50/50">
-                        {activeConversation.messages.map(m => (
+                        {activeMessages.map(m => (
                           <div key={m.id} className={`flex ${m.sender === 'agent' ? 'justify-end' : 'justify-start'}`}>
                             <div className={`max-w-[75%] p-8 rounded-[2.5rem] text-base leading-relaxed shadow-sm ${m.sender === 'agent' ? 'bg-brand-600 text-white rounded-br-none' : 'bg-white border border-slate-100 text-slate-800 rounded-bl-none'}`}>
                               {m.text && <p className="font-medium italic">"{m.text}"</p>}

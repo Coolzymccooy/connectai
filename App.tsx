@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { LayoutDashboard, Phone, Settings, LogOut, Sparkles, Mic, PlayCircle, Bot, Shield, MessageSquare, Bell, X, CheckCircle, Info, AlertTriangle, Trash2, Mail, PhoneIncoming } from 'lucide-react';
 import { Role, User, Call, CallStatus, AgentStatus, AppSettings, Notification, Lead, Campaign, Meeting, CallDirection } from './types';
 import { AgentConsole } from './components/AgentConsole';
@@ -16,6 +16,7 @@ import * as dbService from './services/dbService';
 import { synthesizeSpeech } from './services/geminiService';
 import { fetchCalendarEvents, createCalendarEvent } from './services/calendarService';
 import { fetchCampaigns, createCampaign } from './services/campaignService';
+import { sanitizeCallForStorage } from './utils/gdpr';
 
 const DEFAULT_SETTINGS: AppSettings = {
   integrations: { hubSpot: { enabled: true, syncContacts: true, syncDeals: true, syncTasks: false, logs: [] }, webhooks: [], schemaMappings: [], pipedrive: false, salesforce: false },
@@ -64,10 +65,24 @@ const App: React.FC = () => {
   ]);
   const [isFirebaseConfigured, setIsFirebaseConfigured] = useState(false);
 
+  const persistCall = useCallback(async (call: Call) => {
+    if (!isFirebaseConfigured) return;
+    const safeCall = sanitizeCallForStorage(call, appSettings.compliance);
+    await dbService.saveCall(safeCall);
+  }, [isFirebaseConfigured, appSettings.compliance]);
+
   useEffect(() => {
     const apiKey = (auth as any)?.app?.options?.apiKey;
-    setIsFirebaseConfigured(Boolean(apiKey) && apiKey !== "SIMULATED_KEY");
+    const firebaseDisabled = (import.meta.env as any).VITE_FIREBASE_DISABLED === 'true';
+    setIsFirebaseConfigured(!firebaseDisabled && Boolean(apiKey) && apiKey !== "SIMULATED_KEY");
   }, []);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) return;
+    const days = Number(appSettings.compliance.retentionDays || 0);
+    if (!Number.isFinite(days) || days <= 0) return;
+    dbService.purgeExpiredCalls().catch(() => {});
+  }, [isFirebaseConfigured, appSettings.compliance.retentionDays]);
 
   // --- Real-Time Colleague Signaling Listener ---
   useEffect(() => {
@@ -83,7 +98,7 @@ const App: React.FC = () => {
         if (change.type === 'added' || change.type === 'modified') {
           if (!activeCall || activeCall.id === callData.id) {
             setActiveCall(callData);
-            if (callData.status === CallStatus.DIALING) dbService.saveCall({ ...callData, status: CallStatus.RINGING });
+            if (callData.status === CallStatus.DIALING) persistCall({ ...callData, status: CallStatus.RINGING });
           }
         } else if (change.type === 'removed') {
           if (activeCall?.id === callData.id) handleHangup();
@@ -103,9 +118,7 @@ const App: React.FC = () => {
     fetchCalendarEvents().then(setMeetings).catch(() => {});
     if (isFirebaseConfigured) {
       const handleFirebaseError = (error: Error) => {
-        console.warn('Firestore snapshot error, disabling Firebase:', error);
         setIsFirebaseConfigured(false);
-        addNotification('info', 'Firestore permissions missing. Running in demo mode.');
       };
       const unsubCalls = dbService.fetchHistoricalCalls((calls) => setCallHistory(calls), handleFirebaseError);
       const unsubLeads = dbService.fetchLeads((leads) => setLeads(leads), handleFirebaseError);
@@ -134,12 +147,12 @@ const App: React.FC = () => {
     if (type === 'video') updatedCall.isVideo = !activeCall.isVideo;
     else updatedCall.isScreenSharing = !activeCall.isScreenSharing;
     setActiveCall(updatedCall);
-    if (isFirebaseConfigured) await dbService.saveCall(updatedCall);
+    await persistCall(updatedCall);
   };
 
   const updateCall = async (call: Call) => {
     setActiveCall(call);
-    if (isFirebaseConfigured) await dbService.saveCall(call);
+    await persistCall(call);
   };
 
   const handleHold = () => {
@@ -197,7 +210,7 @@ const App: React.FC = () => {
       const currentParticipants = prev.participants || [];
       if (currentParticipants.includes(userId)) return prev;
       const updated = { ...prev, participants: [...currentParticipants, userId] };
-      if (isFirebaseConfigured) dbService.saveCall(updated);
+      persistCall(updated);
       return updated;
     });
     addNotification('success', `Admitted ${user.name} to neural session.`);
@@ -220,7 +233,7 @@ const App: React.FC = () => {
       id: `ext_${Date.now()}`, direction: 'outbound', customerName: name, phoneNumber: phone, queue: 'External Hub', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, emailSynced: true, transcriptionEnabled: true
     };
     setActiveCall(newCall);
-    if (isFirebaseConfigured) await dbService.saveCall(newCall);
+    await persistCall(newCall);
     setAgentStatus(AgentStatus.BUSY);
     setTimeout(async () => {
       setActiveCall(prev => prev ? { ...prev, status: CallStatus.ACTIVE } : null);
@@ -263,7 +276,7 @@ const App: React.FC = () => {
     };
     setShowPersonaModal(false);
     setActiveCall(newCall);
-    if (isFirebaseConfigured) await dbService.saveCall(newCall);
+    await persistCall(newCall);
     setAgentStatus(AgentStatus.BUSY);
     setTimeout(async () => {
       setActiveCall(prev => prev ? { ...prev, status: CallStatus.ACTIVE } : null);
@@ -292,7 +305,7 @@ const App: React.FC = () => {
       id: `int_${Date.now()}`, direction: 'internal', customerName: target.name, phoneNumber: `EXT ${target.extension}`, queue: 'Internal Matrix', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, targetAgentId: target.id, isVideo: true, participants: [target.id, currentUser!.id], emailSynced: true, transcriptionEnabled: true
     };
     setActiveCall(newCall);
-    if (isFirebaseConfigured) await dbService.saveCall(newCall);
+    await persistCall(newCall);
     setAgentStatus(AgentStatus.BUSY);
     if (!isFirebaseConfigured) {
       setTimeout(() => {
@@ -305,7 +318,7 @@ const App: React.FC = () => {
     if (!activeCall) return;
     const updatedCall = { ...activeCall, status: CallStatus.ACTIVE };
     setActiveCall(updatedCall);
-    if (isFirebaseConfigured) await dbService.saveCall(updatedCall);
+    await persistCall(updatedCall);
     setAgentStatus(AgentStatus.BUSY);
   };
 
@@ -316,7 +329,7 @@ const App: React.FC = () => {
     if (activeCall) {
       const finalCall: Call = { ...activeCall, status: CallStatus.ENDED, durationSeconds: (Date.now() - activeCall.startTime)/1000 };
       setCallHistory(h => [finalCall, ...h]);
-      if (isFirebaseConfigured) await dbService.saveCall(finalCall);
+      await persistCall(finalCall);
       setActiveCall(null); 
       setAgentStatus(AgentStatus.WRAP_UP);
     }
@@ -394,7 +407,8 @@ const App: React.FC = () => {
               onToggleMedia={toggleMedia} 
               onInviteParticipant={addParticipantToCall}
               onUpdateCall={updateCall}
-              team={appSettings.team} 
+              team={appSettings.team}
+              isFirebaseConfigured={isFirebaseConfigured}
             />
           ) : (
             <>
@@ -402,7 +416,7 @@ const App: React.FC = () => {
                 <div className="p-8 h-full">
                   <div className="h-full flex gap-8">
                     <div className="flex-1 min-w-0">
-                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} />
+                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} isFirebaseConfigured={isFirebaseConfigured} />
                     </div>
                     <div className="shrink-0">
                       <Softphone userExtension={currentUser?.extension} allowedNumbers={appSettings.voice.allowedNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} />
@@ -445,5 +459,7 @@ const App: React.FC = () => {
     </div>
   );
 };
+
+export default App;
 
 export default App;

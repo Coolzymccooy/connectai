@@ -74,6 +74,8 @@ export interface Call {
   emailSynced?: boolean;
   isRecording?: boolean;
   transcriptionEnabled?: boolean;
+  expiresAt?: number;
+  piiRedacted?: boolean;
 }
 
 export type RsvpStatus = 'pending' | 'accepted' | 'declined' | 'forwarded';
@@ -214,6 +216,7 @@ export interface Conversation {
   messages: Message[];
   status: 'open' | 'closed';
   teammateId?: string; 
+  participantIds?: string[];
 }
 
 export interface Lead {

@@ -1,4 +1,6 @@
 
+import jwt from 'jsonwebtoken';
+
 // Define User Roles
 export const UserRole = {
   ADMIN: 'ADMIN',
@@ -7,11 +9,25 @@ export const UserRole = {
   ANALYST: 'ANALYST'
 };
 
-// Mock Token Verification
+const AUTH_MODE = process.env.AUTH_MODE || 'dev'; // dev | strict
+const AUTH_JWT_SECRET = process.env.AUTH_JWT_SECRET || '';
+const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || 'default-tenant';
+
 const verifyToken = async (token) => {
-  if (token === 'dev-admin-token') return { uid: 'admin-1', email: 'admin@connectai.com', role: UserRole.ADMIN };
-  if (token === 'dev-agent-token') return { uid: 'agent-1', email: 'agent@connectai.com', role: UserRole.AGENT };
-  return null; // Invalid
+  if (!AUTH_JWT_SECRET) return null;
+  try {
+    const payload = jwt.verify(token, AUTH_JWT_SECRET);
+    if (!payload || typeof payload !== 'object') return null;
+    return {
+      uid: payload.sub || payload.uid || payload.userId,
+      email: payload.email,
+      role: payload.role || UserRole.AGENT,
+      tenantId: payload.tenantId || DEFAULT_TENANT_ID,
+      name: payload.name,
+    };
+  } catch {
+    return null;
+  }
 };
 
 /**
@@ -19,13 +35,18 @@ const verifyToken = async (token) => {
  */
 export const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
+  const tenantHeader = req.headers['x-tenant-id'];
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    // For demo purposes, we allow unauthenticated requests to proceed as 'GUEST' or fail.
-    // Let's fail for strict mode.
-    // return res.status(401).json({ error: 'Unauthorized: No token provided' });
-    
-    // DEV MODE BYPASS:
-    req.user = { uid: 'dev-1', role: UserRole.ADMIN }; 
+    if (AUTH_MODE === 'strict') {
+      return res.status(401).json({ error: 'Unauthorized: No token provided' });
+    }
+    req.user = {
+      uid: 'dev-1',
+      role: UserRole.ADMIN,
+      tenantId: (tenantHeader || DEFAULT_TENANT_ID).toString(),
+      name: 'Dev Admin',
+    };
+    req.tenantId = req.user.tenantId;
     return next();
   }
 
@@ -37,6 +58,7 @@ export const authenticate = async (req, res, next) => {
   }
 
   req.user = user;
+  req.tenantId = user.tenantId || DEFAULT_TENANT_ID;
   next();
 };
 

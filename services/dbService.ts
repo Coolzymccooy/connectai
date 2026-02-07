@@ -1,12 +1,14 @@
 
-import { db, collection, doc, setDoc, getDoc, updateDoc, addDoc, query, orderBy, limit, onSnapshot } from './firebase';
-import { Call, Lead, AppSettings, Conversation, User } from '../types';
+import { db, collection, doc, setDoc, getDoc, updateDoc, addDoc, query, orderBy, limit, onSnapshot, where, deleteDoc, getDocs } from './firebase';
+import { Call, Lead, AppSettings, Conversation, User, Message, MeetingMessage } from '../types';
 
 const CALLS_COLLECTION = 'calls';
 const LEADS_COLLECTION = 'leads';
 const SETTINGS_COLLECTION = 'settings';
 const CONVERSATIONS_COLLECTION = 'conversations';
 const USERS_COLLECTION = 'users';
+const MESSAGES_COLLECTION = 'messages';
+const MEETING_MESSAGES_COLLECTION = 'meetingMessages';
 
 export const saveCall = async (call: Call) => {
   try {
@@ -68,4 +70,86 @@ export const fetchLeads = (callback: (leads: Lead[]) => void, onError?: (error: 
 export const saveUser = async (user: User) => {
   const userRef = doc(db, USERS_COLLECTION, user.id);
   await setDoc(userRef, user, { merge: true });
+};
+
+export const upsertConversation = async (conversation: Conversation & { participantIds?: string[] }) => {
+  const convoRef = doc(db, CONVERSATIONS_COLLECTION, conversation.id);
+  await setDoc(convoRef, {
+    ...conversation,
+    participantIds: conversation.participantIds || [],
+    updatedAt: Date.now(),
+  }, { merge: true });
+};
+
+export const fetchConversations = (userId: string, callback: (conversations: Conversation[]) => void, onError?: (error: Error) => void) => {
+  const q = query(
+    collection(db, CONVERSATIONS_COLLECTION),
+    where('participantIds', 'array-contains', userId),
+    orderBy('lastMessageTime', 'desc'),
+    limit(200)
+  );
+  return onSnapshot(q, (snapshot) => {
+    const convos = snapshot.docs.map(doc => ({ ...(doc.data() as Conversation), id: doc.id, messages: (doc.data() as any).messages || [] }));
+    callback(convos);
+  }, (error) => {
+    if (onError) onError(error as Error);
+    else console.warn('fetchConversations snapshot error:', error);
+  });
+};
+
+export const fetchConversationMessages = (conversationId: string, callback: (messages: Message[]) => void, onError?: (error: Error) => void) => {
+  const q = query(
+    collection(db, MESSAGES_COLLECTION),
+    where('conversationId', '==', conversationId),
+    orderBy('timestamp', 'asc'),
+    limit(500)
+  );
+  return onSnapshot(q, (snapshot) => {
+    const msgs = snapshot.docs.map(doc => ({ ...(doc.data() as Message), id: doc.id }));
+    callback(msgs);
+  }, (error) => {
+    if (onError) onError(error as Error);
+    else console.warn('fetchConversationMessages snapshot error:', error);
+  });
+};
+
+export const sendConversationMessage = async (conversationId: string, message: Message) => {
+  await addDoc(collection(db, MESSAGES_COLLECTION), { ...message, conversationId });
+  const convoRef = doc(db, CONVERSATIONS_COLLECTION, conversationId);
+  await setDoc(convoRef, {
+    lastMessage: message.text || 'Attachment Packet',
+    lastMessageTime: message.timestamp,
+    updatedAt: Date.now(),
+  }, { merge: true });
+};
+
+export const fetchMeetingMessages = (callId: string, callback: (messages: MeetingMessage[]) => void, onError?: (error: Error) => void) => {
+  const q = query(
+    collection(db, MEETING_MESSAGES_COLLECTION),
+    where('callId', '==', callId),
+    orderBy('timestamp', 'asc'),
+    limit(500)
+  );
+  return onSnapshot(q, (snapshot) => {
+    const msgs = snapshot.docs.map(doc => ({ ...(doc.data() as MeetingMessage), id: doc.id }));
+    callback(msgs);
+  }, (error) => {
+    if (onError) onError(error as Error);
+    else console.warn('fetchMeetingMessages snapshot error:', error);
+  });
+};
+
+export const sendMeetingMessage = async (callId: string, message: MeetingMessage) => {
+  await addDoc(collection(db, MEETING_MESSAGES_COLLECTION), { ...message, callId });
+};
+
+export const purgeExpiredCalls = async (now = Date.now()) => {
+  const q = query(
+    collection(db, CALLS_COLLECTION),
+    where('expiresAt', '<=', now),
+    limit(200)
+  );
+  const snapshot = await getDocs(q);
+  await Promise.all(snapshot.docs.map(docRef => deleteDoc(docRef.ref)));
+  return snapshot.size;
 };

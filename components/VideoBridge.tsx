@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Call, User, MeetingMessage, Reaction, ToolAction, CallStatus, Attachment, TranscriptSegment } from '../types';
 import { getStrategicIntelligence, extractToolActions, analyzeCallTranscript } from '../services/geminiService';
+import * as dbService from '../services/dbService';
 
 // --- SUB-COMPONENT: PRODUCTION-GRADE VIDEO SLOT ---
 const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean, effect?: 'none' | 'blur' | 'virtual', isLocal?: boolean }> = ({ stream, mirrored, effect, isLocal }) => {
@@ -74,13 +75,14 @@ interface VideoBridgeProps {
   onInviteParticipant: (userId: string) => void;
   onUpdateCall?: (call: Call) => void;
   team: User[];
+  isFirebaseConfigured?: boolean;
 }
 
 type SidebarTab = 'chat' | 'intelligence' | 'actions' | 'participants' | 'transcript';
 type SettingsTab = 'video' | 'audio' | 'visuals' | 'core';
 
 export const VideoBridge: React.FC<VideoBridgeProps> = ({ 
-  activeCall, currentUser, onHangup, onToggleMedia, onInviteParticipant, onUpdateCall, team 
+  activeCall, currentUser, onHangup, onToggleMedia, onInviteParticipant, onUpdateCall, team, isFirebaseConfigured = false
 }) => {
   const [viewMode, setViewMode] = useState<'gallery' | 'speaker'>('gallery');
   const [activeTab, setActiveTab] = useState<SidebarTab>('intelligence');
@@ -103,11 +105,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [screenStream, setScreenStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
+  const [activeVideoStream, setActiveVideoStream] = useState<MediaStream | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
+  const localStreamRef = useRef<MediaStream | null>(null);
   
   // PeerJS
   const peerRef = useRef<Peer | null>(null);
   const [peerId, setPeerId] = useState<string>('');
+  const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   
   // Feature States
   const [intelligence, setIntelligence] = useState<{ text: string, links: {title: string, uri: string}[] } | null>(null);
@@ -117,39 +122,65 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [messages, setMessages] = useState<MeetingMessage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    if (!isFirebaseConfigured) return;
+    return dbService.fetchMeetingMessages(activeCall.id, setMessages, (error) => {
+      console.warn('Meeting chat sync failed:', error);
+    });
+  }, [isFirebaseConfigured, activeCall.id]);
+
+  const registerConnection = useCallback((call: MediaConnection, remoteUserId: string) => {
+    connectionsRef.current.set(remoteUserId, call);
+    call.on('stream', (remoteStream) => {
+      setRemoteStreams(prev => new Map(prev).set(remoteUserId, remoteStream));
+    });
+    call.on('close', () => {
+      connectionsRef.current.delete(remoteUserId);
+      setRemoteStreams(prev => {
+        const next = new Map(prev);
+        next.delete(remoteUserId);
+        return next;
+      });
+    });
+    call.on('error', (err) => {
+      console.warn('PeerJS call error', err);
+    });
+  }, []);
+
   // --- PEERJS INITIALIZATION ---
   useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
+
+  useEffect(() => {
     const id = `connectai-user-${currentUser.id}`; // Deterministic ID
-    const peer = new Peer(id, {
-        debug: 1
-    });
+    const peer = new Peer(id, { debug: 1 });
 
     peer.on('open', (id) => {
-        console.log('My peer ID is: ' + id);
-        setPeerId(id);
+      console.log('My peer ID is: ' + id);
+      setPeerId(id);
     });
 
-    peer.on('call', (call) => {
-        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-            .then((stream) => {
-                setLocalStream(stream); // Ensure we have local stream
-                call.answer(stream); // Answer the call with an A/V stream.
-                call.on('stream', (remoteStream) => {
-                    // Extract user ID from peer ID if possible, or just use call.peer
-                    const remoteUserId = call.peer.replace('connectai-user-', '');
-                    setRemoteStreams(prev => new Map(prev).set(remoteUserId, remoteStream));
-                });
-            }, (err) => {
-                console.error('Failed to get local stream', err);
-            });
+    peer.on('call', async (call) => {
+      try {
+        const existing = localStreamRef.current;
+        const stream = existing ?? await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        if (!existing) setLocalStream(stream);
+        call.answer(stream);
+        registerConnection(call, call.peer.replace('connectai-user-', ''));
+      } catch (err) {
+        console.error('Failed to get local stream', err);
+      }
     });
 
     peerRef.current = peer;
 
     return () => {
-        peer.destroy();
+      connectionsRef.current.forEach(c => c.close());
+      connectionsRef.current.clear();
+      peer.destroy();
     };
-  }, [currentUser.id]);
+  }, [currentUser.id, registerConnection]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -221,6 +252,50 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     }
   }, [isMuted, activeCall.isVideo, localStream]);
 
+
+  const replaceOutgoingVideoTrack = useCallback((track: MediaStreamTrack | null) => {
+    connectionsRef.current.forEach((call) => {
+      const sender = call.peerConnection?.getSenders?.().find(s => s.track?.kind === 'video');
+      if (sender && track) {
+        sender.replaceTrack(track).catch(() => {});
+      }
+    });
+  }, []);
+
+  const stopScreenShare = useCallback((syncToggle: boolean) => {
+    if (screenStream) {
+      screenStream.getTracks().forEach(t => t.stop());
+    }
+    setScreenStream(null);
+    const cameraTrack = localStream?.getVideoTracks()[0] || null;
+    if (cameraTrack) replaceOutgoingVideoTrack(cameraTrack);
+    if (syncToggle && activeCall.isScreenSharing) {
+      onToggleMedia('screen');
+    }
+  }, [screenStream, localStream, replaceOutgoingVideoTrack, activeCall.isScreenSharing, onToggleMedia]);
+
+  const startScreenShare = useCallback(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      const track = stream.getVideoTracks()[0];
+      if (!track) return;
+      track.onended = () => stopScreenShare(true);
+      setScreenStream(stream);
+      replaceOutgoingVideoTrack(track);
+    } catch (err) {
+      console.error('Screen share rejected:', err);
+      if (activeCall.isScreenSharing) onToggleMedia('screen');
+    }
+  }, [replaceOutgoingVideoTrack, stopScreenShare, activeCall.isScreenSharing, onToggleMedia]);
+
+  useEffect(() => {
+    if (activeCall.isScreenSharing) {
+      startScreenShare();
+    } else {
+      stopScreenShare(false);
+    }
+  }, [activeCall.isScreenSharing, startScreenShare, stopScreenShare]);
+
   // Swift Toggling Effect: Only enable/disable tracks instead of re-acquiring hardware
   useEffect(() => {
     if (localStream) {
@@ -246,6 +321,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (activeCall.isScreenSharing && screenStream) {
+      setActiveVideoStream(screenStream);
+    } else {
+      setActiveVideoStream(localStream);
+    }
+  }, [activeCall.isScreenSharing, screenStream, localStream]);
+
   const toggleMute = () => {
     const nextMuted = !isMuted;
     setIsMuted(nextMuted);
@@ -263,7 +346,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       timestamp: Date.now(),
       attachments: files 
     };
-    setMessages(prev => [...prev, msg]);
+    if (isFirebaseConfigured) {
+      dbService.sendMeetingMessage(activeCall.id, msg).catch(() => {});
+    } else {
+      setMessages(prev => [...prev, msg]);
+    }
     setChatInput('');
   };
 
@@ -324,14 +411,27 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   };
 
   // --- CALL LOGIC ---
-  const callUser = (targetUserId: string) => {
-      if (!peerRef.current || !localStream) return;
-      const targetPeerId = `connectai-user-${targetUserId}`;
-      const call = peerRef.current.call(targetPeerId, localStream);
-      
-      call.on('stream', (remoteStream) => {
-          setRemoteStreams(prev => new Map(prev).set(targetUserId, remoteStream));
-      });
+  const callUser = async (targetUserId: string) => {
+    if (!peerRef.current) return;
+    const stream = localStream ?? await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    if (!localStream) setLocalStream(stream);
+    const targetPeerId = `connectai-user-${targetUserId}`;
+    const call = peerRef.current.call(targetPeerId, stream);
+    registerConnection(call, targetUserId);
+    if (activeCall.isScreenSharing && screenStream?.getVideoTracks()[0]) {
+      replaceOutgoingVideoTrack(screenStream.getVideoTracks()[0]);
+    }
+  };
+
+  const handleTerminate = () => {
+    connectionsRef.current.forEach(c => c.close());
+    connectionsRef.current.clear();
+    setRemoteStreams(new Map());
+    localStream?.getTracks().forEach(t => t.stop());
+    screenStream?.getTracks().forEach(t => t.stop());
+    setLocalStream(null);
+    setScreenStream(null);
+    onHangup();
   };
 
   return (
@@ -375,7 +475,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                  <div key={p.id} className="relative bg-slate-900 rounded-[2.5rem] border border-white/5 overflow-hidden group shadow-2xl aspect-video flex items-center justify-center">
                     {p.id === currentUser.id ? (
                       activeCall.isVideo ? (
-                        <NeuralVideoSlot stream={localStream} mirrored={mirrorVideo} effect={backgroundEffect} isLocal={true} />
+                        <NeuralVideoSlot stream={activeVideoStream} mirrored={mirrorVideo} effect={backgroundEffect} isLocal={true} />
                       ) : (
                         <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
                            <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl opacity-40 grayscale" />
@@ -562,7 +662,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                </button>
             </div>
 
-            <button onClick={onHangup} className="px-10 py-5 bg-red-600 text-white rounded-2xl font-black uppercase tracking-widest shadow-xl hover:bg-red-700 transition-all flex items-center gap-4 text-[10px] active:scale-95 group">
+            <button onClick={handleTerminate} className="px-10 py-5 bg-red-600 text-white rounded-2xl font-black uppercase tracking-widest shadow-xl hover:bg-red-700 transition-all flex items-center gap-4 text-[10px] active:scale-95 group">
                <PhoneOff size={20} className="group-hover:rotate-12 transition-transform"/> Terminate
             </button>
          </div>
