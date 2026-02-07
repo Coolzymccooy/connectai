@@ -176,8 +176,9 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
     const setInitialPosition = () => {
       const width = isMinimized ? 180 : 320;
       const height = isMinimized ? 72 : 620;
+      // Position on right side, but not too far down
       const x = Math.max(16, window.innerWidth - width - 32);
-      const y = Math.max(80, Math.min(140, window.innerHeight - height - 32));
+      const y = Math.max(100, Math.min(200, window.innerHeight - height - 32));
       setPosition({ x, y });
     };
     setInitialPosition();
@@ -393,12 +394,10 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
     );
   }
 
-  console.log('[Softphone] Rendering:', { floating, position, isMinimized, status, clientStatus });
-
   return (
     <div
       className={`${floating ? 'fixed z-[9999]' : 'relative'} w-[320px] bg-slate-900 rounded-[3rem] p-8 shadow-2xl border border-white/10 flex flex-col items-center overflow-hidden`}
-      style={floating ? { transform: `translate3d(${position.x}px, ${position.y}px, 0)` } : undefined}
+      style={floating ? { transform: `translate3d(${position.x}px, ${position.y}px, 0)`, top: 0, left: 0 } : undefined}
     >
       {/* Dynamic Island / Status */}
       <div className="absolute top-0 left-0 w-full h-32 bg-gradient-to-b from-black/50 to-transparent pointer-events-none"></div>
