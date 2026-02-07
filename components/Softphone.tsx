@@ -1,16 +1,8 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { Phone, PhoneOff, Mic, MicOff, Volume2, User, Delete, Minimize2, Maximize2, GripHorizontal, History } from 'lucide-react';
+import { saveCall, fetchAgentCalls } from '../services/dbService';
 import { Device, Call as TwilioCall } from '@twilio/voice-sdk';
-import type { AgentStatus, Call as AppCall, Lead, User as TeamUser } from '../types';
-
-type DialHistoryItem = {
-  id: string;
-  number: string;
-  direction: 'incoming' | 'outgoing';
-  status: 'dialing' | 'ringing' | 'connected' | 'ended' | 'missed' | 'failed';
-  startedAt: number;
-  durationSeconds?: number;
-};
+import { AgentStatus, Call as AppCall, CallDirection, CallStatus, Lead, User as TeamUser } from '../types';
 
 interface SoftphoneProps {
   userExtension?: string;
@@ -31,9 +23,10 @@ interface SoftphoneProps {
   onTestTts?: () => void;
   onOpenFreeCall?: () => void;
   floating?: boolean;
+  isFirebaseConfigured?: boolean;
 }
 
-export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = true }) => {
+export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = true, isFirebaseConfigured = false }) => {
   const [number, setNumber] = useState('');
   const [status, setStatus] = useState<'idle' | 'dialing' | 'connected' | 'incoming'>('idle');
   const [isMuted, setIsMuted] = useState(false);
@@ -48,8 +41,21 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
   const [isMinimized, setIsMinimized] = useState(false);
   const [position, setPosition] = useState({ x: 0, y: 120 });
   const dragRef = useRef<{ active: boolean; startX: number; startY: number; originX: number; originY: number } | null>(null);
-  const [history, setHistory] = useState<DialHistoryItem[]>([]);
+  const [history, setHistory] = useState<AppCall[]>([]);
   const activeHistoryIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) return;
+    // Fetch recent calls for this agent
+    try {
+      const unsubscribe = fetchAgentCalls(userExtension || 'unknown', 6, (calls) => {
+        setHistory(calls);
+      });
+      return () => unsubscribe();
+    } catch (err) {
+      console.warn('Failed to fetch softphone history:', err);
+    }
+  }, [userExtension, isFirebaseConfigured]);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,7 +75,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
 
         const nextDevice = new Device(data.token, {
           logLevel: 'info',
-          codecPreferences: ['opus', 'pcmu'],
+          codecPreferences: ['opus', 'pcmu'] as any[],
         });
 
         deviceRef.current = nextDevice;
@@ -110,19 +116,32 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
           const incomingNumber = incomingCall?.parameters?.From || 'Unknown';
           const historyId = `in_${Date.now()}`;
           activeHistoryIdRef.current = historyId;
-          setHistory(prev => [{
+
+          const newCallObs: AppCall = {
             id: historyId,
-            number: incomingNumber,
-            direction: 'incoming',
-            status: 'ringing',
-            startedAt: Date.now()
-          }, ...prev].slice(0, 25));
+            direction: 'inbound',
+            customerName: incomingNumber,
+            phoneNumber: incomingNumber,
+            queue: 'Direct',
+            startTime: Date.now(),
+            durationSeconds: 0,
+            status: CallStatus.RINGING,
+            transcript: [],
+            agentId: userExtension,
+            extension: userExtension
+          };
+          if (isFirebaseConfigured) saveCall(newCallObs);
+
           incomingCall.on('accept', () => {
             setStatus('connected');
             if (activeHistoryIdRef.current) {
-              setHistory(prev => prev.map(entry => entry.id === activeHistoryIdRef.current
-                ? { ...entry, status: 'connected', startedAt: Date.now() }
-                : entry));
+              if (isFirebaseConfigured) {
+                saveCall({
+                  ...newCallObs,
+                  status: CallStatus.ACTIVE,
+                  startTime: Date.now()
+                });
+              }
             }
             if (timerRef.current) window.clearInterval(timerRef.current);
             timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
@@ -162,7 +181,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
       setPosition({ x, y });
     };
     setInitialPosition();
-  }, [floating]);
+  }, [floating, isMinimized]);
 
   useEffect(() => {
     if (!floating) return;
@@ -218,21 +237,28 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
     try {
       const historyId = `out_${Date.now()}`;
       activeHistoryIdRef.current = historyId;
-      setHistory(prev => [{
+
+      const newCallObs: AppCall = {
         id: historyId,
-        number: normalized,
-        direction: 'outgoing',
-        status: 'dialing',
-        startedAt: Date.now()
-      }, ...prev].slice(0, 25));
+        direction: 'outbound',
+        customerName: normalized,
+        phoneNumber: normalized,
+        queue: 'Outbound',
+        startTime: Date.now(),
+        durationSeconds: 0,
+        status: CallStatus.DIALING,
+        transcript: [],
+        agentId: userExtension,
+        extension: userExtension
+      };
+      if (isFirebaseConfigured) saveCall(newCallObs);
+
       const newCall = await device.connect({ params: { To: normalized } });
       setCall(newCall);
       newCall.on('accept', () => {
         setStatus('connected');
         if (activeHistoryIdRef.current) {
-          setHistory(prev => prev.map(entry => entry.id === activeHistoryIdRef.current
-            ? { ...entry, status: 'connected', startedAt: Date.now() }
-            : entry));
+          if (isFirebaseConfigured) saveCall({ ...newCallObs, status: CallStatus.ACTIVE, startTime: Date.now() });
         }
         if (timerRef.current) window.clearInterval(timerRef.current);
         timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
@@ -243,9 +269,19 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
     } catch (err) {
       console.error('Twilio call failed:', err);
       if (activeHistoryIdRef.current) {
-        setHistory(prev => prev.map(entry => entry.id === activeHistoryIdRef.current
-          ? { ...entry, status: 'failed', durationSeconds: 0 }
-          : entry));
+        if (isFirebaseConfigured) {
+          saveCall({
+            id: activeHistoryIdRef.current,
+            status: CallStatus.ENDED, // Failed
+            durationSeconds: 0,
+            startTime: Date.now(),
+            transcript: [],
+            direction: 'outbound',
+            customerName: normalized,
+            phoneNumber: normalized,
+            queue: 'Failed',
+          });
+        }
       }
       setStatus('idle');
     }
@@ -266,12 +302,25 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
     device?.disconnectAll();
     if (activeHistoryIdRef.current) {
       const endedAt = Date.now();
-      setHistory(prev => prev.map(entry => {
-        if (entry.id !== activeHistoryIdRef.current) return entry;
-        const durationSeconds = Math.max(0, Math.floor((endedAt - entry.startedAt) / 1000));
-        const nextStatus = entry.status === 'connected' ? 'ended' : (entry.direction === 'incoming' ? 'missed' : 'failed');
-        return { ...entry, status: nextStatus, durationSeconds };
-      }));
+      // We don't need to manually map history here as onSnapshot will update it.
+      // We just need to save the final state to DB.
+      // But we need to know the start time to calc duration?
+      // For now, let's just use the current history item if we could find it, or just use duration state.
+      // A better way is to fetch the document or keep a ref to the start time.
+      // Since we don't have the start time in ref easily without fetching, use duration state.
+
+      const currentDuration = duration; // from state
+
+      // We need to construct the call object to save. 
+      // Since it's a patch (merge=true), we can just update status and duration.
+      if (isFirebaseConfigured) {
+        saveCall({
+          id: activeHistoryIdRef.current,
+          status: CallStatus.ENDED,
+          durationSeconds: currentDuration,
+        } as AppCall);
+      }
+
       activeHistoryIdRef.current = null;
     }
   };
@@ -285,14 +334,14 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
   const renderHistory = () => (
     <div className="w-full mt-6">
       <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.3em] text-slate-500 mb-3">
-        <span className="flex items-center gap-2"><History size={12}/> Recent Calls</span>
+        <span className="flex items-center gap-2"><History size={12} /> Recent Calls</span>
         <span>{history.length}</span>
       </div>
       <div className="space-y-2 max-h-36 overflow-auto pr-1">
         {history.slice(0, 6).map(entry => (
           <div key={entry.id} className="flex items-center justify-between bg-white/5 rounded-xl px-3 py-2">
             <div className="flex flex-col">
-              <span className="text-xs text-white font-semibold">{entry.number}</span>
+              <span className="text-xs text-white font-semibold">{entry.phoneNumber}</span>
               <span className="text-[9px] uppercase tracking-widest text-slate-500">
                 {entry.direction} • {entry.status}
               </span>
@@ -323,11 +372,11 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
   if (floating && isMinimized) {
     return (
       <div
-        className="fixed z-[80] bg-slate-900/95 border border-white/10 shadow-2xl rounded-2xl px-4 py-3 flex items-center gap-3"
+        className="fixed z-[9999] bg-slate-900/95 border border-white/10 shadow-2xl rounded-2xl px-4 py-3 flex items-center gap-3"
         style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)` }}
       >
         <button onPointerDown={handleDragStart} className="text-slate-400 hover:text-white">
-          <GripHorizontal size={16}/>
+          <GripHorizontal size={16} />
         </button>
         <div className="flex flex-col">
           <span className="text-xs text-white font-semibold">Softphone</span>
@@ -338,15 +387,17 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
           className="ml-2 p-2 rounded-xl bg-white/10 text-white hover:bg-white/20"
           title="Restore"
         >
-          <Maximize2 size={14}/>
+          <Maximize2 size={14} />
         </button>
       </div>
     );
   }
 
+  console.log('[Softphone] Rendering:', { floating, position, isMinimized, status, clientStatus });
+
   return (
     <div
-      className={`${floating ? 'fixed z-[70]' : 'relative'} w-[320px] bg-slate-900 rounded-[3rem] p-8 shadow-2xl border border-white/10 flex flex-col items-center overflow-hidden`}
+      className={`${floating ? 'fixed z-[9999]' : 'relative'} w-[320px] bg-slate-900 rounded-[3rem] p-8 shadow-2xl border border-white/10 flex flex-col items-center overflow-hidden`}
       style={floating ? { transform: `translate3d(${position.x}px, ${position.y}px, 0)` } : undefined}
     >
       {/* Dynamic Island / Status */}
@@ -354,47 +405,47 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
 
       <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-20">
         <button onPointerDown={handleDragStart} className="text-slate-400 hover:text-white">
-          <GripHorizontal size={18}/>
+          <GripHorizontal size={18} />
         </button>
         <button
           onClick={() => setIsMinimized(true)}
           className="p-2 rounded-xl bg-white/5 text-slate-300 hover:bg-white/10"
           title="Minimize"
         >
-          <Minimize2 size={14}/>
+          <Minimize2 size={14} />
         </button>
       </div>
 
       <div className="mb-8 w-full text-center relative z-10">
-         <div className="flex justify-center mb-4">
-            <div className={`w-3 h-3 rounded-full ${status === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-slate-600'}`}></div>
-         </div>
-         {status === 'connected' ? (
-           <h3 className="text-3xl font-black text-white tracking-tighter mb-1 h-10">{formatTime(duration)}</h3>
-         ) : (
-           <input
-             value={number}
-             onChange={(e) => handleInputChange(e.target.value)}
-             onPaste={handlePaste}
-             placeholder="Enter Number"
-             className="w-full bg-transparent text-center text-2xl font-black text-white tracking-tighter mb-1 h-10 outline-none placeholder:text-slate-600"
-           />
-         )}
-         <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">{status === 'idle' ? 'Ready to Admit' : status.toUpperCase()}</p>
-         <p className="text-[9px] uppercase tracking-widest text-slate-600 mt-2">{clientStatus} • {identity}</p>
-         {clientError && (
-           <div className="mt-1 flex items-center justify-center gap-2">
-             <p className="text-[9px] text-red-400">{clientError}</p>
-           </div>
-         )}
+        <div className="flex justify-center mb-4">
+          <div className={`w-3 h-3 rounded-full ${status === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-slate-600'}`}></div>
+        </div>
+        {status === 'connected' ? (
+          <h3 className="text-3xl font-black text-white tracking-tighter mb-1 h-10">{formatTime(duration)}</h3>
+        ) : (
+          <input
+            value={number}
+            onChange={(e) => handleInputChange(e.target.value)}
+            onPaste={handlePaste}
+            placeholder="Enter Number"
+            className="w-full bg-transparent text-center text-2xl font-black text-white tracking-tighter mb-1 h-10 outline-none placeholder:text-slate-600"
+          />
+        )}
+        <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">{status === 'idle' ? 'Ready to Admit' : status.toUpperCase()}</p>
+        <p className="text-[9px] uppercase tracking-widest text-slate-600 mt-2">{clientStatus} • {identity}</p>
+        {clientError && (
+          <div className="mt-1 flex items-center justify-center gap-2">
+            <p className="text-[9px] text-red-400">{clientError}</p>
+          </div>
+        )}
       </div>
 
       {/* Keypad */}
       {status === 'idle' || status === 'dialing' ? (
         <div className="grid grid-cols-3 gap-4 mb-8">
-          {[1,2,3,4,5,6,7,8,9,'+',0,'#'].map(n => (
-            <button 
-              key={n} 
+          {[1, 2, 3, 4, 5, 6, 7, 8, 9, '+', 0, '#'].map(n => (
+            <button
+              key={n}
               onClick={() => handleDigit(n.toString())}
               className="w-16 h-16 rounded-full bg-white/5 hover:bg-white/10 text-white font-medium text-xl flex items-center justify-center transition-all active:scale-95"
             >
@@ -404,52 +455,52 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
         </div>
       ) : (
         <div className="flex-1 flex flex-col items-center justify-center gap-6 mb-8 w-full">
-           <div className="w-24 h-24 rounded-full bg-slate-800 flex items-center justify-center relative">
-              <User size={40} className="text-slate-500"/>
-              <div className="absolute inset-0 border-2 border-green-500/30 rounded-full animate-ping"></div>
-           </div>
-           <div className="w-full bg-slate-800/50 rounded-xl p-4">
-              <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2"><span>Signal</span><span>HD Voice</span></div>
-              <div className="flex gap-1 h-8 items-end">
-                 {[...Array(20)].map((_, i) => <div key={i} className="flex-1 bg-green-500 rounded-full animate-pulse" style={{height: `${Math.random() * 100}%`}}></div>)}
-              </div>
-           </div>
+          <div className="w-24 h-24 rounded-full bg-slate-800 flex items-center justify-center relative">
+            <User size={40} className="text-slate-500" />
+            <div className="absolute inset-0 border-2 border-green-500/30 rounded-full animate-ping"></div>
+          </div>
+          <div className="w-full bg-slate-800/50 rounded-xl p-4">
+            <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2"><span>Signal</span><span>HD Voice</span></div>
+            <div className="flex gap-1 h-8 items-end">
+              {[...Array(20)].map((_, i) => <div key={i} className="flex-1 bg-green-500 rounded-full animate-pulse" style={{ height: `${Math.random() * 100}%` }}></div>)}
+            </div>
+          </div>
         </div>
       )}
 
       {/* Actions */}
       <div className="flex gap-6 w-full justify-center">
-         {status === 'connected' && (
-           <button onClick={() => {
-             const nextMuted = !isMuted;
-             setIsMuted(nextMuted);
-             call?.mute(nextMuted);
-           }} className={`p-6 rounded-[2rem] transition-all ${isMuted ? 'bg-white text-slate-900' : 'bg-slate-800 text-white'}`}
-           >
-             {isMuted ? <MicOff size={24}/> : <Mic size={24}/>}
-           </button>
-         )}
+        {status === 'connected' && (
+          <button onClick={() => {
+            const nextMuted = !isMuted;
+            setIsMuted(nextMuted);
+            call?.mute(nextMuted);
+          }} className={`p-6 rounded-[2rem] transition-all ${isMuted ? 'bg-white text-slate-900' : 'bg-slate-800 text-white'}`}
+          >
+            {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+          </button>
+        )}
 
-         {status === 'idle' ? (
-           <button onClick={handleCall} className="p-6 bg-green-500 text-white rounded-[2rem] shadow-xl shadow-green-900/50 hover:bg-green-400 transition-all w-full flex justify-center">
-             <Phone size={28}/>
-           </button>
-         ) : (
-           <button onClick={handleHangup} className="p-6 bg-red-600 text-white rounded-[2rem] shadow-xl shadow-red-900/50 hover:bg-red-500 transition-all w-full flex justify-center">
-             <PhoneOff size={28}/>
-           </button>
-         )}
-         {status !== 'connected' && (
-           <button onClick={handleDelete} className="p-6 bg-slate-800 text-white rounded-[2rem] hover:bg-slate-700 transition-all">
-             <Delete size={24}/>
-           </button>
-         )}
+        {status === 'idle' ? (
+          <button onClick={handleCall} className="p-6 bg-green-500 text-white rounded-[2rem] shadow-xl shadow-green-900/50 hover:bg-green-400 transition-all w-full flex justify-center">
+            <Phone size={28} />
+          </button>
+        ) : (
+          <button onClick={handleHangup} className="p-6 bg-red-600 text-white rounded-[2rem] shadow-xl shadow-red-900/50 hover:bg-red-500 transition-all w-full flex justify-center">
+            <PhoneOff size={28} />
+          </button>
+        )}
+        {status !== 'connected' && (
+          <button onClick={handleDelete} className="p-6 bg-slate-800 text-white rounded-[2rem] hover:bg-slate-700 transition-all">
+            <Delete size={24} />
+          </button>
+        )}
 
-         {status === 'connected' && (
-            <button className="p-6 bg-slate-800 text-white rounded-[2rem] hover:bg-slate-700 transition-all">
-              <Volume2 size={24}/>
-            </button>
-         )}
+        {status === 'connected' && (
+          <button className="p-6 bg-slate-800 text-white rounded-[2rem] hover:bg-slate-700 transition-all">
+            <Volume2 size={24} />
+          </button>
+        )}
       </div>
 
       {renderHistory()}

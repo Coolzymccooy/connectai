@@ -153,3 +153,53 @@ export const purgeExpiredCalls = async (now = Date.now()) => {
   await Promise.all(snapshot.docs.map(docRef => deleteDoc(docRef.ref)));
   return snapshot.size;
 };
+
+export const fetchAgentCalls = (agentId: string, limitCount: number, callback: (calls: Call[]) => void) => {
+  const q = query(
+    collection(db, CALLS_COLLECTION),
+    where('agentId', '==', agentId),
+    orderBy('startTime', 'desc'),
+    limit(limitCount)
+  );
+  return onSnapshot(q, (snapshot) => {
+    const calls = snapshot.docs.map(doc => doc.data() as Call);
+    callback(calls);
+  });
+};
+
+export interface CallLogFilters {
+  agentId?: string;
+  direction?: string;
+  startDate?: number;
+  endDate?: number;
+  status?: string;
+}
+
+export const queryCallLogs = async (filters: CallLogFilters) => {
+  let q = query(collection(db, CALLS_COLLECTION), orderBy('startTime', 'desc'));
+
+  if (filters.agentId) {
+    q = query(q, where('agentId', '==', filters.agentId));
+  }
+  if (filters.direction) {
+    q = query(q, where('direction', '==', filters.direction));
+  }
+  if (filters.status) {
+    q = query(q, where('status', '==', filters.status));
+  }
+  if (filters.startDate) {
+    q = query(q, where('startTime', '>=', filters.startDate));
+  }
+  if (filters.endDate) {
+    q = query(q, where('startTime', '<=', filters.endDate));
+  }
+
+  // Note: Compound queries in Firestore require indices. 
+  // If this fails, we might need to filter client-side for some fields or create indices.
+  // For now, we'll fetch and filter if catch error, or just rely on simple queries.
+  // To avoid index issues for this demo, we might want to just fetch last 1000 and filter in memory if volume is low.
+
+  // Limiting logic for safety
+  const snapshot = await getDocs(query(q, limit(100)));
+  return snapshot.docs.map(doc => doc.data() as Call);
+};

@@ -27,15 +27,15 @@ export interface TranscriptSegment {
   speaker: 'agent' | 'customer' | 'bot' | 'teammate';
   text: string;
   timestamp: number;
-  isFinal?: boolean; 
+  isFinal?: boolean;
 }
 
 export interface CallAnalysis {
   summary: string;
-  sentimentScore: number; 
+  sentimentScore: number;
   sentimentLabel: 'Positive' | 'Neutral' | 'Negative';
   topics: string[];
-  qaScore: number; 
+  qaScore: number;
   dispositionSuggestion: string;
 }
 
@@ -56,16 +56,16 @@ export interface Call {
   durationSeconds: number;
   status: CallStatus;
   transcript: TranscriptSegment[];
-  analysis?: CallAnalysis; 
+  analysis?: CallAnalysis;
   crmData?: CrmData;
   agentId?: string;
   agentName?: string;
-  targetAgentId?: string; 
-  participants?: string[]; 
+  targetAgentId?: string;
+  participants?: string[];
   extension?: string;
   qaEvaluation?: QaEvaluation;
   handledByBot?: boolean;
-  liveSentiment?: number; 
+  liveSentiment?: number;
   riskFlag?: string;
   isVideo?: boolean;
   isScreenSharing?: boolean;
@@ -76,6 +76,7 @@ export interface Call {
   transcriptionEnabled?: boolean;
   expiresAt?: number;
   piiRedacted?: boolean;
+  recordingUrl?: string;
 }
 
 export type RsvpStatus = 'pending' | 'accepted' | 'declined' | 'forwarded';
@@ -141,12 +142,12 @@ export interface AppSettings {
     salesforce: boolean;
   };
   compliance: {
-    jurisdiction: 'US' | 'UK' | 'NG' | 'EU'; 
-    pciMode: boolean; 
-    playConsentMessage: boolean; 
-    anonymizePii: boolean; 
+    jurisdiction: 'US' | 'UK' | 'NG' | 'EU';
+    pciMode: boolean;
+    playConsentMessage: boolean;
+    anonymizePii: boolean;
     retentionDays: string;
-    exportEnabled: boolean; 
+    exportEnabled: boolean;
   };
   subscription: {
     plan: 'Starter' | 'Growth' | 'Enterprise';
@@ -215,7 +216,7 @@ export interface Conversation {
   unreadCount: number;
   messages: Message[];
   status: 'open' | 'closed';
-  teammateId?: string; 
+  teammateId?: string;
   participantIds?: string[];
 }
 

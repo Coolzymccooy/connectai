@@ -1,11 +1,12 @@
 ﻿
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { LayoutDashboard, Phone, Settings, LogOut, Sparkles, Mic, PlayCircle, Bot, Shield, MessageSquare, Bell, X, CheckCircle, Info, AlertTriangle, Trash2, Mail, PhoneIncoming } from 'lucide-react';
+import { LayoutDashboard, Phone, Settings, LogOut, Sparkles, Mic, PlayCircle, Bot, Shield, MessageSquare, Bell, X, CheckCircle, Info, AlertTriangle, Trash2, Mail, PhoneIncoming, FileText } from 'lucide-react';
 import { Role, User, Call, CallStatus, AgentStatus, AppSettings, Notification, Lead, Campaign, Meeting, CallDirection } from './types';
 import { AgentConsole } from './components/AgentConsole';
 import { SupervisorDashboard } from './components/SupervisorDashboard';
 import { AdminSettings } from './components/AdminSettings';
 import { Softphone } from './components/Softphone';
+import { CallLogView } from './components/CallLogView';
 import { LoginScreen } from './components/LoginScreen';
 import { ToastContainer } from './components/ToastContainer';
 import { HeaderProfileMenu } from './components/HeaderProfileMenu';
@@ -21,7 +22,7 @@ import { sanitizeCallForStorage } from './utils/gdpr';
 const DEFAULT_SETTINGS: AppSettings = {
   integrations: { hubSpot: { enabled: true, syncContacts: true, syncDeals: true, syncTasks: false, logs: [] }, webhooks: [], schemaMappings: [], pipedrive: false, salesforce: false },
   compliance: { jurisdiction: 'UK', pciMode: false, playConsentMessage: true, anonymizePii: false, retentionDays: '90', exportEnabled: true },
-  subscription: { 
+  subscription: {
     plan: 'Growth', seats: 20, balance: 420.50, autoTopUp: true, nextBillingDate: 'Nov 01, 2025',
     usage: { aiTokens: 450000, aiTokenLimit: 1000000, voiceMinutes: 1250, voiceMinuteLimit: 5000 },
     paymentMethod: 'Mastercard â€¢â€¢â€¢â€¢ 9921'
@@ -47,8 +48,9 @@ const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [activeCall, setActiveCall] = useState<Call | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>(AgentStatus.OFFLINE);
-  const [view, setView] = useState<'agent' | 'supervisor' | 'admin'>('agent');
+  const [view, setView] = useState<'agent' | 'supervisor' | 'admin' | 'logs'>('agent');
   const [liveService, setLiveService] = useState<LiveCallService | null>(null);
+  const [showSoftphone, setShowSoftphone] = useState(false);
   const [showPersonaModal, setShowPersonaModal] = useState(false);
   const [selectedPersonaId, setSelectedPersonaId] = useState(PERSONAS[0].id);
   const [audioLevel, setAudioLevel] = useState(0);
@@ -81,14 +83,14 @@ const App: React.FC = () => {
     if (!isFirebaseConfigured) return;
     const days = Number(appSettings.compliance.retentionDays || 0);
     if (!Number.isFinite(days) || days <= 0) return;
-    dbService.purgeExpiredCalls().catch(() => {});
+    dbService.purgeExpiredCalls().catch(() => { });
   }, [isFirebaseConfigured, appSettings.compliance.retentionDays]);
 
   // --- Real-Time Colleague Signaling Listener ---
   useEffect(() => {
     if (!currentUser || !isFirebaseConfigured) return;
     const q = query(
-      collection(db, 'calls'), 
+      collection(db, 'calls'),
       where('targetAgentId', '==', currentUser.id),
       where('status', 'in', [CallStatus.DIALING, CallStatus.RINGING, CallStatus.ACTIVE])
     );
@@ -114,8 +116,8 @@ const App: React.FC = () => {
       if (serverCampaigns && serverCampaigns.length > 0) {
         setCampaigns(serverCampaigns);
       }
-    }).catch(() => {});
-    fetchCalendarEvents().then(setMeetings).catch(() => {});
+    }).catch(() => { });
+    fetchCalendarEvents().then(setMeetings).catch(() => { });
     if (isFirebaseConfigured) {
       const handleFirebaseError = (error: Error) => {
         setIsFirebaseConfigured(false);
@@ -243,15 +245,15 @@ const App: React.FC = () => {
           onTranscriptUpdate: (segment) => {
             setActiveCall(prev => prev ? { ...prev, transcript: [...prev.transcript, segment] } : null);
           },
-          onAudioOutput: () => {},
+          onAudioOutput: () => { },
           onDisconnect: () => handleHangup(),
           onVolumeChange: (level) => setAudioLevel(level)
         });
         await service.start();
         setLiveService(service);
-      } catch (err) { 
+      } catch (err) {
         addNotification('error', 'Live call failed. Check Gemini Live API setup.');
-        handleHangup(); 
+        handleHangup();
       }
     }, 2500);
   };
@@ -286,7 +288,7 @@ const App: React.FC = () => {
           onTranscriptUpdate: (segment) => {
             setActiveCall(prev => prev ? { ...prev, transcript: [...prev.transcript, segment] } : null);
           },
-          onAudioOutput: () => {},
+          onAudioOutput: () => { },
           onDisconnect: () => handleHangup(),
           onVolumeChange: (level) => setAudioLevel(level)
         });
@@ -327,25 +329,25 @@ const App: React.FC = () => {
     setLiveService(null);
     setAudioLevel(0);
     if (activeCall) {
-      const finalCall: Call = { ...activeCall, status: CallStatus.ENDED, durationSeconds: (Date.now() - activeCall.startTime)/1000 };
+      const finalCall: Call = { ...activeCall, status: CallStatus.ENDED, durationSeconds: (Date.now() - activeCall.startTime) / 1000 };
       setCallHistory(h => [finalCall, ...h]);
       await persistCall(finalCall);
-      setActiveCall(null); 
+      setActiveCall(null);
       setAgentStatus(AgentStatus.WRAP_UP);
     }
   };
 
   const handleCompleteWrapUp = async (finalCall: Call) => {
-     setActiveCall(null);
-     setAgentStatus(AgentStatus.AVAILABLE);
-     addNotification('success', `Session for ${finalCall.customerName} archived to cluster.`);
+    setActiveCall(null);
+    setAgentStatus(AgentStatus.AVAILABLE);
+    addNotification('success', `Session for ${finalCall.customerName} archived to cluster.`);
   };
 
   const handleUpdateCampaigns = (nextCampaigns: Campaign[]) => {
     setCampaigns(nextCampaigns);
     const newest = nextCampaigns[0];
     if (newest) {
-      createCampaign(newest).catch(() => {});
+      createCampaign(newest).catch(() => { });
     }
   };
 
@@ -353,7 +355,7 @@ const App: React.FC = () => {
     setMeetings(nextMeetings);
     const newest = nextMeetings[0];
     if (newest) {
-      createCalendarEvent(newest).catch(() => {});
+      createCalendarEvent(newest).catch(() => { });
     }
   };
 
@@ -379,16 +381,18 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen bg-slate-50">
-      <ToastContainer notifications={notifications} removeNotification={() => {}} />
+      <ToastContainer notifications={notifications} removeNotification={() => { }} />
       {!isMeetingActive && (
         <div className="w-24 bg-brand-900 flex flex-col items-center py-8 space-y-10 z-50 shadow-2xl shrink-0">
           <div className="w-12 h-12 bg-brand-500 rounded-2xl flex items-center justify-center text-white font-black text-2xl shadow-xl italic tracking-tighter">C</div>
           <nav className="flex-1 space-y-8 w-full flex flex-col items-center">
-            <button onClick={() => setView('agent')} className={`p-4 rounded-2xl transition-all ${view === 'agent' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Agent Workspace"><Phone size={24}/></button>
-            {(currentUser.role !== Role.AGENT) && <button onClick={() => setView('supervisor')} className={`p-4 rounded-2xl transition-all ${view === 'supervisor' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Supervisor Analytics"><LayoutDashboard size={24}/></button>}
-            {(currentUser.role === Role.ADMIN) && <button onClick={() => setView('admin')} className={`p-4 rounded-2xl transition-all ${view === 'admin' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Cluster Admin"><Settings size={24}/></button>}
+            <button onClick={() => setView('agent')} className={`p-4 rounded-2xl transition-all ${view === 'agent' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Agent Workspace"><Phone size={24} /></button>
+            <button onClick={() => setView('logs')} className={`p-4 rounded-2xl transition-all ${view === 'logs' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Call Logs"><FileText size={24} /></button>
+            <button onClick={() => setShowSoftphone(!showSoftphone)} className={`p-4 rounded-2xl transition-all ${showSoftphone ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Soft Box"><PhoneIncoming size={24} /></button>
+            {(currentUser.role !== Role.AGENT) && <button onClick={() => setView('supervisor')} className={`p-4 rounded-2xl transition-all ${view === 'supervisor' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Supervisor Analytics"><LayoutDashboard size={24} /></button>}
+            {(currentUser.role === Role.ADMIN) && <button onClick={() => setView('admin')} className={`p-4 rounded-2xl transition-all ${view === 'admin' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Cluster Admin"><Settings size={24} /></button>}
           </nav>
-          <button onClick={() => signOut(auth).then(() => setCurrentUser(null))} className="text-slate-500 hover:text-white mb-6 p-4"><LogOut size={24}/></button>
+          <button onClick={() => signOut(auth).then(() => setCurrentUser(null))} className="text-slate-500 hover:text-white mb-6 p-4"><LogOut size={24} /></button>
         </div>
       )}
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
@@ -400,11 +404,11 @@ const App: React.FC = () => {
         )}
         <main className={`flex-1 overflow-hidden relative ${isMeetingActive ? 'bg-slate-950' : ''}`}>
           {isMeetingActive ? (
-            <VideoBridge 
-              activeCall={activeCall} 
-              currentUser={currentUser} 
-              onHangup={handleHangup} 
-              onToggleMedia={toggleMedia} 
+            <VideoBridge
+              activeCall={activeCall}
+              currentUser={currentUser}
+              onHangup={handleHangup}
+              onToggleMedia={toggleMedia}
               onInviteParticipant={addParticipantToCall}
               onUpdateCall={updateCall}
               team={appSettings.team}
@@ -418,12 +422,16 @@ const App: React.FC = () => {
                     <div className="h-full">
                       <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} isFirebaseConfigured={isFirebaseConfigured} />
                     </div>
-                    <Softphone userExtension={currentUser?.extension} allowedNumbers={appSettings.voice.allowedNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating />
+
                   </div>
                 </div>
               )}
               {view === 'supervisor' && <div className="p-8 h-full"><SupervisorDashboard calls={callHistory} team={appSettings.team} addNotification={addNotification} activeCall={activeCall} /></div>}
+              {view === 'logs' && <div className="h-full"><CallLogView currentUser={currentUser} /></div>}
               {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} />}
+              {showSoftphone && (
+                <Softphone userExtension={currentUser?.extension} allowedNumbers={appSettings.voice.allowedNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating isFirebaseConfigured={isFirebaseConfigured} />
+              )}
             </>
           )}
         </main>
@@ -433,7 +441,7 @@ const App: React.FC = () => {
         <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
           <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-xl p-12 border border-white/20 relative overflow-hidden">
             <button onClick={() => setShowPersonaModal(false)} className="absolute top-6 right-6 text-slate-400 hover:text-slate-600">
-              <X size={18}/>
+              <X size={18} />
             </button>
             <h3 className="text-3xl font-black italic tracking-tighter uppercase text-slate-800 mb-8 text-center">Select Simulation Persona</h3>
             <div className="space-y-4 mb-8">
