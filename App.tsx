@@ -12,10 +12,10 @@ import { ToastContainer } from './components/ToastContainer';
 import { HeaderProfileMenu } from './components/HeaderProfileMenu';
 import { VideoBridge } from './components/VideoBridge';
 import { LiveCallService } from './services/liveCallService';
-import { auth, db, onAuthStateChanged, signInAnonymously, signOut, collection, query, where, onSnapshot } from './services/firebase';
+import { auth, db, onAuthStateChanged, signOut, collection, query, where, onSnapshot } from './services/firebase';
 import * as dbService from './services/dbService';
 import { synthesizeSpeech } from './services/geminiService';
-import { fetchCalendarEvents, createCalendarEvent } from './services/calendarService';
+import { fetchCalendarEvents, createCalendarEvent, updateCalendarEvent } from './services/calendarService';
 import { fetchCampaigns, createCampaign } from './services/campaignService';
 import { sanitizeCallForStorage } from './utils/gdpr';
 
@@ -30,10 +30,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   ivr: { phoneNumber: '+1 (555) 012-3456', welcomeMessage: 'Welcome to ConnectAI. For sales, press 1. For support, press 2.', options: [{ key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' }, { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' }] },
   voice: { allowedNumbers: [] },
   bot: { enabled: true, name: 'ConnectBot', persona: 'You are a helpful customer service assistant for ConnectAI.', deflectionGoal: 35 },
+  auth: { inviteOnly: false, allowedDomains: [], autoTenantByDomain: false, domainTenantMap: [] },
   team: [
-    { id: 'u_agent', name: 'Sarah Agent', role: Role.AGENT, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sarah', status: 'active', extension: '101', currentPresence: AgentStatus.AVAILABLE, email: 'sarah@connectai.io' },
-    { id: 'u_supervisor', name: 'Mike Supervisor', role: Role.SUPERVISOR, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Mike', status: 'active', extension: '201', currentPresence: AgentStatus.AVAILABLE, email: 'mike@connectai.io' },
-    { id: 'u_admin', name: 'Sys Admin', role: Role.ADMIN, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Admin', status: 'active', extension: '999', currentPresence: AgentStatus.AVAILABLE, email: 'admin@connectai.io' }
+    { id: 'u_agent', name: 'Sarah Agent', role: Role.AGENT, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sarah', status: 'active', extension: '101', currentPresence: AgentStatus.AVAILABLE, email: 'sarah@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false },
+    { id: 'u_supervisor', name: 'Mike Supervisor', role: Role.SUPERVISOR, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Mike', status: 'active', extension: '201', currentPresence: AgentStatus.AVAILABLE, email: 'mike@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false },
+    { id: 'u_admin', name: 'Sys Admin', role: Role.ADMIN, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Admin', status: 'active', extension: '999', currentPresence: AgentStatus.AVAILABLE, email: 'admin@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false }
   ],
   workflows: []
 };
@@ -66,6 +67,40 @@ const App: React.FC = () => {
     { id: 'cam_2', name: 'Retention SMS Bot', type: 'sms', status: 'running', targetCount: 5000, processedCount: 3240, successCount: 1120, aiPersona: 'Friendly Assistant', hourlyStats: [] }
   ]);
   const [isFirebaseConfigured, setIsFirebaseConfigured] = useState(false);
+  const [authNotice, setAuthNotice] = useState<string | null>(null);
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      if (!user) {
+        localStorage.removeItem('connectai_auth_token');
+        setCurrentUser(null);
+        return;
+      }
+      if (!user.emailVerified && user.providerData.some((p) => p.providerId === 'password')) {
+        setAuthNotice('Please verify your email before signing in. Check your inbox and spam folder.');
+        await signOut(auth);
+        return;
+      }
+      const storedRole = (localStorage.getItem(`connectai_role_${user.uid}`) as Role) || Role.AGENT;
+      const roleTemplate = DEFAULT_SETTINGS.team.find(u => u.role === storedRole);
+      const profile: User = {
+        id: user.uid,
+        name: user.displayName || user.email || roleTemplate?.name || 'User',
+        role: storedRole,
+        avatarUrl: roleTemplate?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.uid}`,
+        extension: roleTemplate?.extension,
+        email: user.email || undefined,
+        status: 'active',
+        currentPresence: roleTemplate?.currentPresence || AgentStatus.AVAILABLE
+      };
+      const token = await user.getIdToken();
+      localStorage.setItem('connectai_auth_token', token);
+      setCurrentUser(profile);
+      setView(storedRole === Role.SUPERVISOR ? 'supervisor' : storedRole === Role.ADMIN ? 'admin' : 'agent');
+      if (storedRole === Role.AGENT) setAgentStatus(AgentStatus.AVAILABLE);
+      if (isFirebaseConfigured) await dbService.saveUser(profile);
+    });
+    return () => unsubscribe();
+  }, [isFirebaseConfigured]);
 
   const persistCall = useCallback(async (call: Call) => {
     if (!isFirebaseConfigured) return;
@@ -130,6 +165,7 @@ const App: React.FC = () => {
           ...DEFAULT_SETTINGS,
           ...saved,
           voice: { ...DEFAULT_SETTINGS.voice, ...(saved as any).voice },
+          auth: { ...DEFAULT_SETTINGS.auth, ...(saved as any).auth },
         };
         setAppSettings(merged);
       });
@@ -329,6 +365,14 @@ const App: React.FC = () => {
     setLiveService(null);
     setAudioLevel(0);
     if (activeCall) {
+      if (activeCall.roomId) {
+        const meetingToClose = meetings.find(m => m.roomId === activeCall.roomId);
+        if (meetingToClose) {
+          const endedMeeting: Meeting = { ...meetingToClose, status: 'ended' };
+          setMeetings(prev => prev.map(m => m.id === endedMeeting.id ? endedMeeting : m));
+          updateCalendarEvent(endedMeeting).catch(() => { });
+        }
+      }
       const finalCall: Call = { ...activeCall, status: CallStatus.ENDED, durationSeconds: (Date.now() - activeCall.startTime) / 1000 };
       setCallHistory(h => [finalCall, ...h]);
       await persistCall(finalCall);
@@ -355,51 +399,94 @@ const App: React.FC = () => {
     setMeetings(nextMeetings);
     const newest = nextMeetings[0];
     if (newest) {
-      createCalendarEvent(newest).catch(() => { });
-    }
-  };
-
-  const handleLogin = async (role: Role) => {
-    if (isFirebaseConfigured) {
-      try {
-        await signInAnonymously(auth);
-      } catch (err) {
-        console.warn('Anonymous sign-in failed, continuing in demo mode:', err);
-        setIsFirebaseConfigured(false);
-        addNotification('info', 'Firebase disabled (auth configuration not ready). Running in demo mode.');
+      const exists = meetings.some(meeting => meeting.id === newest.id);
+      if (exists) {
+        updateCalendarEvent(newest).catch(() => { });
+      } else {
+        createCalendarEvent(newest).catch(() => { });
       }
     }
-    const user = appSettings.team.find(u => u.role === role) || { id: `u_${role.toLowerCase()}`, name: `${role.charAt(0) + role.slice(1).toLowerCase()} User`, role, avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${role}`, status: 'active' as const, email: `${role.toLowerCase()}@connectai.io` };
-    setCurrentUser(user);
-    setView(role === Role.SUPERVISOR ? 'supervisor' : role === Role.ADMIN ? 'admin' : 'agent');
-    if (role === Role.AGENT) setAgentStatus(AgentStatus.AVAILABLE);
   };
 
-  if (!currentUser) return <LoginScreen onLogin={handleLogin} />;
+  const startMeeting = (meeting: Meeting) => {
+    if (!currentUser) return;
+    const roomId = meeting.roomId || `room_${meeting.id}`;
+    const updatedMeeting: Meeting = { ...meeting, status: 'active', roomId };
+    setMeetings(prev => prev.map(m => m.id === meeting.id ? updatedMeeting : m));
+    updateCalendarEvent(updatedMeeting).catch(() => { });
+    const meetingCall: Call = {
+      id: `meet_${meeting.id}`,
+      direction: 'internal',
+      customerName: meeting.title || 'Team Meeting',
+      phoneNumber: 'MEETING',
+      queue: 'Meeting',
+      startTime: Date.now(),
+      durationSeconds: 0,
+      status: CallStatus.ACTIVE,
+      transcript: [],
+      agentId: currentUser.id,
+      agentName: currentUser.name,
+      isVideo: true,
+      participants: [currentUser.id],
+      roomId,
+      emailSynced: true,
+      transcriptionEnabled: true
+    };
+    setActiveCall(meetingCall);
+    persistCall(meetingCall);
+    setAgentStatus(AgentStatus.BUSY);
+  };
+
+  const handleLogin = async (role: Role, profile?: { uid: string; email?: string | null; displayName?: string | null }) => {
+    const base = appSettings.team.find(u => u.role === role);
+    const fallbackId = base?.id || `u_${role.toLowerCase()}`;
+    const userId = profile?.uid || fallbackId;
+    const displayName = profile?.displayName || profile?.email || base?.name || `${role.charAt(0) + role.slice(1).toLowerCase()} User`;
+    const user: User = {
+      id: userId,
+      name: displayName,
+      role,
+      avatarUrl: base?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(userId)}`,
+      extension: base?.extension,
+      email: profile?.email || base?.email,
+      status: 'active',
+      currentPresence: base?.currentPresence || AgentStatus.AVAILABLE
+    };
+    if (profile?.uid) {
+      localStorage.setItem(`connectai_role_${profile.uid}`, role);
+    }
+    setCurrentUser(user);
+    setAuthNotice(null);
+    setView(role === Role.SUPERVISOR ? 'supervisor' : role === Role.ADMIN ? 'admin' : 'agent');
+    if (role === Role.AGENT) setAgentStatus(AgentStatus.AVAILABLE);
+    if (isFirebaseConfigured) await dbService.saveUser(user);
+  };
+
+  if (!currentUser) return <LoginScreen onLogin={handleLogin} externalMessage={authNotice} onClearExternalMessage={() => setAuthNotice(null)} />;
 
   const isMeetingActive = activeCall && (activeCall.status !== CallStatus.ENDED) && (activeCall.direction === 'internal' || activeCall.isVideo);
 
   return (
-    <div className="flex h-screen bg-slate-50">
+    <div className="flex h-screen bg-slate-50 app-compact flex-col md:flex-row">
       <ToastContainer notifications={notifications} removeNotification={() => { }} />
       {!isMeetingActive && (
-        <div className="w-24 bg-brand-900 flex flex-col items-center py-8 space-y-10 z-50 shadow-2xl shrink-0">
-          <div className="w-12 h-12 bg-brand-500 rounded-2xl flex items-center justify-center text-white font-black text-2xl shadow-xl italic tracking-tighter">C</div>
-          <nav className="flex-1 space-y-8 w-full flex flex-col items-center">
-            <button onClick={() => setView('agent')} className={`p-4 rounded-2xl transition-all ${view === 'agent' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Agent Workspace"><Phone size={24} /></button>
-            <button onClick={() => setView('logs')} className={`p-4 rounded-2xl transition-all ${view === 'logs' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Call Logs"><FileText size={24} /></button>
-            <button onClick={() => setShowSoftphone(!showSoftphone)} className={`p-4 rounded-2xl transition-all ${showSoftphone ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Soft Box"><PhoneIncoming size={24} /></button>
-            {(currentUser.role !== Role.AGENT) && <button onClick={() => setView('supervisor')} className={`p-4 rounded-2xl transition-all ${view === 'supervisor' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Supervisor Analytics"><LayoutDashboard size={24} /></button>}
-            {(currentUser.role === Role.ADMIN) && <button onClick={() => setView('admin')} className={`p-4 rounded-2xl transition-all ${view === 'admin' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Cluster Admin"><Settings size={24} /></button>}
+        <div className="w-full md:w-24 h-16 md:h-full bg-brand-900 flex flex-row md:flex-col items-center px-4 md:px-0 md:py-8 space-x-4 md:space-x-0 md:space-y-10 z-50 shadow-2xl shrink-0">
+          <div className="w-10 h-10 md:w-12 md:h-12 bg-brand-500 rounded-2xl flex items-center justify-center text-white font-black text-xl md:text-2xl shadow-xl italic tracking-tighter">C</div>
+          <nav className="flex-1 flex flex-row md:flex-col items-center space-x-4 md:space-x-0 md:space-y-8">
+            <button onClick={() => setView('agent')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'agent' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Agent Workspace"><Phone size={20} /></button>
+            <button onClick={() => setView('logs')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'logs' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Call Logs"><FileText size={20} /></button>
+            <button onClick={() => setShowSoftphone(!showSoftphone)} className={`p-3 md:p-4 rounded-2xl transition-all ${showSoftphone ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Soft Box"><PhoneIncoming size={20} /></button>
+            {(currentUser.role !== Role.AGENT) && <button onClick={() => setView('supervisor')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'supervisor' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Supervisor"><LayoutDashboard size={20} /></button>}
+            {(currentUser.role === Role.ADMIN) && <button onClick={() => setView('admin')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'admin' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Admin"><Settings size={20} /></button>}
           </nav>
-          <button onClick={() => signOut(auth).then(() => setCurrentUser(null))} className="text-slate-500 hover:text-white mb-6 p-4"><LogOut size={24} /></button>
+          <button onClick={() => signOut(auth).then(() => setCurrentUser(null))} className="text-slate-500 hover:text-white p-3 md:p-4"><LogOut size={20} /></button>
         </div>
       )}
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
         {!isMeetingActive && (
-          <header className="h-20 bg-white border-b border-slate-200 flex items-center justify-between px-10 z-40 shadow-sm shrink-0">
-            <h1 className="text-2xl font-black text-slate-800 uppercase italic tracking-tighter">{view} HUB</h1>
-            <HeaderProfileMenu user={currentUser} status={agentStatus} onStatusChange={setAgentStatus} onLogout={() => setCurrentUser(null)} onUpdateUser={updateUserProfile} />
+          <header className="h-16 md:h-20 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-10 z-40 shadow-sm shrink-0">
+            <h1 className="text-xl md:text-2xl font-black text-slate-800 uppercase italic tracking-tighter">{view} HUB</h1>
+            <HeaderProfileMenu user={currentUser} status={agentStatus} onStatusChange={setAgentStatus} onLogout={() => signOut(auth).then(() => setCurrentUser(null))} onUpdateUser={updateUserProfile} />
           </header>
         )}
         <main className={`flex-1 overflow-hidden relative ${isMeetingActive ? 'bg-slate-950' : ''}`}>
@@ -417,10 +504,10 @@ const App: React.FC = () => {
           ) : (
             <>
               {view === 'agent' && (
-                <div className="p-8 h-full">
+                <div className="p-4 md:p-8 h-full">
                   <div className="h-full relative">
                     <div className="h-full">
-                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} isFirebaseConfigured={isFirebaseConfigured} />
+                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} />
                     </div>
 
                   </div>
@@ -430,7 +517,7 @@ const App: React.FC = () => {
               {view === 'logs' && <div className="h-full"><CallLogView currentUser={currentUser} /></div>}
               {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} />}
               {showSoftphone && (
-                <Softphone userExtension={currentUser?.extension} allowedNumbers={appSettings.voice.allowedNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating isFirebaseConfigured={isFirebaseConfigured} />
+                <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} enableServerLogs />
               )}
             </>
           )}
@@ -467,4 +554,12 @@ const App: React.FC = () => {
 };
 
 export default App;
+
+
+
+
+
+
+
+
 

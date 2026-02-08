@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { Play, Download, Search, Filter, Calendar, ArrowUpRight, ArrowDownLeft, ArrowRightLeft, Clock, User, Phone } from 'lucide-react';
 import { Call, CallDirection, CallStatus } from '../types';
-import { queryCallLogs, CallLogFilters } from '../services/dbService';
+import { fetchCallLogs, CallLogFilters } from '../services/callLogService';
 
 interface CallLogViewProps {
     currentUser: { id: string; role: string };
@@ -19,7 +19,7 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
     const fetchLogs = async () => {
         setLoading(true);
         try {
-            const results = await queryCallLogs(filters);
+            const results = await fetchCallLogs(filters);
             setCalls(results);
         } catch (err) {
             console.error('Failed to fetch logs', err);
@@ -43,6 +43,49 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
             return;
         }
         setPlaybackUrl(url);
+    };
+
+    const handleDownload = (url: string, format: 'csv' | 'mp3' = 'mp3') => {
+        if (!url) {
+            alert("No recording available for this call.");
+            return;
+        }
+        const downloadUrl = format === 'mp3' ? `${url}${url.includes('?') ? '&' : '?'}format=mp3` : url;
+        const anchor = document.createElement('a');
+        anchor.href = downloadUrl;
+        anchor.download = '';
+        anchor.rel = 'noopener';
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+    };
+
+    const handleExportCsv = () => {
+        if (!calls.length) {
+            alert('No calls to export.');
+            return;
+        }
+        const header = ['id', 'date', 'direction', 'customerName', 'phoneNumber', 'durationSeconds', 'status', 'recordingUrl'];
+        const rows = calls.map(call => ([
+            call.id,
+            new Date(call.startTime).toISOString(),
+            call.direction,
+            call.customerName || '',
+            call.phoneNumber || '',
+            String(call.durationSeconds || 0),
+            call.status,
+            call.recordingUrl || ''
+        ]));
+        const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/\"/g, '""')}"`).join(',')).join('\n');
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `connectai-call-logs-${Date.now()}.csv`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(url);
     };
 
     const formatDuration = (seconds: number) => {
@@ -115,6 +158,12 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                     >
                         <Search size={16} /> Refresh
                     </button>
+                    <button
+                        onClick={handleExportCsv}
+                        className="px-6 py-2 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold text-sm hover:bg-slate-50 transition-all flex items-center gap-2"
+                    >
+                        <Download size={16} /> Export CSV
+                    </button>
                 </div>
             </div>
 
@@ -184,9 +233,10 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                                                     <Play size={16} fill={call.recordingUrl ? "currentColor" : "none"} />
                                                 </button>
                                                 <button
+                                                    onClick={() => handleDownload(call.recordingUrl || '', 'mp3')}
                                                     disabled={!call.recordingUrl}
                                                     className={`p-2 rounded-xl transition-all ${call.recordingUrl ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}
-                                                    title="Download"
+                                                    title="Download MP3"
                                                 >
                                                     <Download size={16} />
                                                 </button>

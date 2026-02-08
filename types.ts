@@ -56,6 +56,7 @@ export interface Call {
   durationSeconds: number;
   status: CallStatus;
   transcript: TranscriptSegment[];
+  roomId?: string;
   analysis?: CallAnalysis;
   crmData?: CrmData;
   agentId?: string;
@@ -118,6 +119,7 @@ export interface Meeting {
   attendees: MeetingAttendee[];
   description: string;
   status: 'upcoming' | 'active' | 'ended';
+  roomId?: string;
   isRecording?: boolean;
   messages?: MeetingMessage[];
   reactions?: Reaction[];
@@ -168,6 +170,12 @@ export interface AppSettings {
     allowedNumbers: string[];
   };
   bot: BotConfig;
+  auth: {
+    inviteOnly: boolean;
+    allowedDomains: string[];
+    autoTenantByDomain: boolean;
+    domainTenantMap: { domain: string; tenantId: string }[];
+  };
   team: User[];
   workflows: WorkflowRule[];
 }
@@ -181,6 +189,8 @@ export interface User {
   email?: string;
   status: 'active' | 'invited' | 'disabled';
   currentPresence?: AgentStatus;
+  allowedNumbers?: string[];
+  restrictOutboundNumbers?: boolean;
 }
 
 export interface Campaign {

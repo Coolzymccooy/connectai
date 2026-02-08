@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { Call, User, MeetingMessage, Reaction, ToolAction, CallStatus, Attachment, TranscriptSegment } from '../types';
 import { getStrategicIntelligence, extractToolActions, analyzeCallTranscript } from '../services/geminiService';
+import { apiGet, apiPost } from '../services/apiClient';
 import * as dbService from '../services/dbService';
 
 // --- SUB-COMPONENT: PRODUCTION-GRADE VIDEO SLOT ---
@@ -147,6 +148,8 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     });
   }, []);
 
+  const roomId = activeCall.roomId || activeCall.id;
+
   // --- PEERJS INITIALIZATION ---
   useEffect(() => {
     localStreamRef.current = localStream;
@@ -181,6 +184,48 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       peer.destroy();
     };
   }, [currentUser.id, registerConnection]);
+
+  useEffect(() => {
+    if (!peerId) return;
+    const join = async () => {
+      try {
+        await apiPost('/api/rooms/join', { roomId, peerId, userId: currentUser.id });
+      } catch (err) {
+        console.warn('Room join failed', err);
+      }
+    };
+    join();
+
+    return () => {
+      apiPost('/api/rooms/leave', { roomId, peerId }).catch(() => {});
+    };
+  }, [peerId, roomId, currentUser.id]);
+
+  useEffect(() => {
+    if (!peerRef.current || !peerId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await apiGet(`/api/rooms/${roomId}`);
+        if (cancelled) return;
+        const peers = (data?.participants || []).map((p: any) => p.peerId).filter(Boolean);
+        peers.forEach((pid: string) => {
+          if (pid === peerId) return;
+          const remoteUserId = pid.replace('connectai-user-', '');
+          if (connectionsRef.current.has(remoteUserId)) return;
+          callUser(remoteUserId);
+        });
+      } catch (err) {
+        console.warn('Room poll failed', err);
+      }
+    };
+    poll();
+    const interval = window.setInterval(poll, 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [peerId, roomId]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {

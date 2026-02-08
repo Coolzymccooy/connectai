@@ -22,6 +22,7 @@ interface AgentConsoleProps {
   leads?: Lead[];
   onOutboundCall?: (target: Lead | string) => void;
   onInternalCall?: (target: User) => void;
+  onJoinMeeting?: (meeting: Meeting) => void;
   onAddParticipant?: (userId: string) => void;
   history?: Call[];
   campaigns: Campaign[];
@@ -62,7 +63,7 @@ const DEFAULT_CONVERSATIONS: Conversation[] = [
 export const AgentConsole: React.FC<AgentConsoleProps> = ({ 
   activeCall, agentStatus, onCompleteWrapUp, settings, addNotification,
   leads = [], onOutboundCall, onInternalCall, onAddParticipant, history = [],
-  campaigns, onUpdateCampaigns, meetings, onUpdateMeetings, user, isFirebaseConfigured = false
+  campaigns, onUpdateCampaigns, meetings, onUpdateMeetings, user, onJoinMeeting, isFirebaseConfigured = false
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -192,7 +193,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     setLiveTools(prev => prev.map(t => t.id === toolId ? { ...t, status: 'executed' } : t));
     const tool = liveTools.find(t => t.id === toolId);
     if (tool?.name.toLowerCase().includes('schedule')) {
-       addNotification('success', 'Neural Sync: Follow-up handshake dispatched to cluster.');
+       addNotification('success', 'Follow-up meeting scheduled.');
     } else {
        addNotification('success', `Protocol executed: ${tool?.name} synchronized.`);
     }
@@ -326,7 +327,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     const updated: Call = { ...lastEndedCall, qaEvaluation };
     await persistWrapUpCall(updated);
     setWrapUpActions(prev => ({ ...prev, qaApproved: true }));
-    addNotification('success', 'QA admission approved and archived.');
+    addNotification('success', 'QA approved and saved.');
   };
 
   const handleApplyDisposition = async () => {
@@ -368,23 +369,54 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     addNotification('success', 'Follow-up meeting scheduled.');
   };
 
+  const updateMeeting = (updated: Meeting) => {
+    const next = meetings.map(m => m.id === updated.id ? updated : m);
+    onUpdateMeetings(next);
+  };
+
+  const handleAcceptMeeting = (meeting: Meeting) => {
+    const nextAttendees = meeting.attendees.map(a => a.userId === user.id ? { ...a, status: 'accepted' } : a);
+    updateMeeting({ ...meeting, attendees: nextAttendees });
+    addNotification('success', 'Meeting invite accepted.');
+  };
+
+  const handleDeclineMeeting = (meeting: Meeting) => {
+    const nextAttendees = meeting.attendees.map(a => a.userId === user.id ? { ...a, status: 'declined' } : a);
+    updateMeeting({ ...meeting, attendees: nextAttendees });
+    addNotification('info', 'Meeting invite declined.');
+  };
+
+  const handleJoinMeeting = (meeting: Meeting) => {
+    const updated = { ...meeting, status: 'active' as const };
+    updateMeeting(updated);
+    onJoinMeeting?.(updated);
+  };
+
   const completeWrapUp = () => {
     if (lastEndedCall) onCompleteWrapUp(lastEndedCall);
   };
 
+  const pastMeetings = useMemo(() => {
+    const now = Date.now();
+    return meetings
+      .filter(m => m.startTime < now)
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, 8);
+  }, [meetings]);
+
   return (
     <div className="h-full flex flex-col p-6 overflow-hidden bg-white/50 backdrop-blur-md">
       {/* Tab Navigation */}
-      <div className="flex space-x-12 border-b border-slate-200 mb-8 shrink-0 px-8">
+      <div className="flex space-x-6 md:space-x-12 border-b border-slate-200 mb-6 md:mb-8 shrink-0 px-4 md:px-8 overflow-x-auto scrollbar-hide">
         {[
           { id: 'voice', label: 'WORKSPACE' },
-          { id: 'team', label: 'NEURAL DIRECTORY' },
+          { id: 'team', label: 'TEAM' },
           { id: 'calendar', label: 'CALENDAR' },
-          { id: 'omnichannel', label: 'UNIFIED INBOX' },
+          { id: 'omnichannel', label: 'INBOX' },
           { id: 'campaigns', label: 'CAMPAIGNS' },
-          { id: 'outbound', label: 'POWER DIALER' }
+          { id: 'outbound', label: 'DIALER' }
         ].map(tab => (
-          <button key={tab.id} onClick={() => setActiveTab(tab.id as any)} className={`pb-5 text-[10px] font-black uppercase tracking-[0.2em] transition-all border-b-4 ${activeTab === tab.id ? 'border-brand-600 text-brand-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
+          <button key={tab.id} onClick={() => setActiveTab(tab.id as any)} className={`pb-4 md:pb-5 whitespace-nowrap text-[10px] font-black uppercase tracking-[0.2em] transition-all border-b-4 ${activeTab === tab.id ? 'border-brand-600 text-brand-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}>
             {tab.label}
           </button>
         ))}
@@ -395,25 +427,25 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         {activeTab === 'voice' && (
            <div className="h-full animate-in fade-in">
              {activeCall ? (
-               <div className="h-full grid grid-cols-12 gap-8">
+               <div className="h-full grid grid-cols-1 lg:grid-cols-12 gap-6 md:gap-8">
                   {/* Live Transcript Panel */}
-                  <div className="col-span-8 bg-white rounded-[3.5rem] shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
-                    <div className="p-10 border-b bg-slate-900 text-white flex justify-between items-center shrink-0">
+                  <div className="col-span-12 lg:col-span-8 bg-white rounded-[3.5rem] shadow-2xl border border-slate-200 flex flex-col overflow-hidden">
+                    <div className="p-6 md:p-10 border-b bg-slate-900 text-white flex justify-between items-center shrink-0">
                        <div className="flex items-center gap-6">
                          <div className="w-12 h-12 bg-brand-500 rounded-2xl flex items-center justify-center animate-pulse"><Radio size={24}/></div>
                          <div>
-                            <h3 className="font-black italic uppercase text-2xl tracking-tighter">Live Admission</h3>
+                            <h3 className="font-black italic uppercase text-2xl tracking-tighter">Live Call</h3>
                             <p className="text-[10px] font-black uppercase tracking-widest text-brand-400">Secure Node Stream Active</p>
                          </div>
                        </div>
                        <div className="flex items-center gap-4">
                           <div className="px-5 py-2.5 bg-white/5 border border-white/10 rounded-xl flex items-center gap-3">
                              <Activity size={14} className="text-green-500"/>
-                             <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Admission: {activeCall.customerName}</span>
+                             <span className="text-[10px] font-black uppercase tracking-widest opacity-60">Caller: {activeCall.customerName}</span>
                           </div>
                        </div>
                     </div>
-                    <div ref={scrollRef} className="flex-1 overflow-y-auto p-12 space-y-10 scrollbar-hide bg-slate-50/50">
+                      <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 md:p-12 space-y-6 md:space-y-10 scrollbar-hide bg-slate-50/50">
                        {activeCall.transcript.map(seg => (
                          <div key={seg.id} className={`flex ${seg.speaker === 'agent' ? 'justify-end' : 'justify-start'}`}>
                             <div className={`max-w-[75%] p-8 rounded-[2.5rem] text-base shadow-sm leading-relaxed ${seg.speaker === 'agent' ? 'bg-brand-600 text-white rounded-br-none' : 'bg-white text-slate-800 border border-slate-100 rounded-bl-none'}`}>
@@ -425,8 +457,8 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                   </div>
 
                   {/* Neural Copilot Sidebar */}
-                  <div className="col-span-4 space-y-8 flex flex-col overflow-hidden">
-                     <div className="flex-1 bg-slate-100 rounded-[3.5rem] border border-slate-200 shadow-inner p-10 flex flex-col overflow-hidden">
+                    <div className="col-span-12 lg:col-span-4 space-y-6 md:space-y-8 flex flex-col overflow-hidden">
+                       <div className="flex-1 bg-slate-100 rounded-[3.5rem] border border-slate-200 shadow-inner p-6 md:p-10 flex flex-col overflow-hidden">
                         <h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-500 mb-8 flex items-center gap-2"><BrainCircuit size={14} className="text-brand-500"/> Neural Copilot</h4>
                         <div className="flex-1 space-y-6 overflow-y-auto scrollbar-hide pr-2">
                            {aiSuggestions.map(s => (
@@ -444,8 +476,8 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                         </div>
                      </div>
 
-                     <div className="h-[280px] bg-[#12161f] rounded-[3.5rem] p-10 shadow-2xl overflow-hidden flex flex-col">
-                        <h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-400 mb-6 flex items-center gap-2"><ClipboardList size={14}/> Live Tool Admissions</h4>
+                       <div className="h-[260px] md:h-[280px] bg-[#12161f] rounded-[3.5rem] p-6 md:p-10 shadow-2xl overflow-hidden flex flex-col">
+                        <h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-400 mb-6 flex items-center gap-2"><ClipboardList size={14}/> Live Actions</h4>
                         <div className="flex-1 space-y-4 overflow-y-auto scrollbar-hide">
                            {liveTools.map(tool => (
                               <div key={tool.id} className="bg-white/5 border border-white/10 p-5 rounded-2xl group hover:border-brand-500/50 transition-all">
@@ -459,7 +491,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                   disabled={tool.status === 'executed'}
                                   className={`w-full py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all ${tool.status === 'executed' ? 'bg-slate-800 text-slate-600 cursor-not-allowed' : 'bg-brand-600 text-white hover:bg-brand-700 shadow-lg active:scale-95'}`}
                                  >
-                                    {tool.status === 'executed' ? 'Admission Synchronized' : 'Execute Handshake'}
+                                    {tool.status === 'executed' ? 'Done' : 'Run Action'}
                                  </button>
                               </div>
                            ))}
@@ -480,9 +512,9 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                         <div>
                            <div className="flex items-center gap-4 mb-4">
                               <ShieldCheck size={24} className="text-brand-400"/>
-                              <h3 className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-300">Admission Termination Protocol</h3>
+                              <h3 className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-300">Call Wrap-Up</h3>
                            </div>
-                           <h2 className="text-5xl font-black italic uppercase tracking-tighter">Wrap-Up Cluster</h2>
+                           <h2 className="text-5xl font-black italic uppercase tracking-tighter">Wrap-Up</h2>
                         </div>
                         <div className="text-right">
                            <p className="text-[10px] font-black uppercase text-brand-300 mb-2">Neural Sentiment Score</p>
@@ -502,7 +534,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                               
                               <div className="grid grid-cols-2 gap-8">
                                  <div className="p-8 bg-brand-50 rounded-[2.5rem] border border-brand-100 shadow-sm">
-                                    <p className="text-[10px] font-black uppercase text-brand-600 tracking-widest mb-3 italic">QA ADMISSION MATCH</p>
+                                    <p className="text-[10px] font-black uppercase text-brand-600 tracking-widest mb-3 italic">QA CHECK</p>
                                     <div className="flex items-end gap-2">
                                        <span className="text-5xl font-black italic text-slate-800">{wrapUpAnalysis.qaScore}</span>
                                        <span className="text-xs font-bold text-slate-400 mb-2 uppercase tracking-widest">Protocol Grade</span>
@@ -512,7 +544,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                       disabled={wrapUpActions.qaApproved}
                                       className={`mt-6 w-full py-3 rounded-2xl text-[9px] font-black uppercase tracking-widest transition-all ${wrapUpActions.qaApproved ? 'bg-green-500/10 text-green-600 cursor-not-allowed' : 'bg-white border border-brand-200 text-brand-700 hover:bg-brand-600 hover:text-white shadow-lg active:scale-95'}`}
                                     >
-                                      {wrapUpActions.qaApproved ? 'QA Admission Approved' : 'Approve QA Admission'}
+                                      {wrapUpActions.qaApproved ? 'QA approved' : 'Approve QA'}
                                     </button>
                                  </div>
                                  <div className="p-8 bg-slate-100 rounded-[2.5rem] border border-slate-200 shadow-sm">
@@ -541,7 +573,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
                               <section className="bg-slate-900 rounded-[3rem] p-10 text-white shadow-2xl relative overflow-hidden">
                                  <div className="absolute top-0 right-0 w-48 h-48 bg-brand-500/10 blur-[60px] -mr-24 -mt-24"></div>
-                                 <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-brand-400 mb-8 flex items-center gap-3"><Bot size={18}/> Post-Admission Actions</h4>
+                                 <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-brand-400 mb-8 flex items-center gap-3"><Bot size={18}/> Next steps</h4>
                                  <div className="space-y-4">
                                     <button
                                       onClick={handleSyncCrm}
@@ -564,36 +596,36 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                      </div>
 
                      <div className="p-10 border-t bg-slate-50 flex justify-center">
-                        <button onClick={completeWrapUp} className="px-24 py-6 bg-slate-900 text-white rounded-[2rem] text-xs font-black uppercase tracking-[0.4em] shadow-3xl hover:bg-slate-800 transition-all flex items-center gap-6">Finalize Session Admission <ArrowRight size={18}/></button>
+                        <button onClick={completeWrapUp} className="px-24 py-6 bg-slate-900 text-white rounded-[2rem] text-xs font-black uppercase tracking-[0.4em] shadow-3xl hover:bg-slate-800 transition-all flex items-center gap-6">Finish Wrap-Up <ArrowRight size={18}/></button>
                      </div>
                   </div>
                </div>
              ) : (
                <div className="flex items-center justify-center h-full flex-col opacity-20 grayscale italic animate-pulse">
                   <Headset size={64} className="mb-6"/>
-                  <p className="text-xl font-black uppercase tracking-[0.6em] text-slate-400">Node Active: Standby for Admission</p>
+                  <p className="text-xl font-black uppercase tracking-[0.6em] text-slate-400">Waiting for calls</p>
                </div>
              )}
            </div>
         )}
 
-        {/* NEURAL DIRECTORY (Team) */}
+        {/* TEAM DIRECTORY */}
         {activeTab === 'team' && (
-           <div className="h-full flex flex-col space-y-8 animate-in slide-in-from-bottom">
-              <div className="flex justify-between items-end px-4">
+             <div className="h-full flex flex-col space-y-6 md:space-y-8 animate-in slide-in-from-bottom">
+                <div className="flex flex-col md:flex-row md:justify-between md:items-end px-2 md:px-4 gap-4">
                  <div>
-                    <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Neural Roster</h3>
-                    <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.4em] mt-2 italic">Global Node Presence Hub</p>
+                      <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Team Directory</h3>
+                      <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.4em] mt-2 italic">See who is online</p>
                  </div>
-                 <div className="relative w-80">
+                   <div className="relative w-full md:w-80">
                     <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400" size={18}/>
                     <input type="text" placeholder="Search roster..." className="w-full bg-white border border-slate-200 rounded-2xl py-4 pl-14 pr-6 text-xs font-bold outline-none focus:border-brand-500 shadow-xl transition-all" />
                  </div>
               </div>
-              <div className="flex-1 bg-white rounded-[4rem] border border-slate-200 shadow-2xl p-12 overflow-y-auto scrollbar-hide">
-                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                <div className="flex-1 bg-white rounded-[4rem] border border-slate-200 shadow-2xl p-6 md:p-12 overflow-y-auto scrollbar-hide">
+                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-8">
                     {settings.team.map(member => (
-                       <div key={member.id} className="bg-slate-50 border border-slate-100 p-8 rounded-[3rem] group hover:border-brand-500/30 hover:shadow-xl transition-all relative overflow-hidden">
+                         <div key={member.id} className="bg-slate-50 border border-slate-100 p-6 md:p-8 rounded-[3rem] group hover:border-brand-500/30 hover:shadow-xl transition-all relative overflow-hidden">
                           <div className="flex items-center gap-6 mb-8 relative z-10">
                              <div className="relative">
                                 <img src={member.avatarUrl} className="w-20 h-20 rounded-[2rem] border-2 border-white shadow-xl" />
@@ -614,14 +646,14 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                   disabled={member.id === user.id}
                                   className="flex items-center justify-center gap-3 py-4 bg-white border-2 border-slate-100 rounded-2xl text-[9px] font-black uppercase tracking-widest text-slate-600 hover:bg-brand-50 hover:border-brand-500/20 hover:text-brand-600 transition-all disabled:opacity-30"
                                 >
-                                   <Phone size={14}/> Call Node
+                                     <Phone size={14}/> Call
                                 </button>
                                 <button 
                                   onClick={() => handleInternalLink(member, true)}
                                   disabled={member.id === user.id}
                                   className="flex items-center justify-center gap-3 py-4 bg-brand-600 text-white rounded-2xl text-[9px] font-black uppercase tracking-widest hover:bg-brand-700 transition-all disabled:opacity-30 shadow-lg"
                                 >
-                                   <Video size={14}/> Video Link
+                                     <Video size={14}/> Video Call
                                 </button>
                              </div>
                              <button 
@@ -629,12 +661,12 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                disabled={member.id === user.id}
                                className="flex items-center justify-center gap-3 py-4 bg-white border-2 border-slate-100 rounded-2xl text-[9px] font-black uppercase tracking-widest text-slate-600 hover:bg-brand-50 hover:border-brand-500/20 hover:text-brand-600 transition-all disabled:opacity-30"
                              >
-                                <MessageCircle size={14}/> Message Protocol
+                                  <MessageCircle size={14}/> Message
                              </button>
                           </div>
                           <div className="mt-6 pt-6 border-t border-slate-200/50 flex justify-between items-center text-[10px] font-black uppercase tracking-widest text-slate-400 relative z-10 italic">
                              <span>Extension: {member.extension}</span>
-                             <span className="opacity-40">Admitted Cluster Node</span>
+                               <span className="opacity-40">Team member</span>
                           </div>
                        </div>
                     ))}
@@ -648,10 +680,10 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
            <div className="h-full flex flex-col space-y-8 animate-in slide-in-from-right">
               <div className="flex justify-between items-end px-4">
                  <div>
-                    <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Campaign Engine</h3>
+                    <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Campaigns</h3>
                     <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.4em] mt-2 italic">Autonomous Wave Orchestration</p>
                  </div>
-                 <button onClick={() => setShowCampaignModal(true)} className="px-10 py-5 bg-brand-900 text-white rounded-[1.8rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-4 shadow-3xl hover:bg-slate-800 transition-all active:scale-95"><Plus size={18}/> Provision Wave</button>
+                 <button onClick={() => setShowCampaignModal(true)} className="px-10 py-5 bg-brand-900 text-white rounded-[1.8rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-4 shadow-3xl hover:bg-slate-800 transition-all active:scale-95"><Plus size={18}/> Create Campaign</button>
               </div>
               <div className="flex-1 bg-white rounded-[4rem] border border-slate-200 shadow-2xl p-12 overflow-y-auto scrollbar-hide">
                  <div className="space-y-8">
@@ -713,7 +745,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                  <div className="bg-white rounded-[3rem] border border-slate-200 shadow-xl flex flex-col overflow-hidden h-full">
                     <div className="p-10 border-b bg-slate-900 text-white flex justify-between items-center shrink-0">
                        <div>
-                          <h3 className="text-2xl font-black uppercase italic tracking-tighter">Admission Queue</h3>
+                          <h3 className="text-2xl font-black uppercase italic tracking-tighter">Call Queue</h3>
                           <p className="text-[10px] font-black uppercase text-brand-400 tracking-[0.4em] mt-1">Ready for Dialing</p>
                        </div>
                        <div className="p-4 bg-white/10 rounded-2xl"><Users size={24}/></div>
@@ -765,7 +797,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                           </div>
                           <div className="flex gap-4">
                              <button onClick={handleLeadCall} className="px-12 py-6 bg-green-600 text-white rounded-[2rem] text-xs font-black uppercase tracking-[0.3em] shadow-3xl hover:bg-green-700 transition-all flex items-center gap-4 active:scale-95 group">
-                                <PhoneOutgoing size={20} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform"/> Start Admission
+                                <PhoneOutgoing size={20} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform"/> Start Call
                              </button>
                           </div>
                        </div>
@@ -837,7 +869,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
            <div className="h-full flex gap-8 animate-in slide-in-from-right">
               <div className="w-96 bg-white rounded-[3rem] border border-slate-200 shadow-xl flex flex-col overflow-hidden">
                  <div className="p-10 border-b bg-slate-50 flex items-center justify-between">
-                    <h3 className="text-2xl font-black uppercase italic tracking-tighter text-slate-800">Unified Inbox</h3>
+                    <h3 className="text-2xl font-black uppercase italic tracking-tighter text-slate-800">Inbox</h3>
                     <div className="w-8 h-8 bg-brand-600 rounded-lg flex items-center justify-center text-white text-[10px] font-black">{conversations.filter(c => c.unreadCount > 0).length}</div>
                  </div>
                  <div className="flex-1 overflow-y-auto scrollbar-hide p-6 space-y-4">
@@ -870,8 +902,8 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                <button onClick={() => setShowInboxMenu(!showInboxMenu)} className="p-5 bg-white/10 rounded-2xl hover:bg-white/20 transition-all"><MoreVertical size={24}/></button>
                                {showInboxMenu && (
                                   <div className="absolute right-0 top-full mt-4 w-64 bg-[#12161f] border border-white/10 rounded-3xl shadow-3xl z-50 p-4 animate-in zoom-in-95 overflow-hidden">
-                                     <button className="w-full text-left p-4 hover:bg-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 transition-all"><Eye size={16}/> View Cluster Node</button>
-                                     <button className="w-full text-left p-4 hover:bg-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 transition-all"><Settings size={16}/> Protocol Config</button>
+                                     <button className="w-full text-left p-4 hover:bg-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 transition-all"><Eye size={16}/> View contact</button>
+                                     <button className="w-full text-left p-4 hover:bg-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 transition-all"><Settings size={16}/> Settings</button>
                                      <button className="w-full text-left p-4 hover:bg-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-red-400 flex items-center gap-3 transition-all"><Trash2 size={16}/> Terminate Thread</button>
                                   </div>
                                )}
@@ -889,7 +921,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                   <div className="w-10 h-10 bg-brand-500/20 rounded-xl flex items-center justify-center text-brand-400 group-hover/file:text-white"><FileText size={20}/></div>
                                   <div className="flex-1 min-w-0">
                                      <p className="text-xs font-black truncate uppercase tracking-widest">{att.name}</p>
-                                     <p className="text-[9px] opacity-60 font-bold">{(att.size / 1024).toFixed(1)} KB Packet Admission</p>
+                                     <p className="text-[9px] opacity-60 font-bold">{(att.size / 1024).toFixed(1)} KB attachment</p>
                                   </div>
                                   <Download size={14} className="opacity-40 group-hover/file:opacity-100 transition-opacity"/>
                                 </div>
@@ -928,7 +960,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                  ) : (
                     <div className="flex-1 flex flex-col items-center justify-center opacity-10 italic grayscale">
                        <MessageSquare size={120} className="mb-8"/>
-                       <p className="text-3xl font-black uppercase tracking-[0.6em]">Select Admission Packet</p>
+                       <p className="text-3xl font-black uppercase tracking-[0.6em]">Select a conversation</p>
                     </div>
                  )}
               </div>
@@ -937,56 +969,124 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
         {/* CALENDAR VIEW */}
         {activeTab === 'calendar' && (
-           <div className="h-full flex flex-col space-y-8 animate-in fade-in">
-              <div className="flex justify-between items-end px-4">
-                <div>
-                   <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Neural Sync Hub</h3>
-                   <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.4em] mt-2 italic">Live Node Grid Admission Status</p>
+          <div className="h-full flex flex-col space-y-6 md:space-y-8 animate-in fade-in">
+            <div className="flex flex-col md:flex-row md:justify-between md:items-end px-2 md:px-4 gap-4">
+              <div>
+                <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Calendar</h3>
+                <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.4em] mt-2 italic">Your meetings</p>
+              </div>
+              <button onClick={() => setShowScheduleModal(true)} className="px-10 py-5 bg-slate-900 text-white rounded-[1.8rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-4 shadow-3xl hover:bg-slate-800 transition-all active:scale-95"><Plus size={18}/> Schedule Meeting</button>
+            </div>
+
+            <div className="flex-1 bg-white rounded-[4rem] border border-slate-200 shadow-2xl flex flex-col overflow-hidden relative">
+              <div className="overflow-x-auto">
+                <div className="min-w-[900px] grid grid-cols-[100px_1fr_1fr_1fr_1fr_1fr] border-b bg-slate-50 shadow-sm relative z-10">
+                  <div className="p-4"></div>
+                  {DAYS.map(day => (
+                    <div key={day} className="p-8 text-center border-l border-slate-200/50">
+                      <span className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-1 block">{day}</span>
+                      <span className="text-2xl font-black italic text-slate-800 tracking-tighter">1{DAYS.indexOf(day) + 2}</span>
+                    </div>
+                  ))}
                 </div>
-                <button onClick={() => setShowScheduleModal(true)} className="px-10 py-5 bg-slate-900 text-white rounded-[1.8rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-4 shadow-3xl hover:bg-slate-800 transition-all active:scale-95"><Plus size={18}/> Provision New Sync</button>
               </div>
-              <div className="flex-1 bg-white rounded-[4rem] border border-slate-200 shadow-2xl flex flex-col overflow-hidden relative">
-                 <div className="grid grid-cols-[100px_1fr_1fr_1fr_1fr_1fr] border-b bg-slate-50 shadow-sm relative z-10">
-                    <div className="p-4"></div>
-                    {DAYS.map(day => (<div key={day} className="p-8 text-center border-l border-slate-200/50"><span className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-1 block">{day}</span><span className="text-2xl font-black italic text-slate-800 tracking-tighter">1{DAYS.indexOf(day)+2}</span></div>))}
-                 </div>
-                 <div className="flex-1 overflow-y-auto scrollbar-hide relative bg-white">
-                    {HOURS.map(hour => (
-                       <div key={hour} className="grid grid-cols-[100px_1fr_1fr_1fr_1fr_1fr] h-28 border-b border-slate-100 group">
-                          <div className="p-6 text-[10px] font-black text-slate-300 text-right pr-8 uppercase tracking-widest">{hour}:00</div>
-                          {DAYS.map(day => { 
-                             const event = meetings.map(m => {
-                                const d = new Date(m.startTime);
-                                return { ...m, day: DAYS[d.getDay() - 1], hour: d.getHours() };
-                             }).find(e => e.day === day && e.hour === hour); 
-                             
-                             return (
-                                <div key={day} className="border-l border-slate-100 relative hover:bg-slate-50/50 transition-all">
-                                   {event && (
-                                      <button className={`absolute inset-3 rounded-[2rem] p-5 text-left shadow-xl hover:scale-[1.03] transition-all animate-in zoom-in-95 group/event ${event.attendees.some(a => a.userId === user.id) ? 'bg-brand-900 text-white' : 'bg-white border-2 border-slate-100 text-slate-600'}`}>
-                                         <div className="flex justify-between items-start mb-2">
-                                            <p className="text-[9px] font-black uppercase tracking-widest opacity-60 italic">{hour}:00 handshake</p>
-                                            {event.isRecurring && <Repeat size={10} className="opacity-40"/>}
-                                         </div>
-                                         <p className="font-black italic uppercase tracking-tighter text-sm leading-tight line-clamp-2">{event.title}</p>
-                                      </button>
-                                   )}
-                                </div>
-                             ); 
-                          })}
-                       </div>
-                    ))}
-                 </div>
+
+              <div className="flex-1 overflow-y-auto scrollbar-hide relative bg-white">
+                {HOURS.map(hour => (
+                  <div key={hour} className="min-w-[900px] grid grid-cols-[100px_1fr_1fr_1fr_1fr_1fr] h-28 border-b border-slate-100 group">
+                    <div className="p-6 text-[10px] font-black text-slate-300 text-right pr-8 uppercase tracking-widest">{hour}:00</div>
+                    {DAYS.map(day => {
+                      const event = meetings
+                        .map(m => {
+                          const d = new Date(m.startTime);
+                          return { ...m, day: DAYS[d.getDay() - 1], hour: d.getHours() };
+                        })
+                        .find(e => e.day === day && e.hour === hour);
+
+                      return (
+                        <div key={day} className="border-l border-slate-100 relative hover:bg-slate-50/50 transition-all">
+                          {event && (
+                            <div className={`absolute inset-3 rounded-[2rem] p-5 text-left shadow-xl hover:scale-[1.03] transition-all animate-in zoom-in-95 group/event ${event.attendees.some(a => a.userId === user.id) ? 'bg-brand-900 text-white' : 'bg-white border-2 border-slate-100 text-slate-600'}`}>
+                              <div className="flex justify-between items-start mb-2">
+                                <p className="text-[9px] font-black uppercase tracking-widest opacity-60 italic">{hour}:00 meeting</p>
+                                {event.isRecurring && <Repeat size={10} className="opacity-40" />}
+                              </div>
+                              <p className="font-black italic uppercase tracking-tighter text-sm leading-tight line-clamp-2">{event.title}</p>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {event.attendees.find(a => a.userId === user.id)?.status === 'pending' && (
+                                  <>
+                                    <button
+                                      onClick={() => handleAcceptMeeting(event)}
+                                      className="px-3 py-1 rounded-xl bg-white/10 text-[9px] font-black uppercase tracking-widest"
+                                    >
+                                      Accept
+                                    </button>
+                                    <button
+                                      onClick={() => handleDeclineMeeting(event)}
+                                      className="px-3 py-1 rounded-xl bg-white/10 text-[9px] font-black uppercase tracking-widest"
+                                    >
+                                      Decline
+                                    </button>
+                                  </>
+                                )}
+                                {(event.organizerId === user.id || event.attendees.find(a => a.userId === user.id)?.status === 'accepted') && (
+                                  <button
+                                    onClick={() => handleJoinMeeting(event)}
+                                    className="px-3 py-1 rounded-xl bg-brand-600 text-[9px] font-black uppercase tracking-widest text-white"
+                                  >
+                                    Join
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ))}
               </div>
-           </div>
+            </div>
+
+            <div className="bg-white rounded-[3rem] border border-slate-200 shadow-2xl px-10 py-8">
+              <div className="flex items-center justify-between mb-6">
+                <div>
+                  <h4 className="text-xl font-black uppercase tracking-widest text-slate-700">Meeting History</h4>
+                  <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400 mt-2">Last 8 sessions</p>
+                </div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">{pastMeetings.length} entries</span>
+              </div>
+              {pastMeetings.length === 0 ? (
+                <div className="text-slate-400 text-sm font-bold">No past meetings yet.</div>
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  {pastMeetings.map(meeting => (
+                    <div key={meeting.id} className="p-5 rounded-2xl border border-slate-100 bg-slate-50/60 flex flex-col gap-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                          {new Date(meeting.startTime).toLocaleDateString()}
+                        </span>
+                        <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                          {meeting.status}
+                        </span>
+                      </div>
+                      <div className="text-sm font-black text-slate-800 uppercase italic line-clamp-1">{meeting.title}</div>
+                      <div className="text-[11px] text-slate-500">
+                        {Math.round(meeting.duration)} min ? {meeting.attendees.length} attendees
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </div>
-
       {/* CAMPAIGN MODAL */}
       {showCampaignModal && (
         <div className="fixed inset-0 z-[110] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
            <div className="bg-white rounded-[4rem] shadow-4xl w-full max-w-2xl p-16 border border-white/20 relative overflow-hidden">
-              <h3 className="text-4xl font-black italic tracking-tighter uppercase text-slate-800 mb-10 text-center">Provision Wave</h3>
+              <h3 className="text-4xl font-black italic tracking-tighter uppercase text-slate-800 mb-10 text-center">Create Campaign</h3>
               <div className="space-y-8">
                  <div className="space-y-3">
                     <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Wave Identifier</label>
@@ -996,7 +1096,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                     <div className="space-y-3">
                        <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Protocol Type</label>
                        <select className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black uppercase text-xs focus:border-brand-500 outline-none" value={newCampaign.type} onChange={e => setNewCampaign({...newCampaign, type: e.target.value as any})}>
-                          <option value="call">Voice Admission</option>
+                          <option value="call">Calls</option>
                           <option value="sms">Omnichannel Packet</option>
                        </select>
                     </div>
@@ -1014,7 +1114,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                     </div>
                  </div>
                  <button onClick={provisionCampaign} className="w-full py-7 bg-brand-600 text-white rounded-[2.5rem] font-black uppercase tracking-[0.3em] shadow-3xl hover:bg-brand-700 transition-all active:scale-95 text-xs">Initialize Campaign Wave</button>
-                 <button onClick={() => setShowCampaignModal(false)} className="w-full text-slate-400 font-bold uppercase tracking-widest text-[10px] hover:text-slate-600 transition-all">Cancel Admission</button>
+                 <button onClick={() => setShowCampaignModal(false)} className="w-full text-slate-400 font-bold uppercase tracking-widest text-[10px] hover:text-slate-600 transition-all">Cancel</button>
               </div>
            </div>
         </div>
@@ -1024,7 +1124,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       {showScheduleModal && (
         <div className="fixed inset-0 z-[110] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
            <div className="bg-white rounded-[4rem] shadow-4xl w-full max-w-lg p-16 border border-white/20 relative overflow-hidden">
-              <h3 className="text-4xl font-black italic tracking-tighter uppercase text-slate-800 mb-10 text-center">Sync Admission</h3>
+              <h3 className="text-4xl font-black italic tracking-tighter uppercase text-slate-800 mb-10 text-center">Schedule Meeting</h3>
               <div className="space-y-8">
                  <div className="space-y-3">
                     <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Sync Identifier</label>
@@ -1050,16 +1150,21 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                     </div>
                  </div>
                  <button 
-                  onClick={() => {
+                 onClick={() => {
                     const startTime = new Date(`${newMeeting.date}T${newMeeting.time}`).getTime();
+                    const roomId = `room_${Date.now()}`;
                     const meeting: Meeting = { 
                       id: `m_${Date.now()}`, 
-                      title: newMeeting.title || 'Neural Sync', 
+                      roomId,
+                      title: newMeeting.title || 'Meeting', 
                       startTime, 
                       duration: 30, 
                       organizerId: user.id, 
-                      attendees: [{ userId: newMeeting.attendeeId, status: 'pending' }], 
-                      description: 'Handshake dispatched.', 
+                      attendees: [
+                        { userId: user.id, status: 'accepted' },
+                        { userId: newMeeting.attendeeId, status: 'pending' }
+                      ].filter(a => a.userId),
+                      description: 'Invite sent.',
                       status: 'upcoming', 
                       isRecording: false,
                       isRecurring: newMeeting.isRecurring, 
@@ -1067,13 +1172,13 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                     };
                     onUpdateMeetings([meeting, ...meetings]);
                     setShowScheduleModal(false);
-                    addNotification('success', 'Neural Sync Handshake dispatched.');
+                    addNotification('success', 'Meeting invite sent.');
                   }}
                   className="w-full py-7 bg-brand-600 text-white rounded-[2.5rem] font-black uppercase tracking-[0.3em] shadow-3xl hover:bg-brand-700 transition-all active:scale-95 text-xs"
                  >
-                    Establish Sync Link
+                    Schedule
                  </button>
-                 <button onClick={() => setShowScheduleModal(false)} className="w-full text-slate-400 font-bold uppercase tracking-widest text-[10px] hover:text-slate-600 transition-all text-center">Discard Handshake</button>
+                 <button onClick={() => setShowScheduleModal(false)} className="w-full text-slate-400 font-bold uppercase tracking-widest text-[10px] hover:text-slate-600 transition-all text-center">Cancel</button>
               </div>
            </div>
         </div>

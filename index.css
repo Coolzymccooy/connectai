@@ -6,6 +6,35 @@ body {
   font-family: 'Inter', sans-serif;
 }
 
+/* Compact mode for main app UI (exclude login screen) */
+.app-compact {
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.app-compact h1,
+.app-compact h2,
+.app-compact h3,
+.app-compact h4 {
+  line-height: 1.2;
+}
+
+.app-compact input,
+.app-compact select,
+.app-compact textarea,
+.app-compact button {
+  font-size: 0.92em;
+  padding: 0.6em 1em;
+}
+
+.app-compact .text-\[10px\] {
+  font-size: 9px;
+}
+
+.app-compact .text-\[11px\] {
+  font-size: 10px;
+}
+
 /* Custom scrollbar for transcript */
 .scrollbar-hide::-webkit-scrollbar {
   display: none;

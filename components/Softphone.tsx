@@ -1,12 +1,14 @@
 ﻿import React, { useState, useEffect, useRef } from 'react';
 import { Phone, PhoneOff, Mic, MicOff, Volume2, User, Delete, Minimize2, Maximize2, GripHorizontal, History } from 'lucide-react';
-import { saveCall, fetchAgentCalls } from '../services/dbService';
+import { createCall, updateCall, fetchCallLogs } from '../services/callLogService';
 import { Device, Call as TwilioCall } from '@twilio/voice-sdk';
 import { AgentStatus, Call as AppCall, CallDirection, CallStatus, Lead, User as TeamUser } from '../types';
 
 interface SoftphoneProps {
   userExtension?: string;
+  agentId?: string;
   allowedNumbers?: string[];
+  restrictOutboundNumbers?: boolean;
   activeCall?: AppCall | null;
   agentStatus?: AgentStatus;
   onAccept?: () => void;
@@ -23,10 +25,10 @@ interface SoftphoneProps {
   onTestTts?: () => void;
   onOpenFreeCall?: () => void;
   floating?: boolean;
-  isFirebaseConfigured?: boolean;
+  enableServerLogs?: boolean;
 }
 
-export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = true, isFirebaseConfigured = false }) => {
+export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, allowedNumbers = [], restrictOutboundNumbers = false, floating = true, enableServerLogs = true }) => {
   const [number, setNumber] = useState('');
   const [status, setStatus] = useState<'idle' | 'dialing' | 'connected' | 'incoming'>('idle');
   const [isMuted, setIsMuted] = useState(false);
@@ -43,19 +45,33 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
   const dragRef = useRef<{ active: boolean; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const [history, setHistory] = useState<AppCall[]>([]);
   const activeHistoryIdRef = useRef<string | null>(null);
+  const activeHistoryStartRef = useRef<number | null>(null);
+  const refreshHistory = async () => {
+    if (!enableServerLogs) return;
+    const agentKey = agentId || userExtension || '';
+    if (!agentKey) return;
+    try {
+      const calls = await fetchCallLogs({ agentId: agentKey, limit: 6 });
+      setHistory(calls);
+    } catch {
+      // ignore refresh errors
+    }
+  };
 
   useEffect(() => {
-    if (!isFirebaseConfigured) return;
-    // Fetch recent calls for this agent
-    try {
-      const unsubscribe = fetchAgentCalls(userExtension || 'unknown', 6, (calls) => {
+    if (!enableServerLogs) return;
+    const agentKey = agentId || userExtension || '';
+    if (!agentKey) return;
+    const load = async () => {
+      try {
+        const calls = await fetchCallLogs({ agentId: agentKey, limit: 6 });
         setHistory(calls);
-      });
-      return () => unsubscribe();
-    } catch (err) {
-      console.warn('Failed to fetch softphone history:', err);
-    }
-  }, [userExtension, isFirebaseConfigured]);
+      } catch (err) {
+        console.warn('Failed to fetch softphone history:', err);
+      }
+    };
+    load();
+  }, [agentId, userExtension, enableServerLogs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,7 +84,14 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
       try {
         const response = await fetch(`/api/twilio/token?identity=${encodeURIComponent(identity)}`);
         if (!response.ok) {
-          throw new Error(await response.text());
+          let details = '';
+          try {
+            const body = await response.json();
+            details = body?.error ? `: ${body.error}` : JSON.stringify(body);
+          } catch {
+            details = (await response.text())?.slice(0, 240) || '';
+          }
+          throw new Error(`Token endpoint error (${response.status})${details ? ` ${details}` : ''}`);
         }
         const data = await response.json();
         if (cancelled) return;
@@ -127,20 +150,25 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
             durationSeconds: 0,
             status: CallStatus.RINGING,
             transcript: [],
-            agentId: userExtension,
+            agentId: agentId || userExtension,
             extension: userExtension
           };
-          if (isFirebaseConfigured) saveCall(newCallObs);
+          if (enableServerLogs) {
+            createCall(newCallObs).then((created) => {
+              activeHistoryIdRef.current = created.id;
+              activeHistoryStartRef.current = created.startTime || Date.now();
+              refreshHistory();
+            }).catch(() => {});
+          }
 
           incomingCall.on('accept', () => {
             setStatus('connected');
             if (activeHistoryIdRef.current) {
-              if (isFirebaseConfigured) {
-                saveCall({
-                  ...newCallObs,
+              if (enableServerLogs) {
+                updateCall(activeHistoryIdRef.current, {
                   status: CallStatus.ACTIVE,
-                  startTime: Date.now()
-                });
+                  startTime: Date.now(),
+                }).then(refreshHistory).catch(() => {});
               }
             }
             if (timerRef.current) window.clearInterval(timerRef.current);
@@ -235,6 +263,15 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
     const normalized = normalizeNumber(number);
     if (!normalized) return;
 
+    if (restrictOutboundNumbers) {
+      const allowed = allowedNumbers.map(n => normalizeNumber(n));
+      if (!allowed.includes(normalized)) {
+        alert('This number is not in your allowed list.');
+        setStatus('idle');
+        return;
+      }
+    }
+
     try {
       const historyId = `out_${Date.now()}`;
       activeHistoryIdRef.current = historyId;
@@ -249,17 +286,23 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
         durationSeconds: 0,
         status: CallStatus.DIALING,
         transcript: [],
-        agentId: userExtension,
+        agentId: agentId || userExtension,
         extension: userExtension
       };
-      if (isFirebaseConfigured) saveCall(newCallObs);
+      if (enableServerLogs) {
+        createCall(newCallObs).then((created) => {
+          activeHistoryIdRef.current = created.id;
+          activeHistoryStartRef.current = created.startTime || Date.now();
+          refreshHistory();
+        }).catch(() => {});
+      }
 
       const newCall = await device.connect({ params: { To: normalized } });
       setCall(newCall);
       newCall.on('accept', () => {
         setStatus('connected');
         if (activeHistoryIdRef.current) {
-          if (isFirebaseConfigured) saveCall({ ...newCallObs, status: CallStatus.ACTIVE, startTime: Date.now() });
+          if (enableServerLogs) updateCall(activeHistoryIdRef.current, { status: CallStatus.ACTIVE, startTime: Date.now() }).then(refreshHistory).catch(() => {});
         }
         if (timerRef.current) window.clearInterval(timerRef.current);
         timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
@@ -270,18 +313,11 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
     } catch (err) {
       console.error('Twilio call failed:', err);
       if (activeHistoryIdRef.current) {
-        if (isFirebaseConfigured) {
-          saveCall({
-            id: activeHistoryIdRef.current,
-            status: CallStatus.ENDED, // Failed
+        if (enableServerLogs) {
+          updateCall(activeHistoryIdRef.current, {
+            status: CallStatus.ENDED,
             durationSeconds: 0,
-            startTime: Date.now(),
-            transcript: [],
-            direction: 'outbound',
-            customerName: normalized,
-            phoneNumber: normalized,
-            queue: 'Failed',
-          });
+          }).then(refreshHistory).catch(() => {});
         }
       }
       setStatus('idle');
@@ -303,26 +339,17 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, floating = 
     device?.disconnectAll();
     if (activeHistoryIdRef.current) {
       const endedAt = Date.now();
-      // We don't need to manually map history here as onSnapshot will update it.
-      // We just need to save the final state to DB.
-      // But we need to know the start time to calc duration?
-      // For now, let's just use the current history item if we could find it, or just use duration state.
-      // A better way is to fetch the document or keep a ref to the start time.
-      // Since we don't have the start time in ref easily without fetching, use duration state.
-
-      const currentDuration = duration; // from state
-
-      // We need to construct the call object to save. 
-      // Since it's a patch (merge=true), we can just update status and duration.
-      if (isFirebaseConfigured) {
-        saveCall({
-          id: activeHistoryIdRef.current,
+      const startedAt = activeHistoryStartRef.current || endedAt;
+      const currentDuration = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+      if (enableServerLogs) {
+        updateCall(activeHistoryIdRef.current, {
           status: CallStatus.ENDED,
           durationSeconds: currentDuration,
-        } as AppCall);
+        }).then(refreshHistory).catch(() => {});
       }
 
       activeHistoryIdRef.current = null;
+      activeHistoryStartRef.current = null;
     }
   };
 

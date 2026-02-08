@@ -1,4 +1,4 @@
-
+﻿
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Shield, Database, Workflow, Plus, UserPlus, Trash2, Zap, CreditCard, 
@@ -15,10 +15,11 @@ import { startLegacyMigration } from '../services/migrationService';
 import { exportClusterData, downloadJson } from '../services/exportService';
 import { getIntegrationsStatus, startGoogleOAuth, startMicrosoftOAuth, connectCrmProvider, syncCrmProvider, connectMarketingProvider, syncMarketingProvider } from '../services/integrationService';
 import { saveSettingsApi } from '../services/settingsService';
+import { createInvite, fetchInvites } from '../services/authPolicyService';
 
 const PERSONA_TEMPLATES = [
   { name: 'Professional Concierge', prompt: 'Welcome to ConnectAI Corporate. Your call is vital to our cluster. For technical admitting, press 1. For account stewardship, press 2.' },
-  { name: 'Friendly Assistant', prompt: 'Hi there! Welcome to the ConnectAI family. We’re excited to help you today. Press 1 for Sales or 2 for anything else!' },
+  { name: 'Friendly Assistant', prompt: 'Hi there! Welcome to the ConnectAI family. Weâ€™re excited to help you today. Press 1 for Sales or 2 for anything else!' },
   { name: 'Technical Support', prompt: 'Initializing ConnectAI Technical Gateway. Current cluster latency is low. Press 1 for engineering support or 2 for status updates.' }
 ];
 
@@ -70,6 +71,15 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const [editAllowedNumbers, setEditAllowedNumbers] = useState(settings.voice.allowedNumbers.join('\n'));
   const [scalePlan, setScalePlan] = useState(settings.subscription.plan);
   const [scaleSeats, setScaleSeats] = useState(settings.subscription.seats);
+  const [authSettings, setAuthSettings] = useState(settings.auth);
+  const [authDomains, setAuthDomains] = useState(settings.auth.allowedDomains.join('\n'));
+  const [domainTenantMap, setDomainTenantMap] = useState(
+    settings.auth.domainTenantMap.map((m) => `${m.domain}=${m.tenantId}`).join('\n')
+  );
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteRole, setInviteRole] = useState<Role>(Role.AGENT);
+  const [inviteTenantId, setInviteTenantId] = useState('');
+  const [invites, setInvites] = useState<any[]>([]);
 
   useEffect(() => {
     const checkHealth = async () => {
@@ -92,6 +102,16 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   useEffect(() => {
     setEditAllowedNumbers(settings.voice.allowedNumbers.join('\n'));
   }, [settings.voice.allowedNumbers]);
+
+  useEffect(() => {
+    setAuthSettings(settings.auth);
+    setAuthDomains(settings.auth.allowedDomains.join('\n'));
+    setDomainTenantMap(settings.auth.domainTenantMap.map((m) => `${m.domain}=${m.tenantId}`).join('\n'));
+  }, [settings.auth]);
+
+  useEffect(() => {
+    fetchInvites().then(setInvites).catch(() => {});
+  }, []);
 
   const isDemoMode = useMemo(() => !geminiConfigured, [geminiConfigured]);
 
@@ -128,6 +148,15 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     addNotification('info', 'Member de-provisioned.');
   };
 
+  const handleUpdateMember = (userId: string, updates: Partial<User>) => {
+    const nextSettings = {
+      ...settings,
+      team: settings.team.map(u => u.id === userId ? { ...u, ...updates } : u)
+    };
+    onUpdateSettings(nextSettings);
+    saveSettingsApi(nextSettings).catch(() => {});
+  };
+
   const handleSaveIvr = () => {
     const allowedNumbers = editAllowedNumbers
       .split('\n')
@@ -138,6 +167,47 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     saveSettingsApi(nextSettings).catch(() => {});
     setIsIvrEditing(false);
     addNotification('success', 'Routing Architecture Deployed.');
+  };
+
+  const handleSaveAuth = () => {
+    const allowedDomains = authDomains
+      .split('\n')
+      .map((d) => d.trim().toLowerCase())
+      .filter(Boolean);
+    const domainTenantMapParsed = domainTenantMap
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => {
+        const [domain, tenantId] = line.split('=').map((v) => v.trim());
+        return { domain: (domain || '').toLowerCase(), tenantId: tenantId || '' };
+      })
+      .filter((m) => m.domain && m.tenantId);
+    const nextSettings = {
+      ...settings,
+      auth: {
+        ...authSettings,
+        allowedDomains,
+        domainTenantMap: domainTenantMapParsed,
+      },
+    };
+    onUpdateSettings(nextSettings);
+    saveSettingsApi(nextSettings).catch(() => {});
+    addNotification('success', 'Access policy updated.');
+  };
+
+  const handleCreateInvite = async () => {
+    if (!inviteEmail) return;
+    try {
+      await createInvite({ email: inviteEmail, role: inviteRole, tenantId: inviteTenantId || undefined });
+      setInviteEmail('');
+      setInviteTenantId('');
+      const latest = await fetchInvites(inviteTenantId || undefined);
+      setInvites(latest);
+      addNotification('success', 'Invite sent.');
+    } catch {
+      addNotification('error', 'Failed to create invite.');
+    }
   };
 
   const handleAddIvrOption = () => {
@@ -170,9 +240,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
         ...settings,
         migration: { provider: selectedProvider, recordsProcessed: data.length, totalRecords: data.length, audioSynced: data.length, aiScored: data.length, status: 'completed' }
       });
-      addNotification('success', 'Migration Wave Complete: Data Admission Optimized.');
+      addNotification('success', 'Migration complete.');
     } catch (e) {
-      addNotification('error', 'Handshake Failed: SSL/TLS Protocol Mismatch.');
+      addNotification('error', 'Connection failed. Please check SSL/TLS settings.');
     } finally {
       setIsMigrating(false);
       setMigrationStep(1);
@@ -182,7 +252,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const handleScanIntegrity = async () => {
     setIsScanning(true);
     setScanResults({ status: 'scanning', issues: [] });
-    addNotification('info', 'Neural Hub: Running Cluster Integrity Scan...');
+    addNotification('info', 'Running system check...');
     
     await new Promise(r => setTimeout(r, 2000));
     
@@ -195,7 +265,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       issues 
     });
     setIsScanning(false);
-    addNotification('success', issues.length > 0 ? 'Scan Complete: Diagnostic warnings found.' : 'Scan Complete: Cluster integrity verified.');
+    addNotification('success', issues.length > 0 ? 'Scan complete: warnings found.' : 'Scan complete: all good.');
   };
 
   const handleExportData = async () => {
@@ -205,7 +275,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     }
     
     setIsExporting(true);
-    addNotification('info', 'Neural Cluster: Packaging bundle for admission...');
+    addNotification('info', 'Preparing export bundle...');
     try {
       const data = await exportClusterData();
       const filename = `connect-ai-bundle-${Date.now()}.json`;
@@ -219,7 +289,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       };
       setExportHistory(prev => [newRecord, ...prev].slice(0, 5));
       
-      addNotification('success', 'Neural bundle successfully admitted to local storage.');
+      addNotification('success', 'Export saved locally.');
     } catch (e) {
       addNotification('error', 'Export protocol failed.');
     } finally {
@@ -235,13 +305,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
         balance: settings.subscription.balance + amount
       }
     });
-    addNotification('success', `Cluster balance injected: +$${amount}`);
+    addNotification('success', `Balance updated: +$${amount}`);
     setShowWalletModal(false);
   };
 
   const handleScaleInfrastructure = async () => {
     setIsScaling(true);
-    addNotification('info', 'Re-provisioning Neural Infrastructure...');
+    addNotification('info', 'Scaling environment...');
     await new Promise(r => setTimeout(r, 2500));
     const tokenLimit = scalePlan === 'Enterprise' ? 5000000 : scalePlan === 'Growth' ? 1000000 : 250000;
     const voiceLimit = scalePlan === 'Enterprise' ? 20000 : scalePlan === 'Growth' ? 5000 : 1000;
@@ -256,23 +326,23 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     });
     setIsScaling(false);
     setShowScaleModal(false);
-    addNotification('success', `Cluster Scaled: ${scalePlan} Environment Active.`);
+    addNotification('success', `Scaled to ${scalePlan}.`);
   };
 
   return (
     <div className="h-full flex flex-col bg-slate-50 overflow-hidden">
       {/* Header */}
-      <div className="bg-white border-b px-10 pt-10 shrink-0">
-         <div className="flex justify-between items-center mb-8">
-            <h2 className="text-4xl font-black text-slate-800 italic uppercase tracking-tighter">Cluster Control</h2>
+      <div className="bg-white border-b px-4 md:px-10 pt-6 md:pt-10 shrink-0">
+         <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 md:mb-8 gap-4">
+            <h2 className="text-3xl md:text-4xl font-black text-slate-800 italic uppercase tracking-tighter">Admin Settings</h2>
             <div className="flex items-center gap-4">
                <div className="px-4 py-2 bg-brand-50 rounded-2xl border border-brand-100 flex items-center gap-2">
                   <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                  <span className="text-[10px] font-black uppercase text-brand-600 tracking-widest">Neural Cores: Active</span>
+                  <span className="text-[10px] font-black uppercase text-brand-600 tracking-widest">System: Active</span>
                </div>
             </div>
          </div>
-         <div className="flex space-x-12">
+         <div className="flex space-x-6 md:space-x-12 overflow-x-auto scrollbar-hide">
             {[
               { id: 'general', label: 'Integrations' },
               { id: 'ivr', label: 'Routing' },
@@ -284,7 +354,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
               <button 
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)} 
-                className={`pb-4 text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === tab.id ? 'border-b-4 border-brand-600 text-brand-600' : 'text-slate-400 border-transparent hover:text-slate-600'}`}
+                className={`pb-4 whitespace-nowrap text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === tab.id ? 'border-b-4 border-brand-600 text-brand-600' : 'text-slate-400 border-transparent hover:text-slate-600'}`}
               >
                 {tab.label}
               </button>
@@ -296,6 +366,57 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
         {/* INTEGRATIONS TAB */}
         {activeTab === 'general' && (
            <div className="max-w-5xl space-y-8 animate-in fade-in">
+              <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Access Control</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                  <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    Invite-Only Onboarding
+                    <input
+                      type="checkbox"
+                      checked={Boolean(authSettings.inviteOnly)}
+                      onChange={(e) => setAuthSettings({ ...authSettings, inviteOnly: e.target.checked })}
+                      className="h-4 w-4 rounded border-slate-300"
+                    />
+                  </label>
+                  <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
+                    Auto-Tenant By Domain
+                    <input
+                      type="checkbox"
+                      checked={Boolean(authSettings.autoTenantByDomain)}
+                      onChange={(e) => setAuthSettings({ ...authSettings, autoTenantByDomain: e.target.checked })}
+                      className="h-4 w-4 rounded border-slate-300"
+                    />
+                  </label>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Allowed Domains (one per line)</label>
+                    <textarea
+                      className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                      rows={4}
+                      placeholder="company.com"
+                      value={authDomains}
+                      onChange={(e) => setAuthDomains(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Domain → Tenant Map (domain=tenantId)</label>
+                    <textarea
+                      className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                      rows={4}
+                      placeholder="company.com=connectai-main"
+                      value={domainTenantMap}
+                      onChange={(e) => setDomainTenantMap(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <button
+                  onClick={handleSaveAuth}
+                  className="px-8 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                >
+                  Save Access Policy
+                </button>
+              </div>
               {['hubSpot', 'pipedrive', 'salesforce'].map((key) => {
                 const isEnabled = key === 'hubSpot' ? settings.integrations.hubSpot.enabled : (settings.integrations as any)[key];
                 return (
@@ -306,7 +427,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                       </div>
                       <div>
                         <h4 className="text-xl font-black uppercase italic tracking-tight">{key.replace('hubSpot', 'HubSpot Enterprise')}</h4>
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Bi-Directional Neural Sync</p>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Two-way sync</p>
                       </div>
                     </div>
                     <button onClick={() => handleToggleIntegration(key as any)} className={`px-8 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isEnabled ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{isEnabled ? 'Tunnel Active' : 'Admit Tunnel'}</button>
@@ -390,7 +511,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                  <div className="flex justify-between items-start mb-12">
                    <div>
                      <h3 className="text-4xl font-black italic uppercase tracking-tighter mb-2 text-slate-800">Routing Architect</h3>
-                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic">Global Logic Admissions</p>
+                     <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic">Global settings</p>
                    </div>
                    {!isIvrEditing ? (
                      <button onClick={() => setIsIvrEditing(true)} className="px-10 py-5 bg-brand-600 text-white rounded-[1.8rem] text-[10px] font-black uppercase tracking-widest shadow-2xl hover:bg-brand-700 transition-all flex items-center gap-3">
@@ -417,7 +538,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                        </div>
                      <div className="space-y-4">
                        <div className="flex justify-between items-center">
-                          <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Sparkles size={14}/> Neural Atmosphere</label>
+                          <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Sparkles size={14}/> Theme</label>
                           <div className="flex gap-2">
                              {PERSONA_TEMPLATES.map((p, i) => (
                                <button key={i} title={p.name} onClick={() => setEditIvr({...editIvr, welcomeMessage: p.prompt})} className="p-3 bg-slate-50 border border-slate-100 rounded-xl hover:bg-brand-50 hover:border-brand-500 transition-all text-slate-400 hover:text-brand-600"><Wand2 size={14}/></button>
@@ -491,7 +612,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                      {selectedProvider && (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-10">
                           <div className="space-y-4"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Server size={14}/> API Endpoint</label><input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold outline-none focus:border-brand-500" placeholder="https://api.provider.com/v1" value={credentials.endpoint} onChange={e => setCredentials({...credentials, endpoint: e.target.value})} /></div>
-                          <div className="space-y-4"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Key size={14}/> Client Secret / API Key</label><input type="password" className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold outline-none focus:border-brand-500" placeholder="••••••••••••••••" value={credentials.apiKey} onChange={e => setCredentials({...credentials, apiKey: e.target.value})} /></div>
+                          <div className="space-y-4"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Key size={14}/> Client Secret / API Key</label><input type="password" className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold outline-none focus:border-brand-500" placeholder="â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢" value={credentials.apiKey} onChange={e => setCredentials({...credentials, apiKey: e.target.value})} /></div>
                         </div>
                      )}
                      <button disabled={!selectedProvider || !credentials.endpoint || !credentials.apiKey} onClick={() => setMigrationStep(2)} className="w-full py-6 bg-slate-900 text-white rounded-3xl text-[11px] font-black uppercase tracking-[0.4em] shadow-2xl hover:bg-slate-800 disabled:opacity-30 transition-all flex items-center justify-center gap-3">Establish Connection <ArrowRight size={18}/></button>
@@ -505,10 +626,88 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
         {/* TEAM TAB */}
         {activeTab === 'team' && (
           <div className="max-w-5xl space-y-8 animate-in slide-in-from-bottom duration-500">
-            <div className="flex justify-between items-end mb-4"><p className="text-[11px] font-black uppercase text-slate-400 tracking-[0.4em]">Neural Roster: {settings.team.length} Nodes</p><button onClick={() => setShowInviteModal(true)} className="px-8 py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center gap-3 shadow-xl hover:bg-slate-800 transition-all"><UserPlus size={16}/> Provision Core</button></div>
+            <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+              <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Invite Staff</h4>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
+                <input
+                  className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                  placeholder="Email"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                />
+                <select
+                  className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                  value={inviteRole}
+                  onChange={(e) => setInviteRole(e.target.value as Role)}
+                >
+                  <option value={Role.AGENT}>Agent</option>
+                  <option value={Role.SUPERVISOR}>Supervisor</option>
+                  <option value={Role.ADMIN}>Admin</option>
+                </select>
+                <input
+                  className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                  placeholder="Tenant ID (optional)"
+                  value={inviteTenantId}
+                  onChange={(e) => setInviteTenantId(e.target.value)}
+                />
+                <button
+                  onClick={handleCreateInvite}
+                  className="px-6 py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest"
+                >
+                  Send Invite
+                </button>
+              </div>
+              <div className="space-y-2">
+                {invites.length === 0 && (
+                  <div className="text-[10px] text-slate-400 uppercase tracking-widest">No invites yet.</div>
+                )}
+                {invites.slice(0, 8).map((invite) => (
+                  <div key={invite.id} className="flex items-center justify-between bg-slate-50 p-4 rounded-2xl border border-slate-100">
+                    <div className="flex flex-col">
+                      <span className="text-[10px] font-black uppercase tracking-widest text-slate-700">{invite.email}</span>
+                      <span className="text-[9px] uppercase tracking-widest text-slate-400">{invite.role} • {invite.status}</span>
+                    </div>
+                    <span className="text-[9px] uppercase tracking-widest text-slate-400">{invite.tenantId}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-between items-end mb-4"><p className="text-[11px] font-black uppercase text-slate-400 tracking-[0.4em]">Team members: {settings.team.length}</p><button onClick={() => setShowInviteModal(true)} className="px-8 py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center gap-3 shadow-xl hover:bg-slate-800 transition-all"><UserPlus size={16}/> Invite Member</button></div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               {settings.team.map(member => (
-                <div key={member.id} className="bg-white p-8 rounded-[2.5rem] border border-slate-200 flex items-center justify-between group hover:border-brand-500/30 hover:shadow-xl transition-all"><div className="flex items-center gap-5"><img src={member.avatarUrl} className="w-14 h-14 rounded-2xl border border-slate-100" /><div><h4 className="text-xl font-black italic uppercase tracking-tight text-slate-800">{member.name}</h4><p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{member.role} • EXT {member.extension}</p></div></div><button onClick={() => handleRemoveUser(member.id)} className="p-3 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"><UserMinus size={18}/></button></div>
+                <div key={member.id} className="bg-white p-8 rounded-[2.5rem] border border-slate-200 group hover:border-brand-500/30 hover:shadow-xl transition-all">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-5">
+                      <img src={member.avatarUrl} className="w-14 h-14 rounded-2xl border border-slate-100" />
+                      <div>
+                        <h4 className="text-xl font-black italic uppercase tracking-tight text-slate-800">{member.name}</h4>
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{member.role} â€¢ EXT {member.extension}</p>
+                      </div>
+                    </div>
+                    <button onClick={() => handleRemoveUser(member.id)} className="p-3 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"><UserMinus size={18}/></button>
+                  </div>
+                  <div className="mt-6 border-t border-slate-100 pt-6 space-y-4">
+                    <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      Restrict Outbound Numbers
+                      <input
+                        type="checkbox"
+                        checked={Boolean(member.restrictOutboundNumbers)}
+                        onChange={(e) => handleUpdateMember(member.id, { restrictOutboundNumbers: e.target.checked })}
+                        className="h-4 w-4 rounded border-slate-300"
+                      />
+                    </label>
+                    <div>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Allowed Numbers (one per line)</label>
+                      <textarea
+                        className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                        rows={3}
+                        placeholder="+12025550123"
+                        value={(member.allowedNumbers || []).join('\n')}
+                        onChange={(e) => handleUpdateMember(member.id, { allowedNumbers: e.target.value.split('\n').map(v => v.trim()).filter(Boolean) })}
+                      />
+                    </div>
+                  </div>
+                </div>
               ))}
             </div>
           </div>
@@ -518,8 +717,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
         {activeTab === 'billing' && (
           <div className="max-w-5xl space-y-12 animate-in slide-in-from-right duration-500">
              <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                <div className="bg-brand-900 rounded-[3rem] p-12 text-white shadow-2xl relative overflow-hidden"><div className="absolute top-0 right-0 w-64 h-64 bg-white/5 blur-[80px] -mr-32 -mt-32"></div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-300 mb-10">NEURAL WALLET</p><div className="flex items-end gap-2 mb-12"><span className="text-6xl font-black italic tracking-tighter">${settings.subscription.balance.toFixed(2)}</span><span className="text-brand-300 font-bold uppercase text-[10px] mb-4">USD Admitted</span></div><button onClick={() => setShowWalletModal(true)} className="w-full py-6 bg-white text-brand-900 rounded-3xl text-[11px] font-black uppercase tracking-widest shadow-xl hover:bg-brand-50 transition-all">Top-up Neural Credits</button></div>
-                <div className="bg-white rounded-[3rem] p-12 border border-slate-200 shadow-xl flex flex-col justify-between"><div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-8">ACTIVE SUBSCRIPTION</p><h3 className="text-4xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">{settings.subscription.plan} Cluster</h3><p className="text-sm font-medium text-slate-500">Billed monthly • Next cycle: {settings.subscription.nextBillingDate}</p></div><button onClick={() => setShowScaleModal(true)} className="mt-8 py-5 border-2 border-slate-100 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:border-slate-200 transition-all flex items-center justify-center gap-2"><Zap size={14} className="text-brand-600"/> Scale Infrastructure</button></div>
+                <div className="bg-brand-900 rounded-[3rem] p-12 text-white shadow-2xl relative overflow-hidden"><div className="absolute top-0 right-0 w-64 h-64 bg-white/5 blur-[80px] -mr-32 -mt-32"></div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-300 mb-10">WALLET</p><div className="flex items-end gap-2 mb-12"><span className="text-6xl font-black italic tracking-tighter">${settings.subscription.balance.toFixed(2)}</span><span className="text-brand-300 font-bold uppercase text-[10px] mb-4">USD</span></div><button onClick={() => setShowWalletModal(true)} className="w-full py-6 bg-white text-brand-900 rounded-3xl text-[11px] font-black uppercase tracking-widest shadow-xl hover:bg-brand-50 transition-all">Add Credits</button></div>
+                <div className="bg-white rounded-[3rem] p-12 border border-slate-200 shadow-xl flex flex-col justify-between"><div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-8">SUBSCRIPTION</p><h3 className="text-4xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">{settings.subscription.plan} Plan</h3><p className="text-sm font-medium text-slate-500">Billed monthly â€¢ Next cycle: {settings.subscription.nextBillingDate}</p></div><button onClick={() => setShowScaleModal(true)} className="mt-8 py-5 border-2 border-slate-100 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:border-slate-200 transition-all flex items-center justify-center gap-2"><Zap size={14} className="text-brand-600"/> Scale Plan</button></div>
              </div>
           </div>
         )}
@@ -536,8 +735,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                        <Share size={48}/>
                      </div>
                      <div>
-                       <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Portability Protocol</h3>
-                       <p className="text-sm font-black text-slate-400 uppercase tracking-[0.4em] mt-2 italic">Neural Bundle Admissions Hub</p>
+                       <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Data Export</h3>
+                       <p className="text-sm font-black text-slate-400 uppercase tracking-[0.4em] mt-2 italic">Download your data</p>
                      </div>
                    </div>
                    <div className="flex gap-4">
@@ -555,7 +754,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                         className={`px-12 py-5 bg-slate-900 text-white rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-4 hover:bg-slate-800 transition-all shadow-2xl ${scanResults.status === 'idle' ? 'opacity-30 cursor-not-allowed' : ''}`}
                       >
                         {isExporting ? <RefreshCw size={20} className="animate-spin"/> : <FileJson size={20}/>}
-                        {isExporting ? 'Packaging...' : 'Export Neural Bundle'}
+                        {isExporting ? 'Preparing...' : 'Export Data'}
                       </button>
                    </div>
                  </div>
@@ -566,7 +765,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                       <div className="flex items-center gap-4 mb-4">
                         {scanResults.status === 'clean' ? <CheckCircle className="text-green-500" size={24}/> : <ShieldAlert className="text-amber-500" size={24}/>}
                         <h4 className={`text-sm font-black uppercase tracking-widest ${scanResults.status === 'clean' ? 'text-green-800' : 'text-amber-800'}`}>
-                          {scanResults.status === 'clean' ? 'Cluster Integrity Verified' : 'Diagnostic Warnings Identified'}
+                          {scanResults.status === 'clean' ? 'System looks good' : 'Warnings found'}
                         </h4>
                       </div>
                       <div className="space-y-2">
@@ -582,13 +781,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
 
                  {/* Bundle History Log */}
                  <div className="relative z-10">
-                    <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-slate-400 mb-8 flex items-center gap-2"><History size={16}/> Bundle Admission Log</h4>
+                    <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-slate-400 mb-8 flex items-center gap-2"><History size={16}/> Export History</h4>
                     <div className="space-y-4">
                        {exportHistory.length > 0 ? exportHistory.map(exp => (
                          <div key={exp.id} className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 flex items-center justify-between group hover:border-brand-500/20 transition-all">
                             <div className="flex items-center gap-6">
                                <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-slate-400 border border-slate-100 group-hover:text-brand-600 group-hover:bg-brand-50"><FileJson size={20}/></div>
-                               <div><p className="text-xs font-black uppercase text-slate-800 tracking-widest">CONNECT-AI-BUNDLE-{exp.id.split('_')[1].slice(-4)}</p><p className="text-[10px] font-bold text-slate-400 mt-1 uppercase italic">{exp.timestamp} • {exp.size}</p></div>
+                               <div><p className="text-xs font-black uppercase text-slate-800 tracking-widest">CONNECT-AI-BUNDLE-{exp.id.split('_')[1].slice(-4)}</p><p className="text-[10px] font-bold text-slate-400 mt-1 uppercase italic">{exp.timestamp} â€¢ {exp.size}</p></div>
                             </div>
                             <div className="flex items-center gap-6">
                                <span className="text-[9px] font-black uppercase px-3 py-1 bg-green-100 text-green-700 rounded-lg">{exp.status}</span>
@@ -598,7 +797,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                        )) : (
                          <div className="py-20 flex flex-col items-center justify-center opacity-10 grayscale italic">
                             <Terminal size={48} className="mb-4"/>
-                            <p className="text-[10px] font-black uppercase tracking-[0.5em]">Log Admission Buffer Empty</p>
+                            <p className="text-[10px] font-black uppercase tracking-[0.5em]">No exports yet</p>
                          </div>
                        )}
                     </div>
@@ -611,7 +810,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                  <div className="flex justify-between items-center mb-12">
                    <div>
                       <h3 className="text-4xl font-black italic uppercase tracking-tighter">Production Guardrails</h3>
-                      <p className="text-xs font-black text-brand-300 uppercase tracking-[0.3em] mt-2 italic">Neural Environment Isolation Protocols</p>
+                      <p className="text-xs font-black text-brand-300 uppercase tracking-[0.3em] mt-2 italic">Environment settings</p>
                    </div>
                    <div className="px-6 py-2 bg-white/10 rounded-full border border-white/10 flex items-center gap-3">
                       <div className={`w-2 h-2 rounded-full ${isDemoMode ? 'bg-amber-500 animate-pulse' : 'bg-green-500'}`}></div>
@@ -621,7 +820,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                  
                  <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
                     {[
-                      { title: 'API Authentication', desc: 'Handshake status with Gemini and Firebase cores.', status: isDemoMode ? 'PENDING' : 'SECURE', icon: Key },
+                      { title: 'API Authentication', desc: 'Status for Gemini and Firebase.', status: isDemoMode ? 'PENDING' : 'SECURE', icon: Key },
                       { title: 'Multi-Tenant Isolation', desc: 'Firestore rules admitting only authorized node access.', status: 'ACTIVE', icon: Lock },
                       { title: 'Auto-Topup Logic', desc: 'Threshold-based wallet injection to prevent cluster death.', status: settings.subscription.autoTopUp ? 'ACTIVE' : 'INACTIVE', icon: Zap },
                       { title: 'PII Scrubbing', desc: 'Redacting sensitive metadata during neural admission.', status: settings.compliance.anonymizePii ? 'ACTIVE' : 'IDLE', icon: Shield }
@@ -650,9 +849,10 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       {/* INVITE MODAL */}
       {showInviteModal && (
         <div className="fixed inset-0 z-[110] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-           <div className="bg-white rounded-[3.5rem] shadow-2xl w-full max-w-md p-12 border border-white/20 relative overflow-hidden text-center"><h3 className="text-3xl font-black italic tracking-tighter uppercase text-slate-800 mb-8">Provision Node</h3><div className="space-y-6"><input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold text-center" placeholder="Member Name" value={newUser.name} onChange={e => setNewUser({...newUser, name: e.target.value})}/><input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold text-center" placeholder="Email Address" value={newUser.email} onChange={e => setNewUser({...newUser, email: e.target.value})}/><select className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-black uppercase tracking-widest text-xs" value={newUser.role} onChange={e => setNewUser({...newUser, role: e.target.value as any})}><option value={Role.AGENT}>Agent Core</option><option value={Role.SUPERVISOR}>Supervisor Core</option><option value={Role.ADMIN}>Cluster Admin</option></select><button onClick={handleAddUser} className="w-full py-6 bg-brand-600 text-white rounded-3xl font-black uppercase tracking-widest shadow-2xl">Admit Member</button></div><button onClick={() => setShowInviteModal(false)} className="mt-6 text-slate-400 font-bold uppercase tracking-widest text-xs">Cancel</button></div>
+           <div className="bg-white rounded-[3.5rem] shadow-2xl w-full max-w-md p-12 border border-white/20 relative overflow-hidden text-center"><h3 className="text-3xl font-black italic tracking-tighter uppercase text-slate-800 mb-8">Add Team Member</h3><div className="space-y-6"><input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold text-center" placeholder="Member Name" value={newUser.name} onChange={e => setNewUser({...newUser, name: e.target.value})}/><input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold text-center" placeholder="Email Address" value={newUser.email} onChange={e => setNewUser({...newUser, email: e.target.value})}/><select className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-black uppercase tracking-widest text-xs" value={newUser.role} onChange={e => setNewUser({...newUser, role: e.target.value as any})}><option value={Role.AGENT}>Agent</option><option value={Role.SUPERVISOR}>Supervisor</option><option value={Role.ADMIN}>Admin</option></select><button onClick={handleAddUser} className="w-full py-6 bg-brand-600 text-white rounded-3xl font-black uppercase tracking-widest shadow-2xl">Add Member</button></div><button onClick={() => setShowInviteModal(false)} className="mt-6 text-slate-400 font-bold uppercase tracking-widest text-xs">Cancel</button></div>
         </div>
       )}
     </div>
   );
 };
+

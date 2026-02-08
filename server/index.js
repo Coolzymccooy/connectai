@@ -21,6 +21,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env.local');
 dotenv.config({ path: envPath });
+if (process.env.TWILIO_ACCOUNT_SID) {
+  const sid = process.env.TWILIO_ACCOUNT_SID;
+  console.log(`[env] TWILIO_ACCOUNT_SID length=${sid.length} preview=${sid.slice(0, 6)}...${sid.slice(-4)}`);
+}
 
 // --- DB CONNECTION ---
 if (process.env.MONGO_URI) {
@@ -38,7 +42,7 @@ app.use(compression()); // Compress responses for faster load
 app.use(cors({
   origin: process.env.CLIENT_URL || '*', // Allow Vercel frontend in prod
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-Id']
 }));
 
 // --- RATE LIMITING (DDoS Protection) ---
@@ -156,6 +160,45 @@ const getSettingsForTenant = async (tenantId) => {
   }
   const stored = stores.settingsByTenant.find(s => s.tenantId === tenantId);
   return stored?.data || defaultSettings;
+};
+
+const DEFAULT_AUTH_SETTINGS = {
+  inviteOnly: false,
+  allowedDomains: [],
+  autoTenantByDomain: false,
+  domainTenantMap: [],
+};
+
+const getAuthSettingsForTenant = async (tenantId) => {
+  const settings = await getSettingsForTenant(tenantId);
+  return { ...DEFAULT_AUTH_SETTINGS, ...(settings?.auth || {}) };
+};
+
+const extractEmailDomain = (email = '') => {
+  const at = String(email).lastIndexOf('@');
+  if (at === -1) return '';
+  return String(email).slice(at + 1).toLowerCase();
+};
+
+const resolveTenantForEmail = async (email) => {
+  const domain = extractEmailDomain(email);
+  const rootAuth = await getAuthSettingsForTenant(DEFAULT_TENANT_ID);
+  if (rootAuth.autoTenantByDomain && domain) {
+    const hit = (rootAuth.domainTenantMap || []).find((m) => m.domain?.toLowerCase() === domain);
+    if (hit?.tenantId) return hit.tenantId;
+  }
+  return DEFAULT_TENANT_ID;
+};
+
+const findInvite = (tenantId, email) => {
+  const normalized = String(email || '').trim().toLowerCase();
+  const nowTs = Date.now();
+  const invite = stores.invites.find((i) => i.tenantId === tenantId && i.email?.toLowerCase() === normalized);
+  if (!invite) return null;
+  if (invite.expiresAt && invite.expiresAt < nowTs && invite.status !== 'accepted') {
+    invite.status = 'expired';
+  }
+  return invite;
 };
 
 const callRouteState = new Map();
@@ -319,6 +362,105 @@ app.use((req, res, next) => {
 
 // --- PROTECTED ROUTES ---
 
+// --- ROOMS (Embedded WebRTC) ---
+app.get('/api/rooms/:roomId', authenticate, (req, res) => {
+  const tenantId = req.tenantId;
+  const roomId = req.params.roomId;
+  const room = stores.rooms.find(r => r.tenantId === tenantId && r.id === roomId);
+  res.json(room || { id: roomId, tenantId, participants: [] });
+});
+
+app.post('/api/rooms/join', authenticate, async (req, res) => {
+  const tenantId = req.tenantId;
+  const { roomId, peerId, userId } = req.body || {};
+  if (!roomId || !peerId) return res.status(400).json({ error: 'roomId and peerId required' });
+  const existing = stores.rooms.find(r => r.tenantId === tenantId && r.id === roomId);
+  const room = existing || { id: roomId, tenantId, participants: [] };
+  const filtered = room.participants.filter(p => p.peerId !== peerId);
+  room.participants = [...filtered, { peerId, userId, joinedAt: Date.now() }];
+  if (!existing) stores.rooms.push(room);
+  else stores.rooms = upsertById(stores.rooms, room);
+  await saveStore('rooms', stores.rooms);
+  res.json(room);
+});
+
+app.post('/api/rooms/leave', authenticate, async (req, res) => {
+  const tenantId = req.tenantId;
+  const { roomId, peerId } = req.body || {};
+  if (!roomId || !peerId) return res.status(400).json({ error: 'roomId and peerId required' });
+  const existing = stores.rooms.find(r => r.tenantId === tenantId && r.id === roomId);
+  if (!existing) return res.json({ ok: true });
+  existing.participants = existing.participants.filter(p => p.peerId !== peerId);
+  stores.rooms = upsertById(stores.rooms, existing);
+  await saveStore('rooms', stores.rooms);
+  res.json({ ok: true });
+});
+
+// --- PUBLIC AUTH POLICY ---
+app.get('/api/auth/policy', async (req, res) => {
+  const email = String(req.query?.email || '').trim();
+  const tenantFromQuery = req.query?.tenantId ? String(req.query.tenantId) : null;
+  const tenantId = tenantFromQuery || await resolveTenantForEmail(email);
+  const authSettings = await getAuthSettingsForTenant(tenantId);
+  const invite = email ? findInvite(tenantId, email) : null;
+  res.json({
+    inviteOnly: authSettings.inviteOnly,
+    allowedDomains: authSettings.allowedDomains || [],
+    autoTenantByDomain: authSettings.autoTenantByDomain,
+    tenantId,
+    invite: invite ? {
+      id: invite.id,
+      email: invite.email,
+      role: invite.role,
+      status: invite.status,
+    } : null,
+  });
+});
+
+// --- INVITES (ADMIN) ---
+app.get('/api/invites', authenticate, authorize([UserRole.ADMIN]), async (req, res) => {
+  const tenantId = req.query?.tenantId ? String(req.query.tenantId) : req.tenantId;
+  res.json(stores.invites.filter((i) => i.tenantId === tenantId));
+});
+
+app.post('/api/invites', authenticate, authorize([UserRole.ADMIN]), async (req, res) => {
+  const payload = req.body || {};
+  const email = String(payload.email || '').trim().toLowerCase();
+  if (!email) return res.status(400).json({ error: 'email required' });
+  const tenantId = payload.tenantId || req.tenantId || DEFAULT_TENANT_ID;
+  const role = payload.role || UserRole.AGENT;
+  const expiresInDays = Number(payload.expiresInDays || 7);
+  const invite = {
+    id: crypto.randomUUID(),
+    email,
+    role,
+    tenantId,
+    status: 'pending',
+    createdAt: Date.now(),
+    expiresAt: Date.now() + Math.max(1, expiresInDays) * 24 * 60 * 60 * 1000,
+  };
+  stores.invites = upsertById(stores.invites, invite);
+  await saveStore('invites', stores.invites);
+  res.json(invite);
+});
+
+app.post('/api/invites/accept', async (req, res) => {
+  const payload = req.body || {};
+  const inviteId = String(payload.inviteId || '').trim();
+  if (!inviteId) return res.status(400).json({ error: 'inviteId required' });
+  const invite = stores.invites.find((i) => i.id === inviteId);
+  if (!invite) return res.status(404).json({ error: 'invite not found' });
+  if (invite.expiresAt && invite.expiresAt < Date.now()) {
+    invite.status = 'expired';
+  } else {
+    invite.status = 'accepted';
+    invite.acceptedAt = Date.now();
+  }
+  stores.invites = upsertById(stores.invites, invite);
+  await saveStore('invites', stores.invites);
+  res.json({ ok: true, invite });
+});
+
 // Supervisor Stats (Protected)
 app.get('/api/supervisor/stats', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
   // Mock Stats for the dashboard
@@ -368,6 +510,11 @@ const normalizeTenantArray = (items) => {
   return items.map((item) => item.tenantId ? item : { ...item, tenantId: DEFAULT_TENANT_ID });
 };
 
+const normalizeInviteArray = (items) => {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => item.tenantId ? item : { ...item, tenantId: DEFAULT_TENANT_ID });
+};
+
 const normalizeSettingsStore = (raw) => {
   if (!raw) return [];
   if (Array.isArray(raw)) return raw.map((item) => item.tenantId ? item : { ...item, tenantId: DEFAULT_TENANT_ID });
@@ -388,6 +535,8 @@ const stores = {
   users: normalizeTenantArray(await loadStore('users', [])),
   jobs: normalizeTenantArray(await loadStore('jobs', [])),
   settingsByTenant: normalizeSettingsStore(await loadStore('settings', null)),
+  invites: normalizeInviteArray(await loadStore('invites', [])),
+  rooms: normalizeTenantArray(await loadStore('rooms', [])),
 };
 
 const QUEUES = [
@@ -405,6 +554,12 @@ const defaultSettings = {
       { key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' },
       { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' },
     ],
+  },
+  auth: {
+    inviteOnly: false,
+    allowedDomains: [],
+    autoTenantByDomain: false,
+    domainTenantMap: [],
   },
 };
 
@@ -472,6 +627,74 @@ const signToken = (payload) => {
   const h = crypto.createHmac('sha256', RECORDINGS_SIGNING_SECRET);
   h.update(payload);
   return h.digest('hex');
+};
+
+const createSilenceWav = (durationSeconds = 1, sampleRate = 8000) => {
+  const samples = Math.max(1, Math.floor(sampleRate * durationSeconds));
+  const pcmBuffer = Buffer.alloc(samples * 2, 0);
+  return createWavBuffer(pcmBuffer, { sampleRate, channels: 1, bitDepth: 16 });
+};
+
+const buildRecordingUrl = (req, tenantId, externalId, ttlSeconds = 3600) => {
+  const expires = Date.now() + ttlSeconds * 1000;
+  const payload = `${tenantId}:${externalId}:${expires}`;
+  const sig = signToken(payload);
+  const token = `${tenantId}.${externalId}.${expires}.${sig}`;
+  return `${getBaseUrl(req)}/api/recordings/download?token=${token}`;
+};
+
+const ensureRecordingForCall = async (req, call) => {
+  if (!call) return;
+  const tenantId = call.tenantId || req.tenantId || DEFAULT_TENANT_ID;
+  const callId = call.externalId || call.id;
+  if (!callId) return;
+
+  const existing = isMongoReady()
+    ? await Recording.findOne({ tenantId, callId }).lean()
+    : stores.recordings.find(r => r.tenantId === tenantId && r.callId === callId);
+
+  if (existing && (existing.recordingUrl || existing.url)) return;
+
+  await ensureRecordingsDir();
+  const externalId = existing?.externalId || existing?.id || `rec_${callId}`;
+  const filePath = path.join(recordingsDir, `${externalId}.wav`);
+  try {
+    await fs.access(filePath);
+  } catch {
+    const wavBuffer = createSilenceWav(1);
+    await fs.writeFile(filePath, wavBuffer);
+  }
+
+  const recordingUrl = buildRecordingUrl(req, tenantId, externalId);
+  const recording = {
+    tenantId,
+    externalId,
+    callId,
+    filename: `${externalId}.wav`,
+    mimeType: 'audio/wav',
+    size: 0,
+    storagePath: filePath,
+    recordingUrl,
+    createdAt: Date.now(),
+  };
+
+  if (isMongoReady()) {
+    await Recording.findOneAndUpdate(
+      { tenantId, externalId },
+      recording,
+      { upsert: true, new: true }
+    );
+    await Call.findOneAndUpdate(
+      { tenantId, externalId: callId },
+      { recordingUrl }
+    );
+  } else {
+    const stored = { id: externalId, ...recording };
+    stores.recordings = upsertById(stores.recordings, stored);
+    await saveStore('recordings', stores.recordings);
+    stores.calls = stores.calls.map(c => (c.id === callId && c.tenantId === tenantId) ? { ...c, recordingUrl } : c);
+    await saveStore('calls', stores.calls);
+  }
 };
 
 const removeById = (items, id) => items.filter(i => i.id !== id);
@@ -1057,9 +1280,16 @@ app.delete('/api/dispositions/:id', async (req, res) => {
 // --- CALLS ---
 app.get('/api/calls', authenticate, async (req, res) => {
   const tenantId = req.tenantId;
-  const { status, limit = 100 } = req.query || {};
+  const { status, direction, agentId, startDate, endDate, limit = 100 } = req.query || {};
   const filter = { tenantId };
   if (status) filter.status = status;
+  if (direction) filter.direction = direction;
+  if (agentId) filter.agentId = agentId;
+  if (startDate || endDate) {
+    filter.startTime = {};
+    if (startDate) filter.startTime.$gte = Number(startDate);
+    if (endDate) filter.startTime.$lte = Number(endDate);
+  }
   if (isMongoReady()) {
     const items = await Call.find(filter)
       .sort({ startTime: -1 })
@@ -1067,7 +1297,15 @@ app.get('/api/calls', authenticate, async (req, res) => {
       .lean();
     return res.json(items.map(toPublic));
   }
-  const items = stores.calls ? stores.calls.filter(c => c.tenantId === tenantId) : [];
+  const items = (stores.calls || [])
+    .filter(c => c.tenantId === tenantId)
+    .filter(c => (status ? c.status === status : true))
+    .filter(c => (direction ? c.direction === direction : true))
+    .filter(c => (agentId ? c.agentId === agentId : true))
+    .filter(c => (startDate ? c.startTime >= Number(startDate) : true))
+    .filter(c => (endDate ? c.startTime <= Number(endDate) : true))
+    .sort((a, b) => b.startTime - a.startTime)
+    .slice(0, Math.min(Number(limit) || 100, 500));
   res.json(items);
 });
 
@@ -1115,6 +1353,7 @@ app.put('/api/calls/:id', authenticate, async (req, res) => {
       await enqueueJob(tenantId, 'transcription', { callId: externalId });
       await enqueueJob(tenantId, 'summary', { callId: externalId });
       await enqueueJob(tenantId, 'report', { callId: externalId });
+      await ensureRecordingForCall(req, updated);
     }
     return res.json(toPublic(updated));
   }
@@ -1130,6 +1369,7 @@ app.put('/api/calls/:id', authenticate, async (req, res) => {
     await enqueueJob(tenantId, 'transcription', { callId: externalId });
     await enqueueJob(tenantId, 'summary', { callId: externalId });
     await enqueueJob(tenantId, 'report', { callId: externalId });
+    await ensureRecordingForCall(req, stored);
   }
   res.json(stored);
 });
@@ -1251,6 +1491,7 @@ app.post('/api/recordings/:id/signed-url', async (req, res) => {
 
 app.get('/api/recordings/download', async (req, res) => {
   const token = req.query?.token || '';
+  const format = String(req.query?.format || '').toLowerCase();
   const [tenantId, externalId, expires, sig] = String(token).split('.');
   if (!tenantId || !externalId || !expires || !sig) return res.status(400).send('invalid token');
   const expected = signToken(`${tenantId}:${externalId}:${expires}`);
@@ -1262,7 +1503,10 @@ app.get('/api/recordings/download', async (req, res) => {
   if (!rec) return res.status(404).send('not found');
   try {
     const data = await fs.readFile(rec.storagePath || rec.filePath);
-    res.setHeader('Content-Type', rec.mimeType || 'audio/wav');
+    const isMp3 = format === 'mp3';
+    res.setHeader('Content-Type', isMp3 ? 'audio/mpeg' : (rec.mimeType || 'audio/wav'));
+    const filename = isMp3 ? `${externalId}.mp3` : (rec.filename || `${externalId}.wav`);
+    res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`);
     res.send(data);
   } catch {
     res.status(404).send('file missing');
@@ -1686,6 +1930,7 @@ app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => 
     await enqueueJob(tenantId, 'transcription', { callId: callSid });
     await enqueueJob(tenantId, 'summary', { callId: callSid });
     await enqueueJob(tenantId, 'report', { callId: callSid });
+    await ensureRecordingForCall(req, { tenantId, externalId: callSid, id: callSid });
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
     return;
   }
@@ -1695,6 +1940,7 @@ app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => 
     metrics.failed += 1;
     callRouteState.delete(callSid);
     await enqueueJob(tenantId, 'report', { callId: callSid });
+    await ensureRecordingForCall(req, { tenantId, externalId: callSid, id: callSid });
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say>No agents available. Please try again later.</Say><Hangup/></Response>`);
     return;
   }

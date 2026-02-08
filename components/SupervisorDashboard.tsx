@@ -42,7 +42,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     const interval = setInterval(() => {
       const providers = ['Genesys', 'Twilio', 'Five9', 'AmazonConnect'];
       const prov = providers[Math.floor(Math.random() * providers.length)];
-      const names = ['Node Alpha', 'Legacy Port 80', 'External SIP 44', 'Legacy Link'];
+      const names = ['Team Alpha', 'Legacy Port 80', 'External SIP 44', 'Legacy Link'];
       const name = names[Math.floor(Math.random() * names.length)];
       
       const newCall: Call = {
@@ -132,17 +132,17 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
   const handleMonitor = (agentId: string, mode: 'listening' | 'whispering') => {
     const call = agentActivityMap[agentId];
     if (!call) {
-      addNotification?.('error', 'Neural Handshake Failed: Agent is currently standby.');
+      addNotification?.('error', 'Action failed: Agent is currently offline.');
       return;
     }
     setMonitoredCallId(call.id);
     setMonitoringMode(prev => ({ ...prev, [agentId]: mode }));
-    addNotification?.('info', `Neural Link Established: Monitoring ${call.agentName}'s Core.`);
+    addNotification?.('info', `Now monitoring ${call.agentName}.`);
   };
 
   const handleRunRiskAudit = async () => {
     setIsAuditing(true);
-    addNotification?.('info', 'Neural Guard: Initiating Cluster-wide Risk Audit...');
+    addNotification?.('info', 'Running risk scan...');
     
     // Actually scan for risks in current data
     await new Promise(r => setTimeout(r, 2500));
@@ -165,12 +165,12 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
     setDetectedRisks(newRisks);
     setIsAuditing(false);
-    addNotification?.('error', `Risk Audit Complete: ${Object.keys(newRisks).length} Neural Threats Identified.`);
+    addNotification?.('error', `Risk scan complete: ${Object.keys(newRisks).length} issues found.`);
     setActiveTab('alerts');
   };
 
   return (
-    <div className="h-full flex flex-col bg-[#0b0e14] p-8 overflow-hidden rounded-[2.5rem] shadow-2xl m-4 border border-white/5 relative">
+    <div className="h-full flex flex-col bg-[#0b0e14] p-4 md:p-8 overflow-hidden rounded-[2.5rem] shadow-2xl m-3 md:m-4 border border-white/5 relative">
       <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/5 blur-[120px] -mr-64 -mt-64 pointer-events-none"></div>
 
       {/* Tabs Header */}
@@ -209,7 +209,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       <div className="flex-1 overflow-y-auto pr-4 scrollbar-hide relative z-10">
         {/* LIVE FLOOR */}
         {activeTab === 'floor' && (
-           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-10 animate-in fade-in duration-500 pb-20">
+           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-10 animate-in fade-in duration-500 pb-12 md:pb-20">
               {team?.filter(u => u.role === 'AGENT').map(agent => {
                 const liveCall = agentActivityMap[agent.id];
                 const isLive = !!liveCall;
@@ -218,7 +218,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                 const isPeer = isLive && liveCall.id !== activeCall?.id;
 
                 return (
-                   <div key={agent.id} className={`bg-[#12161f] rounded-[3.5rem] p-10 transition-all duration-700 overflow-hidden relative border-2 ${isLive ? 'border-brand-500/40 bg-brand-500/[0.04] shadow-2xl' : 'border-white/5 opacity-50'}`}>
+                   <div key={agent.id} className={`bg-[#12161f] rounded-[3.5rem] p-6 md:p-10 transition-all duration-700 overflow-hidden relative border-2 ${isLive ? 'border-brand-500/40 bg-brand-500/[0.04] shadow-2xl' : 'border-white/5 opacity-50'}`}>
                       {isLive && (
                         <div className="absolute inset-0 z-0 opacity-10">
                            <div className="absolute inset-0 bg-brand-500/20 animate-pulse rounded-[3.5rem]"></div>
@@ -256,7 +256,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                       ) : (
                         <div className="py-10 border-t border-white/5 flex flex-col items-center justify-center gap-2 text-slate-700 italic text-xs font-black uppercase tracking-[0.4em]">
                            <Clock size={16} className="opacity-20"/>
-                           Handshake Pending
+                           Waiting...
                         </div>
                       )}
                    </div>
@@ -267,7 +267,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
         {/* NEURAL ANALYTICS */}
         {activeTab === 'performance' && (
-           <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 animate-in fade-in duration-700 pb-20">
+           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 md:gap-10 animate-in fade-in duration-700 pb-12 md:pb-20">
               <div className="lg:col-span-4 bg-[#12161f] border border-white/5 rounded-[3rem] p-12 relative overflow-hidden">
                  <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.4em] mb-12">QUEUE ADMISSIONS</h4>
                  <div className="h-72">
@@ -318,7 +318,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                  <div>
                     <h3 className="text-5xl font-black text-white uppercase italic tracking-tighter flex items-center gap-6"><Infinity size={48} className="text-brand-500 animate-spin-slow"/> LEGACY HUB</h3>
                     <p className="text-[11px] font-black uppercase text-slate-500 tracking-[0.4em] mt-3 flex items-center gap-2">
-                       <RefreshCw size={14} className="animate-spin"/> Unified Cluster Ingestion
+                       <RefreshCw size={14} className="animate-spin"/> Loading team data
                     </p>
                  </div>
                  <div className="flex gap-6 items-center">
@@ -335,9 +335,9 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                  </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">
                  {filteredHistory.map(call => (
-                    <div key={call.id} className="p-10 bg-[#12161f] border border-white/5 rounded-[3rem] group hover:bg-[#1a1f2b] transition-all duration-500 animate-in zoom-in-95">
+                    <div key={call.id} className="p-6 md:p-10 bg-[#12161f] border border-white/5 rounded-[3rem] group hover:bg-[#1a1f2b] transition-all duration-500 animate-in zoom-in-95">
                        <div className="flex justify-between items-start mb-8">
                           <div className="flex items-center gap-6">
                              <div className="w-16 h-16 rounded-2xl bg-brand-50/5 flex items-center justify-center text-brand-500 border border-brand-500/10"><Database size={32}/></div>
@@ -355,7 +355,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                           </div>
                        </div>
                        <div className="grid grid-cols-3 gap-6">
-                          <div className="p-5 bg-white/5 rounded-[1.5rem] border border-white/5"><p className="text-[9px] font-black uppercase text-slate-500 mb-1">Admission</p><p className="text-lg font-black italic text-slate-300">{new Date(call.startTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p></div>
+                          <div className="p-5 bg-white/5 rounded-[1.5rem] border border-white/5"><p className="text-[9px] font-black uppercase text-slate-500 mb-1">Start time</p><p className="text-lg font-black italic text-slate-300">{new Date(call.startTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p></div>
                           <div className="p-5 bg-white/5 rounded-[1.5rem] border border-white/5"><p className="text-[9px] font-black uppercase text-slate-500 mb-1">Duration</p><p className="text-lg font-black italic text-slate-300">{Math.floor(call.durationSeconds / 60)}m {Math.floor(call.durationSeconds % 60)}s</p></div>
                           <div className="p-5 bg-white/5 rounded-[1.5rem] border border-white/5"><p className="text-[9px] font-black uppercase text-slate-500 mb-1">QA Match</p><p className="text-lg font-black italic text-slate-300">{call.analysis?.qaScore || '--'}</p></div>
                        </div>
@@ -401,7 +401,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                          </div>
                          <div className="flex flex-col gap-4 min-w-[280px]">
                             <button onClick={() => handleMonitor(id, 'whispering')} className="w-full py-6 bg-white text-slate-900 rounded-3xl text-[11px] font-black uppercase tracking-widest hover:bg-slate-100 transition-all shadow-xl">NEURAL BARGE-IN</button>
-                            <button onClick={() => { setDetectedRisks(prev => { const n = {...prev}; delete n[id]; return n; }); addNotification?.('success', 'Neural safeguard protocol neutralized.'); }} className="w-full py-6 bg-white/5 text-white border border-white/10 rounded-3xl text-[11px] font-black uppercase tracking-widest hover:bg-white/10 transition-all">MARK MITIGATED</button>
+                            <button onClick={() => { setDetectedRisks(prev => { const n = {...prev}; delete n[id]; return n; }); addNotification?.('success', 'Marked as resolved.'); }} className="w-full py-6 bg-white/5 text-white border border-white/10 rounded-3xl text-[11px] font-black uppercase tracking-widest hover:bg-white/10 transition-all">MARK RESOLVED</button>
                          </div>
                       </div>
                     );
@@ -419,8 +419,8 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
       {/* Real-time Monitor Drawer */}
       {monitoredCallId && monitoredCall && (
-        <div className="fixed top-0 right-0 w-[450px] h-full bg-[#0b0e14] border-l border-white/10 shadow-[-20px_0_50px_rgba(0,0,0,0.5)] z-[100] flex flex-col animate-in slide-in-from-right duration-500">
-           <div className="p-10 bg-brand-600 text-white flex justify-between items-center relative overflow-hidden">
+        <div className="fixed top-0 right-0 w-full md:w-[450px] h-full bg-[#0b0e14] border-l border-white/10 shadow-[-20px_0_50px_rgba(0,0,0,0.5)] z-[100] flex flex-col animate-in slide-in-from-right duration-500">
+           <div className="p-6 md:p-10 bg-brand-600 text-white flex justify-between items-center relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 blur-2xl -mr-16 -mt-16"></div>
               <div className="relative z-10">
                  <p className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-200 mb-1">Monitoring Remote Peer</p>
@@ -429,10 +429,10 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
               <button onClick={() => setMonitoredCallId(null)} className="relative z-10 p-3 bg-white/10 hover:bg-white/20 rounded-2xl transition-all"><X size={24}/></button>
            </div>
            
-           <div className="p-10 border-b border-white/5 bg-white/[0.02]">
+           <div className="p-6 md:p-10 border-b border-white/5 bg-white/[0.02]">
               <div className="flex justify-between items-center mb-6">
                  <div>
-                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target Node</p>
+                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target agent</p>
                     <p className="text-xl font-black text-white italic tracking-tight">{monitoredCall.customerName}</p>
                  </div>
                  <div className="text-right">
@@ -446,7 +446,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
               </div>
            </div>
 
-           <div className="flex-1 overflow-y-auto p-10 space-y-8 scrollbar-hide bg-black/40">
+           <div className="flex-1 overflow-y-auto p-6 md:p-10 space-y-6 md:space-y-8 scrollbar-hide bg-black/40">
               {monitoredCall.transcript.length > 0 ? monitoredCall.transcript.map((seg, idx) => (
                 <div key={idx} className={`flex ${seg.speaker === 'agent' ? 'justify-end' : 'justify-start'}`}>
                    <div className={`max-w-[85%] p-6 rounded-[2rem] text-sm leading-relaxed border ${
@@ -464,8 +464,8 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
               )}
            </div>
            
-           <div className="p-8 bg-slate-900 border-t border-white/10 grid grid-cols-2 gap-4">
-              <button className="py-5 bg-white text-slate-900 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl">Handshake: Barge-in</button>
+           <div className="p-6 md:p-8 bg-slate-900 border-t border-white/10 grid grid-cols-2 gap-4">
+              <button className="py-5 bg-white text-slate-900 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl">Join call</button>
               <button onClick={() => setMonitoredCallId(null)} className="py-5 bg-white/5 text-white border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest">Terminate Link</button>
            </div>
         </div>

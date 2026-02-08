@@ -17,7 +17,7 @@ import {
   deleteDoc,
   setLogLevel
 } from "firebase/firestore";
-import { getAuth, onAuthStateChanged, signInAnonymously, signOut } from "firebase/auth";
+import { getAuth, onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, updateProfile, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
 
 const FIREBASE_DISABLED = (import.meta.env as any).VITE_FIREBASE_DISABLED === 'true';
 const FIREBASE_SILENT = (import.meta.env as any).VITE_FIREBASE_SILENT === 'true';
@@ -68,6 +68,12 @@ export {
   getDocs, 
   deleteDoc,
   onAuthStateChanged, 
-  signInAnonymously, 
-  signOut 
+  signOut,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  updateProfile,
+  GoogleAuthProvider,
+  signInWithPopup
 };

@@ -155,7 +155,7 @@ export const HeaderProfileMenu: React.FC<HeaderProfileMenuProps> = ({ user, stat
       {showProfileEdit && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
            <div className="bg-white rounded-xl shadow-2xl max-w-sm w-full p-8 animate-in zoom-in-95 text-center">
-              <h3 className="text-lg font-bold text-slate-800 mb-6">Profile Admission</h3>
+              <h3 className="text-lg font-bold text-slate-800 mb-6">Profile</h3>
               <div className="flex flex-col items-center gap-6">
                  <img src={user.avatarUrl} className="w-24 h-24 rounded-full border-4 border-slate-100 shadow-lg object-cover" />
                  <input type="file" ref={fileInputRef} onChange={handleAvatarUpload} accept="image/*" className="hidden" />
