@@ -80,6 +80,10 @@ const App: React.FC = () => {
         await signOut(auth);
         return;
       }
+      if (user.emailVerified) {
+        localStorage.removeItem('connectai_pending_verification_email');
+        setAuthNotice(null);
+      }
       const storedRole = (localStorage.getItem(`connectai_role_${user.uid}`) as Role) || Role.AGENT;
       const roleTemplate = DEFAULT_SETTINGS.team.find(u => u.role === storedRole);
       const profile: User = {
@@ -236,7 +240,7 @@ const App: React.FC = () => {
       team: prev.team.map(u => u.id === updated.id ? updated : u)
     }));
     if (isFirebaseConfigured) await dbService.saveUser(updated);
-    addNotification('success', 'Neural Profile Updated Successfully.');
+    addNotification('success', 'Profile updated.');
   };
 
   const addParticipantToCall = (userId: string) => {
@@ -554,6 +558,8 @@ const App: React.FC = () => {
 };
 
 export default App;
+
+
 
 
 

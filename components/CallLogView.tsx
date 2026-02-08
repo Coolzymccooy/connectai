@@ -1,4 +1,4 @@
-
+﻿
 import React, { useState, useEffect } from 'react';
 import { Play, Download, Search, Filter, Calendar, ArrowUpRight, ArrowDownLeft, ArrowRightLeft, Clock, User, Phone } from 'lucide-react';
 import { Call, CallDirection, CallStatus } from '../types';
@@ -267,3 +267,4 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
         </div>
     );
 };
+

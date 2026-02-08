@@ -166,7 +166,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     onUpdateSettings(nextSettings);
     saveSettingsApi(nextSettings).catch(() => {});
     setIsIvrEditing(false);
-    addNotification('success', 'Routing Architecture Deployed.');
+    addNotification('success', 'Call Routing Architecture Deployed.');
   };
 
   const handleSaveAuth = () => {
@@ -345,7 +345,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
          <div className="flex space-x-6 md:space-x-12 overflow-x-auto scrollbar-hide">
             {[
               { id: 'general', label: 'Integrations' },
-              { id: 'ivr', label: 'Routing' },
+              { id: 'ivr', label: 'Call Routing' },
               { id: 'migration', label: 'Migration' },
               { id: 'team', label: 'Team Access' },
               { id: 'billing', label: 'Usage & Quota' },
@@ -430,7 +430,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Two-way sync</p>
                       </div>
                     </div>
-                    <button onClick={() => handleToggleIntegration(key as any)} className={`px-8 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isEnabled ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{isEnabled ? 'Tunnel Active' : 'Admit Tunnel'}</button>
+                    <button onClick={() => handleToggleIntegration(key as any)} className={`px-8 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isEnabled ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{isEnabled ? 'Connected' : 'Connect'}</button>
                   </div>
                 );
               })}
@@ -510,7 +510,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
               <div className="bg-white rounded-[3.5rem] p-12 border border-slate-200 shadow-xl overflow-hidden relative">
                  <div className="flex justify-between items-start mb-12">
                    <div>
-                     <h3 className="text-4xl font-black italic uppercase tracking-tighter mb-2 text-slate-800">Routing Architect</h3>
+                     <h3 className="text-4xl font-black italic uppercase tracking-tighter mb-2 text-slate-800">Call Routing Architect</h3>
                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic">Global settings</p>
                    </div>
                    {!isIvrEditing ? (
@@ -529,7 +529,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                    <div className="grid grid-cols-1 md:grid-cols-2 gap-16">
                      <div className="space-y-12">
                        <div className="space-y-4">
-                         <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Phone size={14}/> Entry Endpoint</label>
+                         <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Phone size={14}/> Phone Number</label>
                          <input 
                           className="w-full bg-slate-50 p-6 rounded-[1.8rem] border-2 border-slate-100 font-black italic text-2xl outline-none focus:border-brand-500 shadow-inner"
                           value={editIvr.phoneNumber}
@@ -563,7 +563,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                      </div>
                    </div>
                      <div className="space-y-8">
-                        <div className="flex justify-between items-center"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Layers3 size={14}/> Logic Branches</label><button onClick={handleAddIvrOption} className="text-brand-600 font-black text-[10px] uppercase tracking-widest flex items-center gap-2 hover:underline transition-all"><Plus size={16}/> Add Core Branch</button></div>
+                        <div className="flex justify-between items-center"><label className="text-[10px] font-black uppercase text-slate-400 tracking-widest flex items-center gap-2"><Layers3 size={14}/> Menu Options</label><button onClick={handleAddIvrOption} className="text-brand-600 font-black text-[10px] uppercase tracking-widest flex items-center gap-2 hover:underline transition-all"><Plus size={16}/> Add Core Branch</button></div>
                         <div className="space-y-4 overflow-y-auto max-h-[600px] pr-4 scrollbar-hide">
                           {editIvr.options.map((option, idx) => (
                             <div key={idx} className="p-8 bg-slate-50 border border-slate-100 rounded-[2.5rem] relative group hover:border-brand-500/30 hover:shadow-xl transition-all duration-300">
@@ -571,11 +571,11 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                                <div className="space-y-6">
                                  <div className="flex gap-6">
                                     <div className="w-24"><label className="text-[8px] font-black uppercase text-slate-400 mb-2 block tracking-widest">Digit Key</label><input className="w-full bg-white border-2 border-slate-100 rounded-2xl p-4 font-black text-center text-xl shadow-sm focus:border-brand-500 outline-none" value={option.key} onChange={e => { const newOpts = [...editIvr.options]; newOpts[idx].key = e.target.value; setEditIvr({...editIvr, options: newOpts}); }} /></div>
-                                    <div className="flex-1"><label className="text-[8px] font-black uppercase text-slate-400 mb-2 block tracking-widest">Neural Label</label><input className="w-full bg-white border-2 border-slate-100 rounded-2xl p-4 font-bold text-sm shadow-sm focus:border-brand-500 outline-none uppercase" value={option.label} onChange={e => { const newOpts = [...editIvr.options]; newOpts[idx].label = e.target.value; setEditIvr({...editIvr, options: newOpts}); }} /></div>
+                                    <div className="flex-1"><label className="text-[8px] font-black uppercase text-slate-400 mb-2 block tracking-widest">Menu Label</label><input className="w-full bg-white border-2 border-slate-100 rounded-2xl p-4 font-bold text-sm shadow-sm focus:border-brand-500 outline-none uppercase" value={option.label} onChange={e => { const newOpts = [...editIvr.options]; newOpts[idx].label = e.target.value; setEditIvr({...editIvr, options: newOpts}); }} /></div>
                                  </div>
                                  <div className="grid grid-cols-2 gap-6">
-                                    <div><label className="text-[8px] font-black uppercase text-slate-400 mb-2 block tracking-widest">Core Action</label><select className="w-full bg-white border-2 border-slate-100 rounded-2xl p-4 font-black text-[10px] uppercase shadow-sm outline-none focus:border-brand-500" value={option.action} onChange={e => { const newOpts = [...editIvr.options]; newOpts[idx].action = e.target.value as any; setEditIvr({...editIvr, options: newOpts}); }}><option value="QUEUE">ADMIT TO QUEUE</option><option value="BOT">HANDOFF TO BOT</option><option value="VOICEMAIL">ARCHIVE TO VM</option><option value="TRANSFER">BRIDGE CALL</option></select></div>
-                                    <div><label className="text-[8px] font-black uppercase text-slate-400 mb-2 block tracking-widest">Target Endpoint</label><input className="w-full bg-white border-2 border-slate-100 rounded-2xl p-4 font-bold text-[10px] shadow-sm uppercase outline-none focus:border-brand-500" value={option.target} onChange={e => { const newOpts = [...editIvr.options]; newOpts[idx].target = e.target.value; setEditIvr({...editIvr, options: newOpts}); }} /></div>
+                                    <div><label className="text-[8px] font-black uppercase text-slate-400 mb-2 block tracking-widest">Action</label><select className="w-full bg-white border-2 border-slate-100 rounded-2xl p-4 font-black text-[10px] uppercase shadow-sm outline-none focus:border-brand-500" value={option.action} onChange={e => { const newOpts = [...editIvr.options]; newOpts[idx].action = e.target.value as any; setEditIvr({...editIvr, options: newOpts}); }}><option value="QUEUE">ADMIT TO QUEUE</option><option value="BOT">HANDOFF TO BOT</option><option value="VOICEMAIL">SEND TO VOICEMAIL</option><option value="TRANSFER">BRIDGE CALL</option></select></div>
+                                    <div><label className="text-[8px] font-black uppercase text-slate-400 mb-2 block tracking-widest">Target</label><input className="w-full bg-white border-2 border-slate-100 rounded-2xl p-4 font-bold text-[10px] shadow-sm uppercase outline-none focus:border-brand-500" value={option.target} onChange={e => { const newOpts = [...editIvr.options]; newOpts[idx].target = e.target.value; setEditIvr({...editIvr, options: newOpts}); }} /></div>
                                  </div>
                                </div>
                             </div>
@@ -590,7 +590,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
            </div>
         )}
 
-        {/* MIGRATION TAB */}
+        {/* Setup TAB */}
         {activeTab === 'migration' && (
            <div className="max-w-5xl space-y-12 animate-in fade-in">
               <div className="bg-white rounded-[3.5rem] border border-slate-200 p-12 shadow-xl overflow-hidden relative">
@@ -717,13 +717,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
         {activeTab === 'billing' && (
           <div className="max-w-5xl space-y-12 animate-in slide-in-from-right duration-500">
              <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                <div className="bg-brand-900 rounded-[3rem] p-12 text-white shadow-2xl relative overflow-hidden"><div className="absolute top-0 right-0 w-64 h-64 bg-white/5 blur-[80px] -mr-32 -mt-32"></div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-300 mb-10">WALLET</p><div className="flex items-end gap-2 mb-12"><span className="text-6xl font-black italic tracking-tighter">${settings.subscription.balance.toFixed(2)}</span><span className="text-brand-300 font-bold uppercase text-[10px] mb-4">USD</span></div><button onClick={() => setShowWalletModal(true)} className="w-full py-6 bg-white text-brand-900 rounded-3xl text-[11px] font-black uppercase tracking-widest shadow-xl hover:bg-brand-50 transition-all">Add Credits</button></div>
-                <div className="bg-white rounded-[3rem] p-12 border border-slate-200 shadow-xl flex flex-col justify-between"><div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-8">SUBSCRIPTION</p><h3 className="text-4xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">{settings.subscription.plan} Plan</h3><p className="text-sm font-medium text-slate-500">Billed monthly â€¢ Next cycle: {settings.subscription.nextBillingDate}</p></div><button onClick={() => setShowScaleModal(true)} className="mt-8 py-5 border-2 border-slate-100 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:border-slate-200 transition-all flex items-center justify-center gap-2"><Zap size={14} className="text-brand-600"/> Scale Plan</button></div>
+                <div className="bg-brand-900 rounded-[3rem] p-12 text-white shadow-2xl relative overflow-hidden"><div className="absolute top-0 right-0 w-64 h-64 bg-white/5 blur-[80px] -mr-32 -mt-32"></div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-300 mb-10">Wallet</p><div className="flex items-end gap-2 mb-12"><span className="text-6xl font-black italic tracking-tighter">${settings.subscription.balance.toFixed(2)}</span><span className="text-brand-300 font-bold uppercase text-[10px] mb-4">USD</span></div><button onClick={() => setShowWalletModal(true)} className="w-full py-6 bg-white text-brand-900 rounded-3xl text-[11px] font-black uppercase tracking-widest shadow-xl hover:bg-brand-50 transition-all">Add Credits</button></div>
+                <div className="bg-white rounded-[3rem] p-12 border border-slate-200 shadow-xl flex flex-col justify-between"><div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-8">Subscription</p><h3 className="text-4xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">{settings.subscription.plan} Plan</h3><p className="text-sm font-medium text-slate-500">Billed monthly â€¢ Next cycle: {settings.subscription.nextBillingDate}</p></div><button onClick={() => setShowScaleModal(true)} className="mt-8 py-5 border-2 border-slate-100 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:border-slate-200 transition-all flex items-center justify-center gap-2"><Zap size={14} className="text-brand-600"/> Scale Plan</button></div>
              </div>
           </div>
         )}
 
-        {/* EXPORT HUB (ANATOMY) - RESTORED & AMPLIFIED */}
+        {/* Exports (ANATOMY) - RESTORED & AMPLIFIED */}
         {activeTab === 'anatomy' && (
            <div className="max-w-5xl space-y-12 animate-in slide-in-from-right duration-500 pb-20">
               {/* Main Control Panel */}
@@ -855,4 +855,6 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     </div>
   );
 };
+
+
 

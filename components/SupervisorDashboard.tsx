@@ -1,4 +1,4 @@
-
+﻿
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Activity, Sparkles, Zap, Shield, FileText, AlertTriangle, Eye, Volume2, History, 
@@ -32,12 +32,12 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
   const [detectedRisks, setDetectedRisks] = useState<Record<string, string>>({});
   const [isAuditing, setIsAuditing] = useState(false);
   
-  // Real-time Simulation State for Legacy Hub & History
+  // Real-time Simulation State for Call Center & History
   const [liveHistory, setLiveHistory] = useState<Call[]>([]);
   const [ingestionLogs, setIngestionLogs] = useState<string[]>([]);
   const [monitoredCallId, setMonitoredCallId] = useState<string | null>(null);
 
-  // Simulation: Background Ingestion for Legacy Hub
+  // Simulation: Background Ingestion for Call Center
   useEffect(() => {
     const interval = setInterval(() => {
       const providers = ['Genesys', 'Twilio', 'Five9', 'AmazonConnect'];
@@ -72,7 +72,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     return () => clearInterval(interval);
   }, []);
 
-  // Neural Analytics: Chart Data Hydration
+  // Analytics: Chart Data Hydration
   const chartData = useMemo(() => {
     const allCalls = [...calls, ...liveHistory];
     
@@ -473,3 +473,4 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     </div>
   );
 };
+

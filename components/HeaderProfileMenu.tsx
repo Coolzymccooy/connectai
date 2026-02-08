@@ -1,4 +1,4 @@
-
+﻿
 import React, { useState, useEffect, useRef } from 'react';
 import { User as UserIcon, Mic, Volume2, Keyboard, LogOut, ChevronDown, Monitor, Settings, Play, StopCircle, Check, Camera, Upload } from 'lucide-react';
 import { User, AgentStatus } from '../types';
@@ -173,7 +173,7 @@ export const HeaderProfileMenu: React.FC<HeaderProfileMenuProps> = ({ user, stat
            <div className="bg-white rounded-xl shadow-2xl max-w-md w-full p-6 animate-in zoom-in-95">
               <div className="flex justify-between items-center mb-6">
                  <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2"><Settings size={20}/> Device Settings</h3>
-                 <button onClick={() => setShowAudioSettings(false)} className="text-slate-400 hover:text-slate-600">✕</button>
+                 <button onClick={() => setShowAudioSettings(false)} className="text-slate-400 hover:text-slate-600">âœ•</button>
               </div>
               <div className="space-y-6">
                  <div>
@@ -206,7 +206,7 @@ export const HeaderProfileMenu: React.FC<HeaderProfileMenuProps> = ({ user, stat
       {showShortcuts && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4">
            <div className="bg-white rounded-xl shadow-2xl max-w-lg w-full p-6 animate-in zoom-in-95">
-              <div className="flex justify-between items-center mb-6"><h3 className="text-lg font-bold text-slate-800 flex items-center gap-2"><Keyboard size={20}/> Keyboard Shortcuts</h3><button onClick={() => setShowShortcuts(false)} className="text-slate-400 hover:text-slate-600">✕</button></div>
+              <div className="flex justify-between items-center mb-6"><h3 className="text-lg font-bold text-slate-800 flex items-center gap-2"><Keyboard size={20}/> Keyboard Shortcuts</h3><button onClick={() => setShowShortcuts(false)} className="text-slate-400 hover:text-slate-600">âœ•</button></div>
               <div className="grid grid-cols-2 gap-4">
                  <div className="space-y-2">
                     <h4 className="text-xs font-bold text-slate-400 uppercase">Call Control</h4>
@@ -221,3 +221,4 @@ export const HeaderProfileMenu: React.FC<HeaderProfileMenuProps> = ({ user, stat
     </div>
   );
 };
+

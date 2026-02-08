@@ -36,10 +36,7 @@ const verifyToken = async (token) => {
 export const authenticate = async (req, res, next) => {
   const authHeader = req.headers.authorization;
   const tenantHeader = req.headers['x-tenant-id'];
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    if (AUTH_MODE === 'strict') {
-      return res.status(401).json({ error: 'Unauthorized: No token provided' });
-    }
+  const devFallback = () => {
     req.user = {
       uid: 'dev-1',
       role: UserRole.ADMIN,
@@ -48,12 +45,21 @@ export const authenticate = async (req, res, next) => {
     };
     req.tenantId = req.user.tenantId;
     return next();
+  };
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (AUTH_MODE === 'strict') {
+      return res.status(401).json({ error: 'Unauthorized: No token provided' });
+    }
+    return devFallback();
   }
 
   const token = authHeader.split(' ')[1];
   const user = await verifyToken(token);
 
   if (!user) {
+    if (AUTH_MODE !== 'strict') {
+      return devFallback();
+    }
     return res.status(403).json({ error: 'Forbidden: Invalid token' });
   }
 

@@ -1,4 +1,4 @@
-
+﻿
 import React, { useState, useEffect, useCallback, useRef, useMemo, useLayoutEffect } from 'react';
 import Peer, { MediaConnection } from 'peerjs';
 import { 
@@ -293,7 +293,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       stream.getAudioTracks().forEach(t => t.enabled = !isMuted);
       stream.getVideoTracks().forEach(t => t.enabled = !!activeCall.isVideo);
     } catch (err) {
-      console.error("Hardware Admission Rejected:", err);
+      console.error("Hardware Session Rejected:", err);
     }
   }, [isMuted, activeCall.isVideo, localStream]);
 
@@ -489,10 +489,10 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
             <Cpu size={20} className="animate-pulse"/>
           </div>
           <div>
-            <h2 className="text-sm font-black uppercase italic tracking-tighter text-white">Neural Hub / {activeCall.customerName}</h2>
+            <h2 className="text-sm font-black uppercase italic tracking-tighter text-white">Call Hub / {activeCall.customerName}</h2>
             <div className="flex items-center gap-2">
               <span className={`w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse`}></span>
-              <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Bridged Cluster Active • {peerId ? 'Node Online' : 'Connecting...'}</p>
+              <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Bridged Cluster Active â€¢ {peerId ? 'Node Online' : 'Connecting...'}</p>
             </div>
           </div>
         </div>
@@ -500,7 +500,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         <div className="flex items-center gap-4">
            <button onClick={() => setTranscriptionActive(!transcriptionActive)} className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border transition-all ${transcriptionActive ? 'bg-brand-600 border-brand-400 text-white shadow-lg' : 'bg-white/5 border-white/10 text-slate-400'}`}>
              {transcriptionActive ? <ToggleRight size={18}/> : <ToggleLeft size={18}/>}
-             <span className="text-[8px] font-black uppercase tracking-widest">Neural Transcription</span>
+             <span className="text-[8px] font-black uppercase tracking-widest">Live Transcript</span>
            </button>
            <button onClick={handleCopyLink} className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded-xl hover:bg-white/10 transition-all">
              {copyFeedback ? <CheckCircle2 size={16} className="text-green-500 animate-in zoom-in"/> : <LinkIcon size={16} className="text-slate-400"/>}
@@ -526,7 +526,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                            <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl opacity-40 grayscale" />
                            <div className="flex flex-col items-center gap-1">
                              <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest italic">Video Paused</p>
-                             <p className="text-[8px] font-bold text-slate-600 uppercase">Admission Tunnel: Active</p>
+                             <p className="text-[8px] font-bold text-slate-600 uppercase">Session Tunnel: Active</p>
                            </div>
                         </div>
                       )
@@ -584,7 +584,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
 
                 {activeTab === 'actions' && (
                   <div className="space-y-6 animate-in fade-in">
-                     <h4 className="text-[9px] font-black uppercase tracking-widest text-brand-400 italic">CRM Admissions</h4>
+                     <h4 className="text-[9px] font-black uppercase tracking-widest text-brand-400 italic">CRM Sessions</h4>
                      {actions.map(action => (
                         <div key={action.id} className="p-5 bg-white/[0.03] border border-white/5 rounded-2xl relative group hover:border-brand-500/30 transition-all">
                            <p className="text-[10px] font-black uppercase tracking-widest text-white italic mb-2">{action.name}</p>
@@ -636,12 +636,12 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                       <div className="flex-1 overflow-y-auto scrollbar-hide space-y-4 pr-2">
                          {activeCall.transcript?.map(seg => (
                             <div key={seg.id} className="p-4 bg-white/[0.02] border border-white/5 rounded-2xl">
-                               <p className="text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">{seg.speaker} • {new Date(seg.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}</p>
+                               <p className="text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">{seg.speaker} â€¢ {new Date(seg.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'})}</p>
                                <p className="text-[11px] font-medium italic text-slate-300">"{seg.text}"</p>
                             </div>
                          ))}
                          {(!activeCall.transcript || activeCall.transcript.length === 0) && (
-                            <div className="h-full flex flex-col items-center justify-center opacity-20 grayscale"><Activity className="animate-pulse mb-4"/><p className="text-[9px] font-black uppercase tracking-widest">Awaiting Admission</p></div>
+                            <div className="h-full flex flex-col items-center justify-center opacity-20 grayscale"><Activity className="animate-pulse mb-4"/><p className="text-[9px] font-black uppercase tracking-widest">Awaiting Session</p></div>
                          )}
                       </div>
                    </div>
@@ -731,7 +731,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                     <h3 className="text-[9px] font-black uppercase tracking-widest text-slate-500 italic">Core Hub</h3>
                  </div>
                  {[
-                   { id: 'video', icon: Camera, label: 'Vision Admission' },
+                   { id: 'video', icon: Camera, label: 'Vision Session' },
                    { id: 'audio', icon: Volume2, label: 'Audio Telemetry' },
                    { id: 'visuals', icon: Palette, label: 'Atmosphere' }
                  ].map(tab => (
@@ -752,7 +752,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                        <h3 className="text-4xl font-black italic uppercase tracking-tighter text-white">Vision Stream</h3>
                        <div className="flex items-center justify-between p-8 bg-white/[0.03] rounded-2xl border border-white/5">
                           <div>
-                            <p className="text-sm font-black uppercase tracking-widest mb-1 text-white italic">Mirror Core Admission</p>
+                            <p className="text-sm font-black uppercase tracking-widest mb-1 text-white italic">Mirror Core Session</p>
                             <p className="text-[10px] text-slate-500 font-medium italic">Adjust spatial orientation.</p>
                           </div>
                           <button onClick={() => setMirrorVideo(!mirrorVideo)} className={`w-12 h-6 rounded-full transition-all relative ${mirrorVideo ? 'bg-brand-600' : 'bg-slate-700'}`}>
@@ -770,8 +770,8 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                        <h3 className="text-4xl font-black italic uppercase tracking-tighter text-white">Audio Telemetry</h3>
                        <div className="p-10 bg-black/40 rounded-[2.5rem] border border-white/10 space-y-8">
                           <div className="flex justify-between items-center">
-                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 italic">Neural Level Analysis</p>
-                            <span className="text-brand-500 text-xs font-black uppercase">{audioLevel}% Admission</span>
+                            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 italic">Call Quality</p>
+                            <span className="text-brand-500 text-xs font-black uppercase">{audioLevel}% Session</span>
                           </div>
                           <div className="flex items-end gap-1.5 h-32 px-4 pb-4">
                              {Array.from({length: 24}).map((_, i) => (
@@ -788,7 +788,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                        <div className="grid grid-cols-2 gap-6">
                           {[
                             { id: 'none', label: 'Raw Node', icon: Camera, desc: 'Original stream' },
-                            { id: 'blur', label: 'Neural Blur', icon: Sparkles, desc: 'Advanced bokeh' },
+                            { id: 'blur', label: 'Blur', icon: Sparkles, desc: 'Advanced bokeh' },
                             { id: 'virtual', label: 'Cluster Hub', icon: Laptop, desc: 'Virtual bridge' }
                           ].map(eff => (
                              <button 
@@ -843,3 +843,5 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     </div>
   );
 };
+
+

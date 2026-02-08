@@ -457,7 +457,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, al
             className="w-full bg-transparent text-center text-2xl font-black text-white tracking-tighter mb-1 h-10 outline-none placeholder:text-slate-600"
           />
         )}
-        <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">{status === 'idle' ? 'Ready to Admit' : status.toUpperCase()}</p>
+        <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">{status === 'idle' ? 'Ready to Call' : status.toUpperCase()}</p>
         <p className="text-[9px] uppercase tracking-widest text-slate-600 mt-2">{clientStatus} • {identity}</p>
         {clientError && (
           <div className="mt-1 flex items-center justify-center gap-2">
@@ -533,3 +533,4 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, al
     </div>
   );
 };
+

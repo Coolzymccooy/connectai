@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useMemo } from 'react';
+﻿import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { 
   Activity, Sparkles, Target, ChevronRight, Phone, Zap, Info, MessageSquare, Send, Mail, Briefcase, 
   X, Plus, ClipboardCheck, User as UserIcon, Radio, Search, Filter, ArrowRight, BarChart3,
@@ -69,7 +69,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<'voice' | 'omnichannel' | 'campaigns' | 'outbound' | 'team' | 'calendar'>('voice');
   
-  // Neural Copilot & Analysis State
+  // AI Helper & Analysis State
   const [aiSuggestions, setAiSuggestions] = useState<AiSuggestion[]>([]);
   const [liveTools, setLiveTools] = useState<ToolAction[]>([]);
   const [wrapUpAnalysis, setWrapUpAnalysis] = useState<CallAnalysis | null>(null);
@@ -266,7 +266,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         contactName: member.name,
         contactPhone: `EXT ${member.extension}`,
         channel: 'chat',
-        lastMessage: 'Neural Link Established',
+        lastMessage: 'Connection Established',
         lastMessageTime: Date.now(),
         unreadCount: 0,
         status: 'open',
@@ -287,7 +287,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         contactName: member.name, 
         contactPhone: `EXT ${member.extension}`, 
         channel: 'chat', 
-        lastMessage: 'Neural Link Established', 
+        lastMessage: 'Connection Established', 
         lastMessageTime: Date.now(), 
         unreadCount: 0, 
         status: 'open', 
@@ -456,10 +456,10 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                     </div>
                   </div>
 
-                  {/* Neural Copilot Sidebar */}
+                  {/* AI Helper Sidebar */}
                     <div className="col-span-12 lg:col-span-4 space-y-6 md:space-y-8 flex flex-col overflow-hidden">
                        <div className="flex-1 bg-slate-100 rounded-[3.5rem] border border-slate-200 shadow-inner p-6 md:p-10 flex flex-col overflow-hidden">
-                        <h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-500 mb-8 flex items-center gap-2"><BrainCircuit size={14} className="text-brand-500"/> Neural Copilot</h4>
+                        <h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-500 mb-8 flex items-center gap-2"><BrainCircuit size={14} className="text-brand-500"/> AI Helper</h4>
                         <div className="flex-1 space-y-6 overflow-y-auto scrollbar-hide pr-2">
                            {aiSuggestions.map(s => (
                              <div key={s.id} className="bg-white p-6 rounded-[2rem] border-2 border-brand-500/20 shadow-sm animate-in slide-in-from-right">
@@ -517,7 +517,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                            <h2 className="text-5xl font-black italic uppercase tracking-tighter">Wrap-Up</h2>
                         </div>
                         <div className="text-right">
-                           <p className="text-[10px] font-black uppercase text-brand-300 mb-2">Neural Sentiment Score</p>
+                           <p className="text-[10px] font-black uppercase text-brand-300 mb-2">Sentiment Score</p>
                            <p className="text-6xl font-black italic text-brand-400">{wrapUpAnalysis.sentimentScore}%</p>
                         </div>
                      </div>
@@ -526,7 +526,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                         <div className="grid grid-cols-12 gap-12">
                            <div className="col-span-7 space-y-12">
                               <section>
-                                 <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-slate-400 mb-6 flex items-center gap-3"><Terminal size={16}/> Summary Packet</h4>
+                                 <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-slate-400 mb-6 flex items-center gap-3"><Terminal size={16}/> Summary</h4>
                                  <div className="bg-slate-50 p-10 rounded-[3rem] border-2 border-slate-100 shadow-inner">
                                     <p className="text-xl font-medium italic text-slate-700 leading-relaxed">"{wrapUpAnalysis.summary}"</p>
                                  </div>
@@ -563,7 +563,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
                            <div className="col-span-5 space-y-12">
                               <section>
-                                 <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-slate-400 mb-6">Neural Topic Map</h4>
+                                 <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-slate-400 mb-6">Topics</h4>
                                  <div className="flex flex-wrap gap-4">
                                     {wrapUpAnalysis.topics.map((topic, i) => (
                                        <span key={i} className="px-6 py-3 bg-white border-2 border-slate-100 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-600 shadow-sm hover:border-brand-500 hover:text-brand-600 transition-all cursor-default">{topic}</span>
@@ -573,7 +573,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
                               <section className="bg-slate-900 rounded-[3rem] p-10 text-white shadow-2xl relative overflow-hidden">
                                  <div className="absolute top-0 right-0 w-48 h-48 bg-brand-500/10 blur-[60px] -mr-24 -mt-24"></div>
-                                 <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-brand-400 mb-8 flex items-center gap-3"><Bot size={18}/> Next steps</h4>
+                                 <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-brand-400 mb-8 flex items-center gap-3"><Bot size={18}/> Next Steps</h4>
                                  <div className="space-y-4">
                                     <button
                                       onClick={handleSyncCrm}
@@ -808,7 +808,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                 <section className="relative">
                                    <div className="flex items-center gap-4 mb-8">
                                       <div className="p-3 bg-brand-50 rounded-xl text-brand-600"><Sparkles size={24}/></div>
-                                      <h4 className="text-[11px] font-black uppercase tracking-[0.5em] text-slate-400">Neural Strategic Briefing</h4>
+                                      <h4 className="text-[11px] font-black uppercase tracking-[0.5em] text-slate-400">AI Briefing</h4>
                                    </div>
                                    <div className="bg-slate-50 p-12 rounded-[3.5rem] border-2 border-slate-100 shadow-inner relative min-h-[250px] flex items-center justify-center">
                                       {isLoadingBrief ? (
@@ -839,7 +839,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                              <div className="col-span-4 space-y-12">
                                 <section className="bg-slate-900 rounded-[3rem] p-10 text-white shadow-2xl relative overflow-hidden h-full">
                                    <div className="absolute top-0 right-0 w-48 h-48 bg-brand-500/10 blur-[60px] -mr-24 -mt-24"></div>
-                                   <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-brand-400 mb-10 flex items-center gap-3"><Terminal size={18}/> Behavioral Notes</h4>
+                                   <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-brand-400 mb-10 flex items-center gap-3"><Terminal size={18}/> Notes</h4>
                                    <div className="space-y-6">
                                       <textarea 
                                         value={leadNotes[selectedLeadId] || leads.find(l => l.id === selectedLeadId)?.notes || ""} 
@@ -937,11 +937,11 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                <button onClick={() => setAiDraftText(null)} className="absolute top-6 right-6 text-brand-400 hover:text-brand-600"><X size={18}/></button>
                                <div className="flex items-center gap-3 mb-3">
                                   <Sparkles size={16} className="text-brand-600"/>
-                                  <p className="text-[10px] font-black uppercase tracking-widest text-brand-600">Suggested Neural Packet Reply</p>
+                                  <p className="text-[10px] font-black uppercase tracking-widest text-brand-600">Suggested Reply</p>
                                </div>
                                <p className="text-sm font-medium italic text-slate-700 leading-relaxed">"{aiDraftText}"</p>
                                <div className="mt-6 flex gap-4">
-                                  <button onClick={() => handleSendMessage(aiDraftText)} className="px-6 py-2.5 bg-brand-600 text-white rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-brand-700 shadow-lg">Admit and Stream</button>
+                                  <button onClick={() => handleSendMessage(aiDraftText)} className="px-6 py-2.5 bg-brand-600 text-white rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-brand-700 shadow-lg">Send</button>
                                   <button onClick={() => setMessageInput(aiDraftText)} className="px-6 py-2.5 bg-white border border-brand-200 text-brand-600 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-brand-50">Edit Logic</button>
                                </div>
                             </div>
@@ -952,7 +952,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                             <button onClick={handleGenerateDraft} disabled={isDrafting} className="p-5 bg-brand-50 text-brand-600 rounded-2xl hover:bg-brand-100 transition-all shadow-sm flex items-center justify-center relative overflow-hidden">
                                {isDrafting ? <RefreshCw size={24} className="animate-spin"/> : <Sparkles size={24}/>}
                             </button>
-                            <input type="text" value={messageInput} onChange={e => setMessageInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Admit packet to neural stream..." className="flex-1 bg-slate-100 p-6 rounded-[2.5rem] border border-slate-200 italic outline-none focus:border-brand-500 font-medium shadow-inner" />
+                            <input type="text" value={messageInput} onChange={e => setMessageInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Type a message..." className="flex-1 bg-slate-100 p-6 rounded-[2.5rem] border border-slate-200 italic outline-none focus:border-brand-500 font-medium shadow-inner" />
                             <button onClick={() => handleSendMessage()} className="p-6 bg-slate-900 text-white rounded-[2.2rem] shadow-2xl hover:bg-slate-800 transition-all group active:scale-95"><Send size={24} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform"/></button>
                          </div>
                       </div>
@@ -1089,31 +1089,31 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
               <h3 className="text-4xl font-black italic tracking-tighter uppercase text-slate-800 mb-10 text-center">Create Campaign</h3>
               <div className="space-y-8">
                  <div className="space-y-3">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Wave Identifier</label>
+                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Campaign Name</label>
                     <input className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-bold text-xl focus:border-brand-500 outline-none transition-all" placeholder="e.g. Q4 Growth Core" value={newCampaign.name} onChange={e => setNewCampaign({...newCampaign, name: e.target.value})}/>
                  </div>
                  <div className="grid grid-cols-2 gap-8">
                     <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Protocol Type</label>
+                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Type</label>
                        <select className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black uppercase text-xs focus:border-brand-500 outline-none" value={newCampaign.type} onChange={e => setNewCampaign({...newCampaign, type: e.target.value as any})}>
                           <option value="call">Calls</option>
                           <option value="sms">Omnichannel Packet</option>
                        </select>
                     </div>
                     <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Target Nodes</label>
+                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Target Count</label>
                        <input type="number" className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black text-center text-xl focus:border-brand-500 outline-none" value={newCampaign.target} onChange={e => setNewCampaign({...newCampaign, target: parseInt(e.target.value)})}/>
                     </div>
                  </div>
                  <div className="space-y-3">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Neural Persona Logic</label>
+                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Message Style</label>
                     <div className="grid grid-cols-2 gap-4">
                        {['Professional Concierge', 'Friendly Assistant', 'Technical Handoff', 'Closing Logic'].map(p => (
                           <button key={p} onClick={() => setNewCampaign({...newCampaign, persona: p})} className={`p-5 rounded-2xl border-2 transition-all text-xs font-black uppercase tracking-widest ${newCampaign.persona === p ? 'bg-brand-900 border-brand-900 text-white shadow-xl' : 'bg-slate-50 border-slate-100 text-slate-500 hover:bg-slate-100'}`}>{p}</button>
                        ))}
                     </div>
                  </div>
-                 <button onClick={provisionCampaign} className="w-full py-7 bg-brand-600 text-white rounded-[2.5rem] font-black uppercase tracking-[0.3em] shadow-3xl hover:bg-brand-700 transition-all active:scale-95 text-xs">Initialize Campaign Wave</button>
+                 <button onClick={provisionCampaign} className="w-full py-7 bg-brand-600 text-white rounded-[2.5rem] font-black uppercase tracking-[0.3em] shadow-3xl hover:bg-brand-700 transition-all active:scale-95 text-xs">Create Campaign</button>
                  <button onClick={() => setShowCampaignModal(false)} className="w-full text-slate-400 font-bold uppercase tracking-widest text-[10px] hover:text-slate-600 transition-all">Cancel</button>
               </div>
            </div>
@@ -1127,11 +1127,11 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
               <h3 className="text-4xl font-black italic tracking-tighter uppercase text-slate-800 mb-10 text-center">Schedule Meeting</h3>
               <div className="space-y-8">
                  <div className="space-y-3">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Sync Identifier</label>
+                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Meeting Title</label>
                     <input className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-bold focus:border-brand-500 outline-none transition-all" placeholder="e.g. Behavioral Flux Review" value={newMeeting.title} onChange={e => setNewMeeting({...newMeeting, title: e.target.value})}/>
                  </div>
                  <div className="space-y-3">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Target Node</label>
+                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Attendee</label>
                     <select className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black uppercase text-xs focus:border-brand-500 outline-none" value={newMeeting.attendeeId} onChange={e => setNewMeeting({...newMeeting, attendeeId: e.target.value})}>
                        <option value="">Select Cluster Node</option>
                        {settings.team.filter(t => t.id !== user.id).map(t => (
@@ -1141,11 +1141,11 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                  </div>
                  <div className="grid grid-cols-2 gap-8">
                     <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Date Port</label>
+                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Date</label>
                        <input type="date" className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black text-center text-xs focus:border-brand-500 outline-none" value={newMeeting.date} onChange={e => setNewMeeting({...newMeeting, date: e.target.value})}/>
                     </div>
                     <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Time Entry</label>
+                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Time</label>
                        <input type="time" className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black text-center text-xs focus:border-brand-500 outline-none" value={newMeeting.time} onChange={e => setNewMeeting({...newMeeting, time: e.target.value})}/>
                     </div>
                  </div>
@@ -1186,3 +1186,5 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     </div>
   );
 };
+
+

@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+﻿import React, { useEffect, useState } from 'react';
 import { User, Shield, Lock, Headset, LayoutDashboard, Settings, Mail, KeyRound } from 'lucide-react';
 import { Role } from '../types';
 import { auth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, signOut, updateProfile, GoogleAuthProvider, signInWithPopup } from '../services/firebase';
@@ -20,6 +20,14 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    const stored = localStorage.getItem('connectai_pending_verification_email');
+    if (stored) {
+      setPendingVerificationEmail(stored);
+      if (!email) setEmail(stored);
+    }
+  }, []);
 
   const friendlyError = (err: any) => {
     const code = err?.code || '';
@@ -89,6 +97,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
         await sendEmailVerification(user);
         setMessage('Verification email sent. Please verify your email before signing in.');
         setPendingVerificationEmail(email);
+        localStorage.setItem('connectai_pending_verification_email', email);
         await signOut(auth);
         return;
       }
@@ -121,6 +130,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
       await sendEmailVerification(result.user);
       setMessage('Account created. Check your email to verify before signing in.');
       setPendingVerificationEmail(email);
+      localStorage.setItem('connectai_pending_verification_email', email);
       await signOut(auth);
       setMode('login');
     } catch (err: any) {
@@ -297,6 +307,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
                 )}
               </div>
             )}
+            {pendingVerificationEmail && (
+              <div className="text-sm text-amber-700">
+                Verification required for <span className="font-bold">{pendingVerificationEmail}</span>. Check your inbox and spam folder.
+              </div>
+            )}
             {pendingVerificationEmail && mode === 'login' && (
               <button
                 onClick={handleResendVerification}
@@ -354,3 +369,4 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
     </div>
   );
 };
+
