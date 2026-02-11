@@ -35,7 +35,13 @@ const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean
           if (isLocal) {
               videoRef.current.muted = true;
           }
-          await videoRef.current.play();
+          try {
+            await videoRef.current.play();
+          } catch {
+            // Retry muted autoplay for stricter browsers
+            videoRef.current.muted = true;
+            await videoRef.current.play();
+          }
           if (active) setStatus('admitted');
         }
       } catch (err) {
@@ -85,6 +91,7 @@ type SettingsTab = 'video' | 'audio' | 'visuals' | 'core';
 export const VideoBridge: React.FC<VideoBridgeProps> = ({ 
   activeCall, currentUser, onHangup, onToggleMedia, onInviteParticipant, onUpdateCall, team, isFirebaseConfigured = false
 }) => {
+  const isVideoEnabled = activeCall.isVideo !== false;
   const [viewMode, setViewMode] = useState<'gallery' | 'speaker'>('gallery');
   const [activeTab, setActiveTab] = useState<SidebarTab>('intelligence');
   const [showSidebar, setShowSidebar] = useState(true);
@@ -291,11 +298,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       setLocalStream(stream);
       // Ensure initial track state matches UI
       stream.getAudioTracks().forEach(t => t.enabled = !isMuted);
-      stream.getVideoTracks().forEach(t => t.enabled = !!activeCall.isVideo);
+      stream.getVideoTracks().forEach(t => t.enabled = isVideoEnabled);
     } catch (err) {
       console.error("Hardware Session Rejected:", err);
     }
-  }, [isMuted, activeCall.isVideo, localStream]);
+  }, [isMuted, isVideoEnabled, localStream]);
 
 
   const replaceOutgoingVideoTrack = useCallback((track: MediaStreamTrack | null) => {
@@ -317,11 +324,15 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     if (syncToggle && activeCall.isScreenSharing) {
       onToggleMedia('screen');
     }
+    if (!cameraTrack && activeCall.isVideo) {
+      admitHardware();
+    }
   }, [screenStream, localStream, replaceOutgoingVideoTrack, activeCall.isScreenSharing, onToggleMedia]);
 
   const startScreenShare = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      if (screenStream) return;
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: { ideal: 15, max: 30 } }, audio: false });
       const track = stream.getVideoTracks()[0];
       if (!track) return;
       track.onended = () => stopScreenShare(true);
@@ -346,18 +357,18 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     if (localStream) {
       const videoTracks = localStream.getVideoTracks();
       videoTracks.forEach(track => {
-        if (track.enabled !== !!activeCall.isVideo) {
-          track.enabled = !!activeCall.isVideo;
+        if (track.enabled !== isVideoEnabled) {
+          track.enabled = isVideoEnabled;
         }
       });
       // Fallback: If hardware was dropped or not yet acquired, admit it.
-      if (activeCall.isVideo && videoTracks.length === 0) {
+      if (isVideoEnabled && videoTracks.length === 0) {
         admitHardware();
       }
-    } else if (activeCall.isVideo) {
+    } else if (isVideoEnabled) {
       admitHardware();
     }
-  }, [activeCall.isVideo, localStream, admitHardware]);
+  }, [isVideoEnabled, localStream, admitHardware]);
 
   useEffect(() => {
     return () => {
@@ -369,9 +380,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   useEffect(() => {
     if (activeCall.isScreenSharing && screenStream) {
       setActiveVideoStream(screenStream);
-    } else {
-      setActiveVideoStream(localStream);
+      return;
     }
+    setActiveVideoStream(localStream);
   }, [activeCall.isScreenSharing, screenStream, localStream]);
 
   const toggleMute = () => {
@@ -444,9 +455,32 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     ]);
   }, [activeCall.customerName]);
 
+  const roster = useMemo(() => {
+    const base = [...team];
+    if (!base.some(t => t.id === currentUser.id)) {
+      base.push(currentUser);
+    }
+    return base;
+  }, [team, currentUser]);
   const participants = useMemo(() => 
-    team.filter(t => activeCall.participants?.includes(t.id) || t.id === currentUser.id),
-  [team, activeCall.participants, currentUser.id]);
+    roster.filter(t => activeCall.participants?.includes(t.id) || t.id === currentUser.id),
+  [roster, activeCall.participants, currentUser.id]);
+  const localParticipant = useMemo(
+    () => participants.find(p => p.id === currentUser.id) || currentUser,
+    [participants, currentUser]
+  );
+  const remoteParticipants = useMemo(
+    () => participants.filter(p => p.id !== currentUser.id),
+    [participants, currentUser.id]
+  );
+  const primaryParticipant = useMemo(() => {
+    const remoteWithStream = remoteParticipants.find(p => remoteStreams.get(p.id));
+    return remoteWithStream || localParticipant;
+  }, [remoteParticipants, remoteStreams, localParticipant]);
+  const secondaryParticipants = useMemo(
+    () => participants.filter(p => p.id !== primaryParticipant.id),
+    [participants, primaryParticipant.id]
+  );
 
   const formatTime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -515,42 +549,102 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       {/* Viewport Area */}
       <div className="flex-1 flex overflow-hidden relative">
         <div className={`flex-1 p-6 transition-all duration-700 flex items-center justify-center ${showSidebar ? 'mr-[380px]' : ''}`}>
-           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full h-full max-w-[1200px] overflow-y-auto scrollbar-hide py-4">
-              {participants.map(p => (
-                 <div key={p.id} className="relative bg-slate-900 rounded-[2.5rem] border border-white/5 overflow-hidden group shadow-2xl aspect-video flex items-center justify-center">
+          {viewMode === 'speaker' ? (
+            <div className="flex flex-col gap-4 w-full h-full max-w-[1400px]">
+              <div className="flex-1 min-h-[320px]">
+                <div className="relative bg-slate-900 rounded-[2.5rem] border border-white/5 overflow-hidden shadow-2xl h-full">
+                  {primaryParticipant.id === currentUser.id ? (
+                    activeCall.isVideo ? (
+                      <NeuralVideoSlot stream={activeVideoStream} mirrored={mirrorVideo} effect={backgroundEffect} isLocal={true} />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
+                        <img src={primaryParticipant.avatarUrl} className="w-28 h-28 rounded-[2rem] border-4 border-slate-800 shadow-2xl opacity-40 grayscale" />
+                        <div className="flex flex-col items-center gap-1">
+                          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest italic">Video Paused</p>
+                          <p className="text-[8px] font-bold text-slate-600 uppercase">Session Tunnel: Active</p>
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    remoteStreams.get(primaryParticipant.id) ? (
+                      <NeuralVideoSlot stream={remoteStreams.get(primaryParticipant.id)!} isLocal={false} />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
+                        <img src={primaryParticipant.avatarUrl} className="w-28 h-28 rounded-[2rem] border-4 border-slate-800 shadow-2xl" />
+                        {showNames && <p className="text-xs font-black text-slate-400 uppercase tracking-widest italic">{primaryParticipant.name}</p>}
+                        <p className="text-[9px] text-slate-600 animate-pulse">Waiting for Stream...</p>
+                      </div>
+                    )
+                  )}
+                  <div className="absolute bottom-4 left-4 flex items-center gap-3 bg-black/60 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/10 z-10 shadow-xl">
+                    {showNames && <p className="text-[9px] font-black uppercase tracking-widest text-white/90">{primaryParticipant.name} {primaryParticipant.id === currentUser.id ? '(You)' : ''}</p>}
+                    {primaryParticipant.id === currentUser.id && isMuted && <MicOff size={10} className="text-red-500"/>}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {secondaryParticipants.map(p => (
+                  <div key={p.id} className="relative bg-slate-900 rounded-[2rem] border border-white/5 overflow-hidden shadow-xl aspect-video">
                     {p.id === currentUser.id ? (
                       activeCall.isVideo ? (
                         <NeuralVideoSlot stream={activeVideoStream} mirrored={mirrorVideo} effect={backgroundEffect} isLocal={true} />
                       ) : (
-                        <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
-                           <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl opacity-40 grayscale" />
-                           <div className="flex flex-col items-center gap-1">
-                             <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest italic">Video Paused</p>
-                             <p className="text-[8px] font-bold text-slate-600 uppercase">Session Tunnel: Active</p>
-                           </div>
+                        <div className="w-full h-full flex items-center justify-center bg-[#0a0e14]">
+                          <img src={p.avatarUrl} className="w-16 h-16 rounded-[1.5rem] border-4 border-slate-800 shadow-xl opacity-40 grayscale" />
                         </div>
                       )
                     ) : (
-                       // REMOTE PARTICIPANT RENDER
-                       remoteStreams.get(p.id) ? (
-                           <NeuralVideoSlot stream={remoteStreams.get(p.id)!} isLocal={false} />
-                       ) : (
-                           <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
-                              <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl" />
-                              {showNames && <p className="text-xs font-black text-slate-400 uppercase tracking-widest italic">{p.name}</p>}
-                              <p className="text-[9px] text-slate-600 animate-pulse">Waiting for Stream...</p>
-                           </div>
-                       )
+                      remoteStreams.get(p.id) ? (
+                        <NeuralVideoSlot stream={remoteStreams.get(p.id)!} isLocal={false} />
+                      ) : (
+                        <div className="w-full h-full flex items-center justify-center bg-[#0a0e14]">
+                          <img src={p.avatarUrl} className="w-16 h-16 rounded-[1.5rem] border-4 border-slate-800 shadow-xl" />
+                        </div>
+                      )
                     )}
-                    
-                    {/* Name Tag Overlay */}
-                    <div className="absolute bottom-4 left-4 flex items-center gap-3 bg-black/60 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/10 z-10 shadow-xl">
-                       {showNames && <p className="text-[9px] font-black uppercase tracking-widest text-white/90">{p.name} {p.id === currentUser.id ? '(You)' : ''}</p>}
-                       {p.id === currentUser.id && isMuted && <MicOff size={10} className="text-red-500"/>}
+                    <div className="absolute bottom-2 left-2 flex items-center gap-2 bg-black/60 backdrop-blur-xl px-3 py-1.5 rounded-lg border border-white/10 z-10">
+                      {showNames && <p className="text-[8px] font-black uppercase tracking-widest text-white/90">{p.name}</p>}
+                      {p.id === currentUser.id && isMuted && <MicOff size={9} className="text-red-500"/>}
                     </div>
-                 </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full h-full max-w-[1200px] overflow-y-auto scrollbar-hide py-4">
+              {participants.map(p => (
+                <div key={p.id} className="relative bg-slate-900 rounded-[2.5rem] border border-white/5 overflow-hidden group shadow-2xl aspect-video flex items-center justify-center">
+                  {p.id === currentUser.id ? (
+                    activeCall.isVideo ? (
+                      <NeuralVideoSlot stream={activeVideoStream} mirrored={mirrorVideo} effect={backgroundEffect} isLocal={true} />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
+                        <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl opacity-40 grayscale" />
+                        <div className="flex flex-col items-center gap-1">
+                          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest italic">Video Paused</p>
+                          <p className="text-[8px] font-bold text-slate-600 uppercase">Session Tunnel: Active</p>
+                        </div>
+                      </div>
+                    )
+                  ) : (
+                    remoteStreams.get(p.id) ? (
+                      <NeuralVideoSlot stream={remoteStreams.get(p.id)!} isLocal={false} />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-6 bg-[#0a0e14]">
+                        <img src={p.avatarUrl} className="w-24 h-24 rounded-[2rem] border-4 border-slate-800 shadow-2xl" />
+                        {showNames && <p className="text-xs font-black text-slate-400 uppercase tracking-widest italic">{p.name}</p>}
+                        <p className="text-[9px] text-slate-600 animate-pulse">Waiting for Stream...</p>
+                      </div>
+                    )
+                  )}
+                  <div className="absolute bottom-4 left-4 flex items-center gap-3 bg-black/60 backdrop-blur-xl px-4 py-2 rounded-xl border border-white/10 z-10 shadow-xl">
+                    {showNames && <p className="text-[9px] font-black uppercase tracking-widest text-white/90">{p.name} {p.id === currentUser.id ? '(You)' : ''}</p>}
+                    {p.id === currentUser.id && isMuted && <MicOff size={10} className="text-red-500"/>}
+                  </div>
+                </div>
               ))}
-           </div>
+            </div>
+          )}
         </div>
 
         {/* Sidebar Tabs */}

@@ -1,10 +1,17 @@
 
-import { db, collection, getDocs, query, orderBy } from './firebase';
+import { db, collection, getDocs, query } from './firebase';
+import { apiGet } from './apiClient';
 
 /**
  * Aggregates all cluster data into a single portable JSON for migration to other providers.
  */
 export const exportClusterData = async (): Promise<string> => {
+  try {
+    const serverBundle = await apiGet('/export');
+    return JSON.stringify(serverBundle, null, 2);
+  } catch {
+    // fallback to client-side export when server export unavailable
+  }
   const collections = ['calls', 'leads', 'settings', 'contacts'];
   const exportBundle: Record<string, any> = {
     version: "1.0.4",

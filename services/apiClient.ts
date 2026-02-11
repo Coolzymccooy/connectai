@@ -17,6 +17,17 @@ const getAuthToken = () => {
   return localStorage.getItem('connectai_auth_token') || '';
 };
 
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const shouldRetryPath = (path: string) => {
+  return (
+    path.startsWith('/crm') ||
+    path.startsWith('/marketing') ||
+    path.startsWith('/integrations') ||
+    path.startsWith('/oauth')
+  );
+};
+
 export const apiRequest = async <T = any>(path: string, options: ApiOptions = {}): Promise<T> => {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -27,18 +38,41 @@ export const apiRequest = async <T = any>(path: string, options: ApiOptions = {}
   const token = getAuthToken();
   if (token) headers.Authorization = `Bearer ${token}`;
 
-  const res = await fetch(path, {
-    method: options.method || 'GET',
-    headers,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+  const method = options.method || 'GET';
+  const maxAttempts = shouldRetryPath(path) ? 3 : 1;
+  let attempt = 0;
+  let lastError: any = null;
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `Request failed: ${res.status}`);
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      const res = await fetch(path, {
+        method,
+        headers,
+        body: options.body ? JSON.stringify(options.body) : undefined,
+      });
+
+      if (!res.ok) {
+        const text = await res.text();
+        const retryable = res.status >= 500 || res.status === 429 || res.status === 408;
+        if (retryable && attempt < maxAttempts) {
+          const backoff = 300 * Math.pow(2, attempt - 1);
+          await sleep(backoff);
+          continue;
+        }
+        throw new Error(text || `Request failed: ${res.status}`);
+      }
+
+      return res.json();
+    } catch (err) {
+      lastError = err;
+      if (attempt >= maxAttempts) break;
+      const backoff = 300 * Math.pow(2, attempt - 1);
+      await sleep(backoff);
+    }
   }
 
-  return res.json();
+  throw lastError || new Error('Request failed');
 };
 
 export const apiGet = <T = any>(path: string) => apiRequest<T>(path, { method: 'GET' });

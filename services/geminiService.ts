@@ -123,3 +123,41 @@ export const synthesizeSpeech = async (text: string, voiceName = 'Kore'): Promis
     return null;
   }
 };
+
+export const generateCampaignDraft = async (campaign: { name: string; aiPersona?: string; audience?: any }): Promise<{ subject: string; body: string }> => {
+  try {
+    const response = await apiPost('/gemini/campaign-draft', { campaign });
+    if (!response.ok) throw new Error('campaign draft failed');
+    const data = await response.json();
+    return {
+      subject: data.subject || `ConnectAI Campaign: ${campaign.name}`,
+      body: data.body || `Hi there,\n\nWe are reaching out about ${campaign.name}.\n\nThanks,\nConnectAI Team`,
+    };
+  } catch {
+    return {
+      subject: `ConnectAI Campaign: ${campaign.name}`,
+      body: `Hi there,\n\nWe are reaching out about ${campaign.name}.\n\nThanks,\nConnectAI Team`,
+    };
+  }
+};
+
+export const enrichLead = async (lead: Lead): Promise<{ company?: string; industry?: string; notes?: string }> => {
+  try {
+    const response = await apiPost('/gemini/lead-enrich', { lead });
+    if (!response.ok) throw new Error('lead enrich failed');
+    return await response.json();
+  } catch {
+    return {};
+  }
+};
+
+export const generateHelpAnswer = async (question: string): Promise<string> => {
+  try {
+    const response = await apiPost('/gemini/help', { question });
+    if (!response.ok) throw new Error('help failed');
+    const data = await response.json();
+    return data.text || 'Help response unavailable.';
+  } catch {
+    return 'Help response unavailable.';
+  }
+};

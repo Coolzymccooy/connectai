@@ -3,6 +3,7 @@ import React, { useState, useEffect } from 'react';
 import { Play, Download, Search, Filter, Calendar, ArrowUpRight, ArrowDownLeft, ArrowRightLeft, Clock, User, Phone } from 'lucide-react';
 import { Call, CallDirection, CallStatus } from '../types';
 import { fetchCallLogs, CallLogFilters } from '../services/callLogService';
+import { getRecordingSignedUrl } from '../services/recordingService';
 
 interface CallLogViewProps {
     currentUser: { id: string; role: string };
@@ -14,12 +15,30 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
     const [filters, setFilters] = useState<CallLogFilters>({
         agentId: currentUser.role === 'AGENT' ? currentUser.id : undefined,
     });
+    const [searchText, setSearchText] = useState('');
+    const [minDuration, setMinDuration] = useState('');
     const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
 
     const fetchLogs = async () => {
         setLoading(true);
         try {
-            const results = await fetchCallLogs(filters);
+            let results = await fetchCallLogs(filters);
+            const query = searchText.trim().toLowerCase();
+            if (query) {
+                results = results.filter(call => {
+                    return (
+                        call.customerName?.toLowerCase().includes(query) ||
+                        call.phoneNumber?.toLowerCase().includes(query) ||
+                        call.customerEmail?.toLowerCase().includes(query) ||
+                        call.agentName?.toLowerCase().includes(query) ||
+                        call.agentEmail?.toLowerCase().includes(query)
+                    );
+                });
+            }
+            const min = Number(minDuration);
+            if (Number.isFinite(min) && min > 0) {
+                results = results.filter(call => (call.durationSeconds || 0) >= min);
+            }
             setCalls(results);
         } catch (err) {
             console.error('Failed to fetch logs', err);
@@ -30,48 +49,79 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
 
     useEffect(() => {
         fetchLogs();
-    }, [filters]);
+    }, [filters, searchText, minDuration]);
 
     const handleApplyFilter = (key: keyof CallLogFilters, value: any) => {
         setFilters(prev => ({ ...prev, [key]: value }));
     };
 
-    const handlePlay = (url: string) => {
-        // For demo, if no URL, maybe mock it or alert
-        if (!url) {
-            alert("No recording available for this call.");
-            return;
-        }
-        setPlaybackUrl(url);
+    const extractRecordingId = (call: Call) => {
+        if (call.recordingId) return call.recordingId;
+        if (!call.recordingUrl) return '';
+        const tokenMatch = call.recordingUrl.match(/[?&]token=([^&]+)/);
+        if (!tokenMatch) return '';
+        const token = tokenMatch[1];
+        const parts = token.split('.');
+        return parts.length >= 2 ? parts[1] : '';
     };
 
-    const handleDownload = (url: string, format: 'csv' | 'mp3' = 'mp3') => {
-        if (!url) {
-            alert("No recording available for this call.");
-            return;
-        }
-        const downloadUrl = format === 'mp3' ? `${url}${url.includes('?') ? '&' : '?'}format=mp3` : url;
-        const anchor = document.createElement('a');
-        anchor.href = downloadUrl;
-        anchor.download = '';
-        anchor.rel = 'noopener';
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
+    const resolveRecordingUrl = async (call: Call) => {
+        const recordingId = extractRecordingId(call);
+        if (!recordingId) return '';
+        const response = await getRecordingSignedUrl(recordingId, 3600);
+        return response?.url || '';
     };
+
+    const handlePlay = async (call: Call) => {
+        try {
+            const url = await resolveRecordingUrl(call);
+            if (!url) {
+                alert("No recording available for this call.");
+                return;
+            }
+            setPlaybackUrl(url);
+        } catch {
+            alert("Recording access denied or unavailable.");
+        }
+    };
+
+    const handleDownload = async (call: Call, format: 'csv' | 'mp3' = 'mp3') => {
+        try {
+            const url = await resolveRecordingUrl(call);
+            if (!url) {
+                alert("No recording available for this call.");
+                return;
+            }
+            const downloadUrl = `${url}${url.includes('?') ? '&' : '?'}download=1${format === 'mp3' ? '&format=mp3' : ''}`;
+            const anchor = document.createElement('a');
+            anchor.href = downloadUrl;
+            anchor.download = '';
+            anchor.rel = 'noopener';
+            document.body.appendChild(anchor);
+            anchor.click();
+            anchor.remove();
+        } catch {
+            alert("Recording access denied or unavailable.");
+        }
+    };
+
+    const hasRecording = (call: Call) => Boolean(extractRecordingId(call));
 
     const handleExportCsv = () => {
         if (!calls.length) {
             alert('No calls to export.');
             return;
         }
-        const header = ['id', 'date', 'direction', 'customerName', 'phoneNumber', 'durationSeconds', 'status', 'recordingUrl'];
+        const header = ['id', 'date', 'direction', 'customerName', 'customerEmail', 'phoneNumber', 'agentName', 'agentEmail', 'durationSeconds', 'status', 'recordingUrl'];
         const rows = calls.map(call => ([
             call.id,
             new Date(call.startTime).toISOString(),
             call.direction,
             call.customerName || '',
+            call.customerEmail || '',
             call.phoneNumber || '',
+            call.agentName || '',
+            call.agentEmail || '',
             String(call.durationSeconds || 0),
             call.status,
             call.recordingUrl || ''
@@ -104,7 +154,7 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                 <h2 className="text-3xl font-black text-slate-800 tracking-tighter italic uppercase mb-6">Call Logs</h2>
 
                 {/* Filters */}
-                <div className="flex flex-wrap gap-4 bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
+                <div className="flex flex-wrap gap-3 bg-white p-4 rounded-2xl shadow-sm border border-slate-100">
                     <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-xl border border-slate-200">
                         <Calendar size={16} className="text-slate-400" />
                         <select
@@ -125,6 +175,19 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                             <option value="month">Last 30 Days</option>
                         </select>
                     </div>
+
+                    {currentUser.role !== 'AGENT' && (
+                        <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-xl border border-slate-200">
+                            <User size={16} className="text-slate-400" />
+                            <input
+                                type="text"
+                                placeholder="Agent ID"
+                                value={filters.agentId || ''}
+                                onChange={(e) => handleApplyFilter('agentId', e.target.value || undefined)}
+                                className="bg-transparent text-sm font-semibold text-slate-600 outline-none w-28"
+                            />
+                        </div>
+                    )}
 
                     <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-xl border border-slate-200">
                         <Filter size={16} className="text-slate-400" />
@@ -152,6 +215,29 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                         </select>
                     </div>
 
+                    <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-xl border border-slate-200">
+                        <Search size={16} className="text-slate-400" />
+                        <input
+                            type="text"
+                            placeholder="Search name/email/phone"
+                            value={searchText}
+                            onChange={(e) => setSearchText(e.target.value)}
+                            className="bg-transparent text-sm font-semibold text-slate-600 outline-none w-48"
+                        />
+                    </div>
+
+                    <div className="flex items-center gap-2 px-3 py-2 bg-slate-50 rounded-xl border border-slate-200">
+                        <Clock size={16} className="text-slate-400" />
+                        <input
+                            type="number"
+                            min={0}
+                            placeholder="Min sec"
+                            value={minDuration}
+                            onChange={(e) => setMinDuration(e.target.value)}
+                            className="bg-transparent text-sm font-semibold text-slate-600 outline-none w-20"
+                        />
+                    </div>
+
                     <button
                         onClick={fetchLogs}
                         className="ml-auto px-6 py-2 bg-slate-900 text-white rounded-xl font-bold text-sm hover:bg-slate-800 transition-all flex items-center gap-2"
@@ -173,8 +259,9 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                         <thead className="bg-slate-50 border-b border-slate-100">
                             <tr>
                                 <th className="px-6 py-4 text-left text-xs font-black uppercase tracking-widest text-slate-500">Date & Time</th>
+                                <th className="px-6 py-4 text-left text-xs font-black uppercase tracking-widest text-slate-500">Agent</th>
+                                <th className="px-6 py-4 text-left text-xs font-black uppercase tracking-widest text-slate-500">Customer</th>
                                 <th className="px-6 py-4 text-left text-xs font-black uppercase tracking-widest text-slate-500">Direction</th>
-                                <th className="px-6 py-4 text-left text-xs font-black uppercase tracking-widest text-slate-500">Contact</th>
                                 <th className="px-6 py-4 text-left text-xs font-black uppercase tracking-widest text-slate-500">Duration</th>
                                 <th className="px-6 py-4 text-left text-xs font-black uppercase tracking-widest text-slate-500">Status</th>
                                 <th className="px-6 py-4 text-right text-xs font-black uppercase tracking-widest text-slate-500">Actions</th>
@@ -182,9 +269,9 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                         </thead>
                         <tbody className="divide-y divide-slate-50">
                             {loading ? (
-                                <tr><td colSpan={6} className="p-8 text-center text-slate-400 font-medium">Loading logs...</td></tr>
+                                <tr><td colSpan={7} className="p-8 text-center text-slate-400 font-medium">Loading logs...</td></tr>
                             ) : calls.length === 0 ? (
-                                <tr><td colSpan={6} className="p-8 text-center text-slate-400 font-medium">No calls found.</td></tr>
+                                <tr><td colSpan={7} className="p-8 text-center text-slate-400 font-medium">No calls found.</td></tr>
                             ) : (
                                 calls.map(call => (
                                     <tr key={call.id} className="hover:bg-slate-50/50 transition-colors">
@@ -195,17 +282,24 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                                             </div>
                                         </td>
                                         <td className="px-6 py-4">
-                                            <div className="flex items-center gap-2">
-                                                {call.direction === 'inbound' && <ArrowDownLeft size={16} className="text-green-500" />}
-                                                {call.direction === 'outbound' && <ArrowUpRight size={16} className="text-blue-500" />}
-                                                {call.direction === 'internal' && <ArrowRightLeft size={16} className="text-purple-500" />}
-                                                <span className="text-sm font-medium text-slate-600 capitalize">{call.direction}</span>
+                                            <div className="flex flex-col">
+                                                <span className="font-bold text-slate-800 text-sm">{call.agentName || call.agentId || 'Unknown'}</span>
+                                                <span className="text-xs text-slate-500">{call.agentEmail || call.agentExtension || '—'}</span>
                                             </div>
                                         </td>
                                         <td className="px-6 py-4">
                                             <div className="flex flex-col">
                                                 <span className="font-bold text-slate-800 text-sm">{call.customerName || 'Unknown'}</span>
-                                                <span className="text-xs text-slate-500">{call.phoneNumber}</span>
+                                                <span className="text-xs text-slate-500">{call.phoneNumber || call.customerExtension || '—'}</span>
+                                                <span className="text-[10px] text-slate-400">{call.customerEmail || '—'}</span>
+                                            </div>
+                                        </td>
+                                        <td className="px-6 py-4">
+                                            <div className="flex items-center gap-2">
+                                                {call.direction === 'inbound' && <ArrowDownLeft size={16} className="text-green-500" />}
+                                                {call.direction === 'outbound' && <ArrowUpRight size={16} className="text-blue-500" />}
+                                                {call.direction === 'internal' && <ArrowRightLeft size={16} className="text-purple-500" />}
+                                                <span className="text-sm font-medium text-slate-600 capitalize">{call.direction}</span>
                                             </div>
                                         </td>
                                         <td className="px-6 py-4">
@@ -225,17 +319,17 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                                         <td className="px-6 py-4 text-right">
                                             <div className="flex items-center justify-end gap-2">
                                                 <button
-                                                    onClick={() => handlePlay(call.recordingUrl || '')}
-                                                    disabled={!call.recordingUrl}
-                                                    className={`p-2 rounded-xl transition-all ${call.recordingUrl ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}
+                                                    onClick={() => handlePlay(call)}
+                                                    disabled={!hasRecording(call)}
+                                                    className={`p-2 rounded-xl transition-all ${hasRecording(call) ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}
                                                     title="Play Recording"
                                                 >
-                                                    <Play size={16} fill={call.recordingUrl ? "currentColor" : "none"} />
+                                                    <Play size={16} fill={hasRecording(call) ? "currentColor" : "none"} />
                                                 </button>
                                                 <button
-                                                    onClick={() => handleDownload(call.recordingUrl || '', 'mp3')}
-                                                    disabled={!call.recordingUrl}
-                                                    className={`p-2 rounded-xl transition-all ${call.recordingUrl ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}
+                                                    onClick={() => handleDownload(call, 'mp3')}
+                                                    disabled={!hasRecording(call)}
+                                                    className={`p-2 rounded-xl transition-all ${hasRecording(call) ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}
                                                     title="Download MP3"
                                                 >
                                                     <Download size={16} />

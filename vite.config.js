@@ -15,6 +15,14 @@ export default defineConfig(({ mode }) => {
           secure: false,
         },
       },
+      configureServer(server) {
+        server.middlewares.use((req, _res, next) => {
+          if (req.url && req.url.startsWith('/app')) {
+            req.url = '/';
+          }
+          next();
+        });
+      },
     },
     plugins: [react()],
     define: {

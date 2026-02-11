@@ -11,16 +11,18 @@ import { LoginScreen } from './components/LoginScreen';
 import { ToastContainer } from './components/ToastContainer';
 import { HeaderProfileMenu } from './components/HeaderProfileMenu';
 import { VideoBridge } from './components/VideoBridge';
+import { LandingPage } from './components/LandingPage';
 import { LiveCallService } from './services/liveCallService';
 import { auth, db, onAuthStateChanged, signOut, collection, query, where, onSnapshot } from './services/firebase';
 import * as dbService from './services/dbService';
 import { synthesizeSpeech } from './services/geminiService';
 import { fetchCalendarEvents, createCalendarEvent, updateCalendarEvent } from './services/calendarService';
-import { fetchCampaigns, createCampaign } from './services/campaignService';
+import { fetchCampaigns, createCampaign, updateCampaign } from './services/campaignService';
+import { fetchCallById } from './services/callLogService';
 import { sanitizeCallForStorage } from './utils/gdpr';
 
 const DEFAULT_SETTINGS: AppSettings = {
-  integrations: { hubSpot: { enabled: true, syncContacts: true, syncDeals: true, syncTasks: false, logs: [] }, webhooks: [], schemaMappings: [], pipedrive: false, salesforce: false },
+  integrations: { hubSpot: { enabled: true, syncContacts: true, syncDeals: true, syncTasks: false, logs: [] }, primaryCrm: 'HubSpot', webhooks: [], schemaMappings: [], pipedrive: false, salesforce: false },
   compliance: { jurisdiction: 'UK', pciMode: false, playConsentMessage: true, anonymizePii: false, retentionDays: '90', exportEnabled: true },
   subscription: {
     plan: 'Growth', seats: 20, balance: 420.50, autoTopUp: true, nextBillingDate: 'Nov 01, 2025',
@@ -32,9 +34,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   bot: { enabled: true, name: 'ConnectBot', persona: 'You are a helpful customer service assistant for ConnectAI.', deflectionGoal: 35 },
   auth: { inviteOnly: false, allowedDomains: [], autoTenantByDomain: false, domainTenantMap: [] },
   team: [
-    { id: 'u_agent', name: 'Sarah Agent', role: Role.AGENT, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sarah', status: 'active', extension: '101', currentPresence: AgentStatus.AVAILABLE, email: 'sarah@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false },
-    { id: 'u_supervisor', name: 'Mike Supervisor', role: Role.SUPERVISOR, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Mike', status: 'active', extension: '201', currentPresence: AgentStatus.AVAILABLE, email: 'mike@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false },
-    { id: 'u_admin', name: 'Sys Admin', role: Role.ADMIN, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Admin', status: 'active', extension: '999', currentPresence: AgentStatus.AVAILABLE, email: 'admin@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false }
+    { id: 'u_agent', name: 'Sarah Agent', role: Role.AGENT, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sarah', status: 'active', extension: '101', currentPresence: AgentStatus.AVAILABLE, email: 'sarah@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: false },
+    { id: 'u_supervisor', name: 'Mike Supervisor', role: Role.SUPERVISOR, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Mike', status: 'active', extension: '201', currentPresence: AgentStatus.AVAILABLE, email: 'mike@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: false },
+    { id: 'u_admin', name: 'Sys Admin', role: Role.ADMIN, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Admin', status: 'active', extension: '999', currentPresence: AgentStatus.AVAILABLE, email: 'admin@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: true }
   ],
   workflows: []
 };
@@ -63,11 +65,73 @@ const App: React.FC = () => {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
   const [campaigns, setCampaigns] = useState<Campaign[]>([
-    { id: 'cam_1', name: 'Q4 Enterprise Outreach', type: 'call', status: 'running', targetCount: 1500, processedCount: 842, successCount: 156, aiPersona: 'Professional Concierge', hourlyStats: [] },
-    { id: 'cam_2', name: 'Retention SMS Bot', type: 'sms', status: 'running', targetCount: 5000, processedCount: 3240, successCount: 1120, aiPersona: 'Friendly Assistant', hourlyStats: [] }
+    {
+      id: 'cam_1',
+      name: 'Q4 Enterprise Outreach',
+      type: 'call',
+      status: 'running',
+      targetCount: 1500,
+      processedCount: 842,
+      successCount: 156,
+      aiPersona: 'Professional Concierge',
+      hourlyStats: [],
+      audience: { industry: 'SaaS', lifecycleStage: 'MQL', region: 'UK', minEngagement: 40, consentRequired: true },
+      channels: { email: true, sms: false, whatsapp: false },
+      journey: [
+        { id: 'step_1', type: 'send_email', label: 'Welcome email' },
+        { id: 'step_2', type: 'wait', label: 'Wait 48h', delayHours: 48 },
+        { id: 'step_3', type: 'notify_sales', label: 'Notify sales' }
+      ],
+      metrics: { sent: 1200, delivered: 1150, opened: 540, clicked: 210, unsubscribed: 12 }
+    },
+    {
+      id: 'cam_2',
+      name: 'Retention SMS Bot',
+      type: 'sms',
+      status: 'running',
+      targetCount: 5000,
+      processedCount: 3240,
+      successCount: 1120,
+      aiPersona: 'Friendly Assistant',
+      hourlyStats: [],
+      audience: { industry: 'Retail', lifecycleStage: 'Customer', region: 'UK', minEngagement: 20, consentRequired: true },
+      channels: { email: false, sms: true, whatsapp: true },
+      journey: [
+        { id: 'step_1', type: 'send_sms', label: 'Renewal reminder' },
+        { id: 'step_2', type: 'wait', label: 'Wait 24h', delayHours: 24 }
+      ],
+      metrics: { sent: 3100, delivered: 3000, opened: 0, clicked: 0, unsubscribed: 44 }
+    }
   ]);
   const [isFirebaseConfigured, setIsFirebaseConfigured] = useState(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  const [route, setRoute] = useState(() => ({
+    pathname: typeof window !== 'undefined' ? window.location.pathname : '/',
+    hash: typeof window !== 'undefined' ? window.location.hash : ''
+  }));
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleRouteChange = () => {
+      setRoute({ pathname: window.location.pathname, hash: window.location.hash });
+    };
+    window.addEventListener('hashchange', handleRouteChange);
+    window.addEventListener('popstate', handleRouteChange);
+    return () => {
+      window.removeEventListener('hashchange', handleRouteChange);
+      window.removeEventListener('popstate', handleRouteChange);
+    };
+  }, []);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const pathname = route.pathname;
+  const hash = route.hash;
+  const isHashApp = hash.startsWith('#/app');
+  const isLanding = !isHashApp && (pathname === '/' || pathname.startsWith('/landing'));
+  const isAppRoute = isHashApp || pathname.startsWith('/app') || pathname.startsWith('/login');
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (!user) {
@@ -94,7 +158,8 @@ const App: React.FC = () => {
         extension: roleTemplate?.extension,
         email: user.email || undefined,
         status: 'active',
-        currentPresence: roleTemplate?.currentPresence || AgentStatus.AVAILABLE
+        currentPresence: roleTemplate?.currentPresence || AgentStatus.AVAILABLE,
+        canAccessRecordings: roleTemplate?.canAccessRecordings ?? (storedRole === Role.ADMIN)
       };
       const token = await user.getIdToken();
       localStorage.setItem('connectai_auth_token', token);
@@ -272,7 +337,7 @@ const App: React.FC = () => {
     const name = typeof target === 'string' ? 'Manual Node' : target.name;
     const phone = typeof target === 'string' ? target : target.phone;
     const newCall: Call = {
-      id: `ext_${Date.now()}`, direction: 'outbound', customerName: name, phoneNumber: phone, queue: 'External Hub', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, emailSynced: true, transcriptionEnabled: true
+      id: `ext_${Date.now()}`, direction: 'outbound', customerName: name, phoneNumber: phone, queue: 'External Hub', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, agentEmail: currentUser?.email, agentExtension: currentUser?.extension, emailSynced: true, transcriptionEnabled: true
     };
     setActiveCall(newCall);
     await persistCall(newCall);
@@ -313,6 +378,8 @@ const App: React.FC = () => {
       transcript: [],
       agentId: currentUser?.id,
       agentName: currentUser?.name,
+      agentEmail: currentUser?.email,
+      agentExtension: currentUser?.extension,
       emailSynced: true,
       transcriptionEnabled: true
     };
@@ -344,7 +411,7 @@ const App: React.FC = () => {
   const startInternalCall = async (target: User) => {
     if (activeCall && activeCall.status !== CallStatus.ENDED) return;
     const newCall: Call = {
-      id: `int_${Date.now()}`, direction: 'internal', customerName: target.name, phoneNumber: `EXT ${target.extension}`, queue: 'Internal Matrix', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, targetAgentId: target.id, isVideo: true, participants: [target.id, currentUser!.id], emailSynced: true, transcriptionEnabled: true
+      id: `int_${Date.now()}`, direction: 'internal', customerName: target.name, phoneNumber: `EXT ${target.extension}`, customerEmail: target.email, customerExtension: target.extension, queue: 'Internal Matrix', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, agentEmail: currentUser?.email, agentExtension: currentUser?.extension, targetAgentId: target.id, isVideo: true, participants: [target.id, currentUser!.id], emailSynced: true, transcriptionEnabled: true
     };
     setActiveCall(newCall);
     await persistCall(newCall);
@@ -385,6 +452,31 @@ const App: React.FC = () => {
     }
   };
 
+  const handleSoftphoneCallEnded = async (endedCall: Call) => {
+    setCallHistory(h => [endedCall, ...h]);
+    setAgentStatus(AgentStatus.WRAP_UP);
+    if (isFirebaseConfigured) {
+      await dbService.saveCall(endedCall);
+    }
+    if (!isFirebaseConfigured) {
+      const pollTranscript = async (callId: string, attempts = 8) => {
+        if (!mountedRef.current || attempts <= 0) return;
+        try {
+          const latest = await fetchCallById(callId);
+          if (latest?.transcript?.length) {
+            if (!mountedRef.current) return;
+            setCallHistory(prev => prev.map(c => c.id === callId ? { ...c, ...latest } : c));
+            return;
+          }
+        } catch {
+          // ignore
+        }
+        setTimeout(() => pollTranscript(callId, attempts - 1), 5000);
+      };
+      pollTranscript(endedCall.id);
+    }
+  };
+
   const handleCompleteWrapUp = async (finalCall: Call) => {
     setActiveCall(null);
     setAgentStatus(AgentStatus.AVAILABLE);
@@ -397,6 +489,15 @@ const App: React.FC = () => {
     if (newest) {
       createCampaign(newest).catch(() => { });
     }
+  };
+
+  const handleCreateLead = (lead: Lead) => {
+    setLeads(prev => [lead, ...prev]);
+  };
+
+  const handleUpdateCampaign = (updated: Campaign) => {
+    setCampaigns(prev => prev.map(c => c.id === updated.id ? updated : c));
+    updateCampaign(updated).catch(() => { });
   };
 
   const handleUpdateMeetings = (nextMeetings: Meeting[]) => {
@@ -454,7 +555,8 @@ const App: React.FC = () => {
       extension: base?.extension,
       email: profile?.email || base?.email,
       status: 'active',
-      currentPresence: base?.currentPresence || AgentStatus.AVAILABLE
+      currentPresence: base?.currentPresence || AgentStatus.AVAILABLE,
+      canAccessRecordings: base?.canAccessRecordings ?? (role === Role.ADMIN)
     };
     if (profile?.uid) {
       localStorage.setItem(`connectai_role_${profile.uid}`, role);
@@ -466,6 +568,8 @@ const App: React.FC = () => {
     if (isFirebaseConfigured) await dbService.saveUser(user);
   };
 
+  if (isLanding) return <LandingPage />;
+  if (!isAppRoute && !currentUser) return <LandingPage />;
   if (!currentUser) return <LoginScreen onLogin={handleLogin} externalMessage={authNotice} onClearExternalMessage={() => setAuthNotice(null)} />;
 
   const isMeetingActive = activeCall && (activeCall.status !== CallStatus.ENDED) && (activeCall.direction === 'internal' || activeCall.isVideo);
@@ -475,7 +579,13 @@ const App: React.FC = () => {
       <ToastContainer notifications={notifications} removeNotification={() => { }} />
       {!isMeetingActive && (
         <div className="w-full md:w-24 h-16 md:h-full bg-brand-900 flex flex-row md:flex-col items-center px-4 md:px-0 md:py-8 space-x-4 md:space-x-0 md:space-y-10 z-50 shadow-2xl shrink-0">
-          <div className="w-10 h-10 md:w-12 md:h-12 bg-brand-500 rounded-2xl flex items-center justify-center text-white font-black text-xl md:text-2xl shadow-xl italic tracking-tighter">C</div>
+          <button
+            onClick={() => { window.location.href = '/'; }}
+            className="w-10 h-10 md:w-12 md:h-12 bg-brand-500 rounded-2xl flex items-center justify-center text-white font-black text-xl md:text-2xl shadow-xl italic tracking-tighter hover:scale-[1.02] transition-transform"
+            title="Go to Landing"
+          >
+            C
+          </button>
           <nav className="flex-1 flex flex-row md:flex-col items-center space-x-4 md:space-x-0 md:space-y-8">
             <button onClick={() => setView('agent')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'agent' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Agent Workspace"><Phone size={20} /></button>
             <button onClick={() => setView('logs')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'logs' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Call Logs"><FileText size={20} /></button>
@@ -511,7 +621,7 @@ const App: React.FC = () => {
                 <div className="p-4 md:p-8 h-full">
                   <div className="h-full relative">
                     <div className="h-full">
-                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} />
+                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} onUpdateCampaign={handleUpdateCampaign} onCreateLead={handleCreateLead} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} />
                     </div>
 
                   </div>
@@ -521,7 +631,7 @@ const App: React.FC = () => {
               {view === 'logs' && <div className="h-full"><CallLogView currentUser={currentUser} /></div>}
               {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} />}
               {showSoftphone && (
-                <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} enableServerLogs />
+                <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} agentName={currentUser?.name} agentEmail={currentUser?.email} enableServerLogs onCallEnded={handleSoftphoneCallEnded} />
               )}
             </>
           )}

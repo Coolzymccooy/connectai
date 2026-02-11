@@ -20,3 +20,13 @@ export const fetchCrmTasks = async (): Promise<CrmTask[]> => {
     return [];
   }
 };
+
+export const upsertCrmContact = async (contact: CrmContact): Promise<CrmContact | null> => {
+  try {
+    const data = await apiPost('/crm/contacts', contact);
+    return data || contact;
+  } catch (e) {
+    console.error('CRM upsert failed', e);
+    return null;
+  }
+};

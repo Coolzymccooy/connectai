@@ -7,6 +7,8 @@ import { AgentStatus, Call as AppCall, CallDirection, CallStatus, Lead, User as 
 interface SoftphoneProps {
   userExtension?: string;
   agentId?: string;
+  agentName?: string;
+  agentEmail?: string;
   allowedNumbers?: string[];
   restrictOutboundNumbers?: boolean;
   activeCall?: AppCall | null;
@@ -26,9 +28,10 @@ interface SoftphoneProps {
   onOpenFreeCall?: () => void;
   floating?: boolean;
   enableServerLogs?: boolean;
+  onCallEnded?: (call: AppCall) => void;
 }
 
-export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, allowedNumbers = [], restrictOutboundNumbers = false, floating = true, enableServerLogs = true }) => {
+export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, agentName, agentEmail, allowedNumbers = [], restrictOutboundNumbers = false, floating = true, enableServerLogs = true, onCallEnded }) => {
   const [number, setNumber] = useState('');
   const [status, setStatus] = useState<'idle' | 'dialing' | 'connected' | 'incoming'>('idle');
   const [isMuted, setIsMuted] = useState(false);
@@ -46,6 +49,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, al
   const [history, setHistory] = useState<AppCall[]>([]);
   const activeHistoryIdRef = useRef<string | null>(null);
   const activeHistoryStartRef = useRef<number | null>(null);
+  const activeHistoryRef = useRef<AppCall | null>(null);
   const refreshHistory = async () => {
     if (!enableServerLogs) return;
     const agentKey = agentId || userExtension || '';
@@ -137,11 +141,11 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, al
           setCall(incomingCall);
           setStatus('incoming');
           const incomingNumber = incomingCall?.parameters?.From || 'Unknown';
-          const historyId = `in_${Date.now()}`;
-          activeHistoryIdRef.current = historyId;
+          const callSid = incomingCall?.parameters?.CallSid || `in_${Date.now()}`;
+          activeHistoryIdRef.current = callSid;
 
           const newCallObs: AppCall = {
-            id: historyId,
+            id: callSid,
             direction: 'inbound',
             customerName: incomingNumber,
             phoneNumber: incomingNumber,
@@ -151,8 +155,11 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, al
             status: CallStatus.RINGING,
             transcript: [],
             agentId: agentId || userExtension,
+            agentName,
+            agentEmail,
             extension: userExtension
           };
+          activeHistoryRef.current = newCallObs;
           if (enableServerLogs) {
             createCall(newCallObs).then((created) => {
               activeHistoryIdRef.current = created.id;
@@ -170,6 +177,13 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, al
                   startTime: Date.now(),
                 }).then(refreshHistory).catch(() => {});
               }
+            }
+            if (activeHistoryRef.current) {
+              activeHistoryRef.current = {
+                ...activeHistoryRef.current,
+                status: CallStatus.ACTIVE,
+                startTime: Date.now(),
+              };
             }
             if (timerRef.current) window.clearInterval(timerRef.current);
             timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
@@ -273,36 +287,47 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, al
     }
 
     try {
-      const historyId = `out_${Date.now()}`;
-      activeHistoryIdRef.current = historyId;
+      const newCall = await device.connect({ params: { To: normalized } });
+      setCall(newCall);
+      const callSid = newCall?.parameters?.CallSid || `out_${Date.now()}`;
+      activeHistoryIdRef.current = callSid;
+      activeHistoryStartRef.current = Date.now();
 
       const newCallObs: AppCall = {
-        id: historyId,
+        id: callSid,
         direction: 'outbound',
         customerName: normalized,
         phoneNumber: normalized,
         queue: 'Outbound',
-        startTime: Date.now(),
+        startTime: activeHistoryStartRef.current,
         durationSeconds: 0,
         status: CallStatus.DIALING,
         transcript: [],
         agentId: agentId || userExtension,
+        agentName,
+        agentEmail,
         extension: userExtension
       };
+      activeHistoryRef.current = newCallObs;
       if (enableServerLogs) {
         createCall(newCallObs).then((created) => {
           activeHistoryIdRef.current = created.id;
-          activeHistoryStartRef.current = created.startTime || Date.now();
+          activeHistoryStartRef.current = created.startTime || activeHistoryStartRef.current || Date.now();
           refreshHistory();
         }).catch(() => {});
       }
 
-      const newCall = await device.connect({ params: { To: normalized } });
-      setCall(newCall);
       newCall.on('accept', () => {
         setStatus('connected');
         if (activeHistoryIdRef.current) {
           if (enableServerLogs) updateCall(activeHistoryIdRef.current, { status: CallStatus.ACTIVE, startTime: Date.now() }).then(refreshHistory).catch(() => {});
+        }
+        if (activeHistoryRef.current) {
+          activeHistoryRef.current = {
+            ...activeHistoryRef.current,
+            status: CallStatus.ACTIVE,
+            startTime: Date.now(),
+          };
         }
         if (timerRef.current) window.clearInterval(timerRef.current);
         timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
@@ -348,8 +373,18 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, al
         }).then(refreshHistory).catch(() => {});
       }
 
+      if (activeHistoryRef.current) {
+        const finalCall: AppCall = {
+          ...activeHistoryRef.current,
+          status: CallStatus.ENDED,
+          durationSeconds: currentDuration,
+        };
+        onCallEnded?.(finalCall);
+      }
+
       activeHistoryIdRef.current = null;
       activeHistoryStartRef.current = null;
+      activeHistoryRef.current = null;
     }
   };
 

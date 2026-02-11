@@ -55,15 +55,23 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
+  const [showCrmModal, setShowCrmModal] = useState(false);
+  const [crmProvider, setCrmProvider] = useState<'hubspot' | 'salesforce' | 'pipedrive' | null>(null);
+  const [crmCredentials, setCrmCredentials] = useState({ apiKey: '', endpoint: '', clientId: '' });
+  const [showMarketingModal, setShowMarketingModal] = useState(false);
+  const [marketingProvider, setMarketingProvider] = useState<string | null>(null);
+  const [marketingCredentials, setMarketingCredentials] = useState({ apiKey: '', endpoint: '' });
   const [isIvrEditing, setIsIvrEditing] = useState(false);
   const [isScaling, setIsScaling] = useState(false);
   const [geminiConfigured, setGeminiConfigured] = useState(false);
   const [integrationStatus, setIntegrationStatus] = useState<any>({ calendar: {}, crm: {}, marketing: {} });
+  const [opsMetrics, setOpsMetrics] = useState<any>(null);
 
   // Export Hub State
   const [isScanning, setIsScanning] = useState(false);
   const [scanResults, setScanResults] = useState<{ status: 'idle' | 'scanning' | 'clean' | 'warnings', issues: string[] }>({ status: 'idle', issues: [] });
   const [exportHistory, setExportHistory] = useState<ExportRecord[]>([]);
+  const [exportPayloads, setExportPayloads] = useState<Record<string, string>>({});
 
   // Form States
   const [newUser, setNewUser] = useState({ name: '', email: '', role: Role.AGENT });
@@ -100,6 +108,18 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   }, []);
 
   useEffect(() => {
+    const fetchOps = async () => {
+      try {
+        const res = await fetch('/api/metrics/summary');
+        if (!res.ok) return;
+        const data = await res.json();
+        setOpsMetrics(data);
+      } catch {}
+    };
+    fetchOps();
+  }, []);
+
+  useEffect(() => {
     setEditAllowedNumbers(settings.voice.allowedNumbers.join('\n'));
   }, [settings.voice.allowedNumbers]);
 
@@ -123,7 +143,17 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       (newSettings.integrations as any)[key] = !(settings.integrations as any)[key];
     }
     onUpdateSettings(newSettings);
+    saveSettingsApi(newSettings).catch(() => {});
     addNotification('info', `${key.toUpperCase()} state synchronized.`);
+  };
+
+  const handleSaveAll = async () => {
+    try {
+      await saveSettingsApi(settings);
+      addNotification('success', 'Admin settings saved.');
+    } catch {
+      addNotification('error', 'Failed to save admin settings.');
+    }
   };
 
   const handleAddUser = () => {
@@ -135,16 +165,21 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       role: newUser.role,
       avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${newUser.name}`,
       status: 'active',
-      extension: (101 + settings.team.length).toString()
+      extension: (101 + settings.team.length).toString(),
+      canAccessRecordings: newUser.role === Role.ADMIN
     };
-    onUpdateSettings({ ...settings, team: [...settings.team, user] });
+    const next = { ...settings, team: [...settings.team, user] };
+    onUpdateSettings(next);
+    saveSettingsApi(next).catch(() => {});
     setShowInviteModal(false);
     setNewUser({ name: '', email: '', role: Role.AGENT });
     addNotification('success', `${user.name} admitted to neural core.`);
   };
 
   const handleRemoveUser = (userId: string) => {
-    onUpdateSettings({ ...settings, team: settings.team.filter(u => u.id !== userId) });
+    const next = { ...settings, team: settings.team.filter(u => u.id !== userId) };
+    onUpdateSettings(next);
+    saveSettingsApi(next).catch(() => {});
     addNotification('info', 'Member de-provisioned.');
   };
 
@@ -253,16 +288,25 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     setIsScanning(true);
     setScanResults({ status: 'scanning', issues: [] });
     addNotification('info', 'Running system check...');
-    
-    await new Promise(r => setTimeout(r, 2000));
-    
-    const issues = [];
+    const issues: string[] = [];
+    try {
+      const res = await fetch('/api/health/deps');
+      if (res.ok) {
+        const data = await res.json();
+        if (!data.mongo) issues.push('MongoDB not connected.');
+        if (!data.firebase) issues.push('Firebase admin not configured.');
+        if (!data.storage) issues.push('Storage provider not configured.');
+        if (data.jobWorker?.pendingCount > 20) issues.push('Job backlog above threshold.');
+      }
+    } catch {
+      issues.push('Unable to reach health dependencies endpoint.');
+    }
     if (isDemoMode) issues.push("Simulation keys detected in environment.");
     if (settings.team.length < 5) issues.push("Low node count: Redundancy not optimized.");
-    
-    setScanResults({ 
-      status: issues.length > 0 ? 'warnings' : 'clean', 
-      issues 
+
+    setScanResults({
+      status: issues.length > 0 ? 'warnings' : 'clean',
+      issues
     });
     setIsScanning(false);
     addNotification('success', issues.length > 0 ? 'Scan complete: warnings found.' : 'Scan complete: all good.');
@@ -278,16 +322,18 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     addNotification('info', 'Preparing export bundle...');
     try {
       const data = await exportClusterData();
-      const filename = `connect-ai-bundle-${Date.now()}.json`;
+      const fileId = `exp_${Date.now()}`;
+      const filename = `connect-ai-bundle-${fileId.slice(-6)}.json`;
       downloadJson(data, filename);
       
       const newRecord: ExportRecord = {
-        id: `exp_${Date.now()}`,
+        id: fileId,
         timestamp: new Date().toLocaleTimeString(),
         size: `${(data.length / 1024).toFixed(1)} KB`,
         status: 'Ready'
       };
       setExportHistory(prev => [newRecord, ...prev].slice(0, 5));
+      setExportPayloads(prev => ({ ...prev, [fileId]: data }));
       
       addNotification('success', 'Export saved locally.');
     } catch (e) {
@@ -332,10 +378,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   return (
     <div className="h-full flex flex-col bg-slate-50 overflow-hidden">
       {/* Header */}
-      <div className="bg-white border-b px-4 md:px-10 pt-6 md:pt-10 shrink-0">
+      <div className="bg-white border-b px-4 md:px-10 pt-5 md:pt-8 shrink-0">
          <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 md:mb-8 gap-4">
-            <h2 className="text-3xl md:text-4xl font-black text-slate-800 italic uppercase tracking-tighter">Admin Settings</h2>
+            <h2 className="text-2xl md:text-3xl font-black text-slate-800 italic uppercase tracking-tighter">Admin Settings</h2>
             <div className="flex items-center gap-4">
+               <button onClick={handleSaveAll} className="px-6 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest">
+                 Save Settings
+               </button>
                <div className="px-4 py-2 bg-brand-50 rounded-2xl border border-brand-100 flex items-center gap-2">
                   <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
                   <span className="text-[10px] font-black uppercase text-brand-600 tracking-widest">System: Active</span>
@@ -362,11 +411,11 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
          </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-10 scrollbar-hide pb-20">
+      <div className="flex-1 overflow-y-auto p-6 md:p-10 scrollbar-hide pb-16">
         {/* INTEGRATIONS TAB */}
         {activeTab === 'general' && (
-           <div className="max-w-5xl space-y-8 animate-in fade-in">
-              <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+           <div className="max-w-5xl space-y-6 animate-in fade-in">
+              <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-sm">
                 <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Access Control</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                   <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
@@ -412,7 +461,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                 </div>
                 <button
                   onClick={handleSaveAuth}
-                  className="px-8 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                  className="px-6 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
                 >
                   Save Access Policy
                 </button>
@@ -420,7 +469,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
               {['hubSpot', 'pipedrive', 'salesforce'].map((key) => {
                 const isEnabled = key === 'hubSpot' ? settings.integrations.hubSpot.enabled : (settings.integrations as any)[key];
                 return (
-                  <div key={key} className="bg-white p-8 rounded-[2.5rem] border border-slate-200 flex items-center justify-between shadow-sm">
+                  <div key={key} className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 flex items-center justify-between shadow-sm">
                     <div className="flex items-center gap-6">
                       <div className={`w-16 h-16 rounded-[1.5rem] flex items-center justify-center border shadow-sm ${isEnabled ? 'bg-orange-50 text-orange-600 border-orange-100' : 'bg-slate-50 text-slate-400 border-slate-100 grayscale'}`}>
                         <Database size={28}/>
@@ -430,14 +479,14 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Two-way sync</p>
                       </div>
                     </div>
-                    <button onClick={() => handleToggleIntegration(key as any)} className={`px-8 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isEnabled ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{isEnabled ? 'Connected' : 'Connect'}</button>
+                    <button onClick={() => handleToggleIntegration(key as any)} className={`px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isEnabled ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{isEnabled ? 'Connected' : 'Connect'}</button>
                   </div>
                 );
               })}
 
-              <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+              <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-sm">
                 <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Calendar Sync</h4>
-                <div className="flex gap-4">
+                <div className="flex gap-3 flex-wrap">
                   <button
                     onClick={async () => {
                       try {
@@ -445,7 +494,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                         if (url) window.open(url, '_blank', 'noopener,noreferrer');
                       } catch {}
                     }}
-                    className="px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                    className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
                   >
                     Connect Google
                   </button>
@@ -456,7 +505,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                         if (url) window.open(url, '_blank', 'noopener,noreferrer');
                       } catch {}
                     }}
-                    className="px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                    className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
                   >
                     Connect Microsoft
                   </button>
@@ -466,37 +515,93 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                 </p>
               </div>
 
-              <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+              <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-sm">
                 <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">CRM Sync</h4>
-                <div className="flex gap-4 flex-wrap">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4">
+                  Primary CRM: {(settings.integrations.primaryCrm || 'HubSpot')}
+                </p>
+                <div className="flex gap-3 flex-wrap">
                   {['hubspot', 'salesforce', 'pipedrive'].map((provider) => (
                     <button
                       key={provider}
-                      onClick={async () => {
-                        await connectCrmProvider(provider as any, { apiKey: 'REPLACE_ME' });
-                        await syncCrmProvider(provider as any);
+                      onClick={() => {
+                        setCrmProvider(provider as any);
+                        setShowCrmModal(true);
                       }}
-                      className="px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                      className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
                     >
-                      Sync {provider}
+                      {integrationStatus?.crm?.[provider]?.status ? `Connected: ${provider}` : `Connect ${provider}`}
                     </button>
                   ))}
                 </div>
               </div>
 
+              <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-sm">
+                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Observability</h4>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Latency</p>
+                    <p className="text-lg font-black text-slate-800 mt-2">
+                      Avg {opsMetrics?.requests?.latency?.avg ?? 0} ms
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      P95 {opsMetrics?.requests?.latency?.p95 ?? 0} ms • Max {opsMetrics?.requests?.latency?.max ?? 0} ms
+                    </p>
+                  </div>
+                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Errors</p>
+                    <p className="text-lg font-black text-slate-800 mt-2">
+                      {opsMetrics?.requests?.errors ?? 0} errors
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Total {opsMetrics?.requests?.total ?? 0} requests
+                    </p>
+                  </div>
+                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Job Backlog</p>
+                    <p className="text-lg font-black text-slate-800 mt-2">
+                      {opsMetrics?.jobs?.pendingCount ?? 0} pending
+                    </p>
+                    <p className="text-[10px] text-slate-500 mt-1">
+                      Last run: {opsMetrics?.jobs?.lastRunAt ? new Date(opsMetrics.jobs.lastRunAt).toLocaleTimeString() : 'n/a'}
+                    </p>
+                  </div>
+                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Last Error</p>
+                    <p className="text-sm font-bold text-slate-700 mt-2 line-clamp-2">
+                      {opsMetrics?.jobs?.lastError || 'None'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={async () => {
+                    try {
+                      const res = await fetch('/api/metrics/summary');
+                      if (!res.ok) return;
+                      const data = await res.json();
+                      setOpsMetrics(data);
+                      addNotification('success', 'Metrics refreshed.');
+                    } catch {}
+                  }}
+                  className="mt-6 px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                >
+                  Refresh Metrics
+                </button>
+              </div>
+
               <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
                 <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Marketing Sync</h4>
-                <div className="flex gap-4 flex-wrap">
+                <div className="flex gap-3 flex-wrap">
                   {['hubspot', 'mailchimp', 'marketo'].map((provider) => (
                     <button
                       key={provider}
-                      onClick={async () => {
-                        await connectMarketingProvider(provider, { apiKey: 'REPLACE_ME' });
-                        await syncMarketingProvider(provider);
+                      onClick={() => {
+                        setMarketingProvider(provider);
+                        setShowMarketingModal(true);
                       }}
-                      className="px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
+                      className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
                     >
-                      Sync {provider}
+                      Connect {provider}
                     </button>
                   ))}
                 </div>
@@ -696,6 +801,15 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                         className="h-4 w-4 rounded border-slate-300"
                       />
                     </label>
+                    <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      Recording Access
+                      <input
+                        type="checkbox"
+                        checked={Boolean(member.canAccessRecordings)}
+                        onChange={(e) => handleUpdateMember(member.id, { canAccessRecordings: e.target.checked })}
+                        className="h-4 w-4 rounded border-slate-300"
+                      />
+                    </label>
                     <div>
                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Allowed Numbers (one per line)</label>
                       <textarea
@@ -715,35 +829,50 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
 
         {/* BILLING TAB */}
         {activeTab === 'billing' && (
-          <div className="max-w-5xl space-y-12 animate-in slide-in-from-right duration-500">
-             <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
-                <div className="bg-brand-900 rounded-[3rem] p-12 text-white shadow-2xl relative overflow-hidden"><div className="absolute top-0 right-0 w-64 h-64 bg-white/5 blur-[80px] -mr-32 -mt-32"></div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-300 mb-10">Wallet</p><div className="flex items-end gap-2 mb-12"><span className="text-6xl font-black italic tracking-tighter">${settings.subscription.balance.toFixed(2)}</span><span className="text-brand-300 font-bold uppercase text-[10px] mb-4">USD</span></div><button onClick={() => setShowWalletModal(true)} className="w-full py-6 bg-white text-brand-900 rounded-3xl text-[11px] font-black uppercase tracking-widest shadow-xl hover:bg-brand-50 transition-all">Add Credits</button></div>
-                <div className="bg-white rounded-[3rem] p-12 border border-slate-200 shadow-xl flex flex-col justify-between"><div><p className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-8">Subscription</p><h3 className="text-4xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">{settings.subscription.plan} Plan</h3><p className="text-sm font-medium text-slate-500">Billed monthly â€¢ Next cycle: {settings.subscription.nextBillingDate}</p></div><button onClick={() => setShowScaleModal(true)} className="mt-8 py-5 border-2 border-slate-100 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest hover:border-slate-200 transition-all flex items-center justify-center gap-2"><Zap size={14} className="text-brand-600"/> Scale Plan</button></div>
+          <div className="max-w-5xl space-y-8 animate-in slide-in-from-right duration-500">
+             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="bg-brand-900 rounded-[2.2rem] p-8 text-white shadow-xl relative overflow-hidden">
+                  <div className="absolute top-0 right-0 w-48 h-48 bg-white/5 blur-[60px] -mr-24 -mt-24"></div>
+                  <p className="text-[9px] font-black uppercase tracking-[0.3em] text-brand-300 mb-6">Wallet</p>
+                  <div className="flex items-end gap-2 mb-8">
+                    <span className="text-4xl font-black italic tracking-tighter">${settings.subscription.balance.toFixed(2)}</span>
+                    <span className="text-brand-300 font-bold uppercase text-[9px] mb-2">USD</span>
+                  </div>
+                  <button onClick={() => setShowWalletModal(true)} className="w-full py-4 bg-white text-brand-900 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg hover:bg-brand-50 transition-all">Add Credits</button>
+                </div>
+                <div className="bg-white rounded-[2.2rem] p-8 border border-slate-200 shadow-lg flex flex-col justify-between">
+                  <div>
+                    <p className="text-[9px] font-black uppercase tracking-[0.3em] text-slate-400 mb-6">Subscription</p>
+                    <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">{settings.subscription.plan} Plan</h3>
+                    <p className="text-xs font-medium text-slate-500">Billed monthly • Next cycle: {settings.subscription.nextBillingDate}</p>
+                  </div>
+                  <button onClick={() => setShowScaleModal(true)} className="mt-6 py-4 border-2 border-slate-100 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:border-slate-200 transition-all flex items-center justify-center gap-2"><Zap size={14} className="text-brand-600"/> Scale Plan</button>
+                </div>
              </div>
           </div>
         )}
 
         {/* Exports (ANATOMY) - RESTORED & AMPLIFIED */}
         {activeTab === 'anatomy' && (
-           <div className="max-w-5xl space-y-12 animate-in slide-in-from-right duration-500 pb-20">
+           <div className="max-w-5xl space-y-8 animate-in slide-in-from-right duration-500 pb-16">
               {/* Main Control Panel */}
-              <section className="bg-white rounded-[4rem] p-12 border border-slate-200 shadow-xl relative overflow-hidden">
-                 <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/[0.03] blur-[120px] -mr-64 -mt-64"></div>
-                 <div className="flex justify-between items-start mb-16 relative z-10">
+              <section className="bg-white rounded-[2.8rem] p-8 border border-slate-200 shadow-lg relative overflow-hidden">
+                 <div className="absolute top-0 right-0 w-[360px] h-[360px] bg-brand-500/[0.03] blur-[100px] -mr-40 -mt-40"></div>
+                 <div className="flex flex-col lg:flex-row lg:justify-between lg:items-start mb-10 relative z-10 gap-6">
                    <div className="flex items-center gap-8">
-                     <div className="w-24 h-24 bg-brand-600 rounded-[2.5rem] flex items-center justify-center text-white shadow-2xl shadow-brand-500/40 transition-transform hover:scale-105">
-                       <Share size={48}/>
+                     <div className="w-16 h-16 bg-brand-600 rounded-[1.6rem] flex items-center justify-center text-white shadow-xl shadow-brand-500/30 transition-transform hover:scale-105">
+                       <Share size={32}/>
                      </div>
                      <div>
-                       <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Data Export</h3>
-                       <p className="text-sm font-black text-slate-400 uppercase tracking-[0.4em] mt-2 italic">Download your data</p>
+                       <h3 className="text-3xl font-black text-slate-800 uppercase italic tracking-tighter">Data Export</h3>
+                       <p className="text-[10px] font-black text-slate-400 uppercase tracking-[0.4em] mt-2 italic">Download your data</p>
                      </div>
                    </div>
-                   <div className="flex gap-4">
+                   <div className="flex gap-3 flex-wrap">
                       <button 
                         onClick={handleScanIntegrity} 
                         disabled={isScanning}
-                        className="px-8 py-5 bg-slate-50 border border-slate-200 text-slate-600 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-3 hover:bg-slate-100 transition-all shadow-sm"
+                        className="px-6 py-3 bg-slate-50 border border-slate-200 text-slate-600 rounded-[1.2rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-3 hover:bg-slate-100 transition-all shadow-sm"
                       >
                         {isScanning ? <RefreshCw size={16} className="animate-spin"/> : <Search size={16}/>}
                         {isScanning ? 'Scanning...' : 'Scan Integrity'}
@@ -751,7 +880,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                       <button 
                         onClick={handleExportData} 
                         disabled={isExporting || scanResults.status === 'idle'}
-                        className={`px-12 py-5 bg-slate-900 text-white rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-4 hover:bg-slate-800 transition-all shadow-2xl ${scanResults.status === 'idle' ? 'opacity-30 cursor-not-allowed' : ''}`}
+                        className={`px-8 py-3 bg-slate-900 text-white rounded-[1.2rem] text-[10px] font-black uppercase tracking-widest flex items-center gap-3 hover:bg-slate-800 transition-all shadow-xl ${scanResults.status === 'idle' ? 'opacity-30 cursor-not-allowed' : ''}`}
                       >
                         {isExporting ? <RefreshCw size={20} className="animate-spin"/> : <FileJson size={20}/>}
                         {isExporting ? 'Preparing...' : 'Export Data'}
@@ -761,7 +890,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
 
                  {/* Scan Diagnostic Feedback */}
                  {scanResults.status !== 'idle' && (
-                   <div className={`mb-12 p-8 rounded-[2.5rem] border-2 animate-in slide-in-from-top-4 ${scanResults.status === 'clean' ? 'bg-green-50 border-green-100' : 'bg-amber-50 border-amber-100'}`}>
+                   <div className={`mb-8 p-6 rounded-[2rem] border-2 animate-in slide-in-from-top-4 ${scanResults.status === 'clean' ? 'bg-green-50 border-green-100' : 'bg-amber-50 border-amber-100'}`}>
                       <div className="flex items-center gap-4 mb-4">
                         {scanResults.status === 'clean' ? <CheckCircle className="text-green-500" size={24}/> : <ShieldAlert className="text-amber-500" size={24}/>}
                         <h4 className={`text-sm font-black uppercase tracking-widest ${scanResults.status === 'clean' ? 'text-green-800' : 'text-amber-800'}`}>
@@ -781,21 +910,33 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
 
                  {/* Bundle History Log */}
                  <div className="relative z-10">
-                    <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-slate-400 mb-8 flex items-center gap-2"><History size={16}/> Export History</h4>
+                    <h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-400 mb-6 flex items-center gap-2"><History size={16}/> Export History</h4>
                     <div className="space-y-4">
                        {exportHistory.length > 0 ? exportHistory.map(exp => (
-                         <div key={exp.id} className="bg-slate-50 p-6 rounded-[2rem] border border-slate-100 flex items-center justify-between group hover:border-brand-500/20 transition-all">
+                         <div key={exp.id} className="bg-slate-50 p-5 rounded-[1.6rem] border border-slate-100 flex items-center justify-between group hover:border-brand-500/20 transition-all">
                             <div className="flex items-center gap-6">
-                               <div className="w-12 h-12 bg-white rounded-2xl flex items-center justify-center text-slate-400 border border-slate-100 group-hover:text-brand-600 group-hover:bg-brand-50"><FileJson size={20}/></div>
+                               <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-slate-400 border border-slate-100 group-hover:text-brand-600 group-hover:bg-brand-50"><FileJson size={18}/></div>
                                <div><p className="text-xs font-black uppercase text-slate-800 tracking-widest">CONNECT-AI-BUNDLE-{exp.id.split('_')[1].slice(-4)}</p><p className="text-[10px] font-bold text-slate-400 mt-1 uppercase italic">{exp.timestamp} â€¢ {exp.size}</p></div>
                             </div>
                             <div className="flex items-center gap-6">
                                <span className="text-[9px] font-black uppercase px-3 py-1 bg-green-100 text-green-700 rounded-lg">{exp.status}</span>
-                               <button className="text-slate-300 hover:text-brand-600 transition-all"><Download size={18}/></button>
+                               <button
+                                 onClick={() => {
+                                   const payload = exportPayloads[exp.id];
+                                   if (payload) {
+                                     downloadJson(payload, `connect-ai-bundle-${exp.id.slice(-6)}.json`);
+                                   } else {
+                                     addNotification('error', 'Export payload expired. Run a new export.');
+                                   }
+                                 }}
+                                 className="text-slate-300 hover:text-brand-600 transition-all"
+                               >
+                                 <Download size={18}/>
+                               </button>
                             </div>
                          </div>
                        )) : (
-                         <div className="py-20 flex flex-col items-center justify-center opacity-10 grayscale italic">
+                         <div className="py-12 flex flex-col items-center justify-center opacity-10 grayscale italic">
                             <Terminal size={48} className="mb-4"/>
                             <p className="text-[10px] font-black uppercase tracking-[0.5em]">No exports yet</p>
                          </div>
@@ -805,12 +946,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
               </section>
 
               {/* Production Guardrails */}
-              <section className="bg-brand-900 rounded-[4rem] p-12 text-white shadow-2xl overflow-hidden relative">
+              <section className="bg-brand-900 rounded-[2.2rem] p-6 text-white shadow-lg overflow-hidden relative">
                  <div className="absolute bottom-0 right-0 w-80 h-80 bg-white/5 blur-[80px] -mb-40 -mr-40"></div>
-                 <div className="flex justify-between items-center mb-12">
+                 <div className="flex justify-between items-center mb-6">
                    <div>
-                      <h3 className="text-4xl font-black italic uppercase tracking-tighter">Production Guardrails</h3>
-                      <p className="text-xs font-black text-brand-300 uppercase tracking-[0.3em] mt-2 italic">Environment settings</p>
+                      <h3 className="text-2xl font-black italic uppercase tracking-tighter">Production Guardrails</h3>
+                      <p className="text-[9px] font-black text-brand-300 uppercase tracking-[0.3em] mt-2 italic">Environment settings</p>
                    </div>
                    <div className="px-6 py-2 bg-white/10 rounded-full border border-white/10 flex items-center gap-3">
                       <div className={`w-2 h-2 rounded-full ${isDemoMode ? 'bg-amber-500 animate-pulse' : 'bg-green-500'}`}></div>
@@ -818,20 +959,20 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                    </div>
                  </div>
                  
-                 <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {[
                       { title: 'API Authentication', desc: 'Status for Gemini and Firebase.', status: isDemoMode ? 'PENDING' : 'SECURE', icon: Key },
                       { title: 'Multi-Tenant Isolation', desc: 'Firestore rules admitting only authorized node access.', status: 'ACTIVE', icon: Lock },
                       { title: 'Auto-Topup Logic', desc: 'Threshold-based wallet injection to prevent cluster death.', status: settings.subscription.autoTopUp ? 'ACTIVE' : 'INACTIVE', icon: Zap },
                       { title: 'PII Scrubbing', desc: 'Redacting sensitive metadata during neural admission.', status: settings.compliance.anonymizePii ? 'ACTIVE' : 'IDLE', icon: Shield }
                     ].map(step => (
-                      <div key={step.title} className="p-10 bg-white/5 border border-white/10 rounded-[2.5rem] hover:bg-white/10 transition-all relative group overflow-hidden">
+                      <div key={step.title} className="p-6 bg-white/5 border border-white/10 rounded-[2rem] hover:bg-white/10 transition-all relative group overflow-hidden">
                          <div className="flex justify-between items-start relative z-10">
                             <div className="flex items-center gap-6">
                                <div className="p-4 bg-brand-500/20 rounded-2xl text-brand-400 group-hover:text-white transition-colors"><step.icon size={24}/></div>
                                <div>
-                                  <h4 className="font-black uppercase text-brand-400 text-sm mb-2 tracking-widest flex items-center gap-2">{step.title}</h4>
-                                  <p className="text-[11px] text-brand-100 font-medium leading-relaxed max-w-[200px]">{step.desc}</p>
+                                  <h4 className="font-black uppercase text-brand-400 text-xs mb-2 tracking-widest flex items-center gap-2">{step.title}</h4>
+                                  <p className="text-[10px] text-brand-100 font-medium leading-relaxed max-w-[200px]">{step.desc}</p>
                                </div>
                             </div>
                             <span className={`text-[9px] font-black uppercase tracking-widest px-3 py-1 rounded-lg ${step.status === 'SECURE' || step.status === 'ACTIVE' ? 'bg-green-500/20 text-green-400' : 'bg-amber-500/20 text-amber-400'}`}>
@@ -845,6 +986,109 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
            </div>
         )}
       </div>
+
+      {showCrmModal && crmProvider && (
+        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
+          <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg p-10 border border-white/20 relative overflow-hidden">
+            <button onClick={() => setShowCrmModal(false)} className="absolute top-6 right-6 text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Connect {crmProvider}</h3>
+            <div className="space-y-5">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">API Key</label>
+                <input
+                  className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                  value={crmCredentials.apiKey}
+                  onChange={(e) => setCrmCredentials({ ...crmCredentials, apiKey: e.target.value })}
+                  placeholder="Paste API key"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Endpoint (optional)</label>
+                <input
+                  className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                  value={crmCredentials.endpoint}
+                  onChange={(e) => setCrmCredentials({ ...crmCredentials, endpoint: e.target.value })}
+                  placeholder="https://api.your-crm.com"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Client ID (optional)</label>
+                <input
+                  className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                  value={crmCredentials.clientId}
+                  onChange={(e) => setCrmCredentials({ ...crmCredentials, clientId: e.target.value })}
+                  placeholder="Client ID"
+                />
+              </div>
+              <button
+                onClick={async () => {
+                  try {
+                    await connectCrmProvider(crmProvider as any, crmCredentials);
+                    await syncCrmProvider(crmProvider as any);
+                    const status = await getIntegrationsStatus();
+                    setIntegrationStatus(status);
+                    addNotification('success', `${crmProvider} connected and syncing.`);
+                    setShowCrmModal(false);
+                    setCrmCredentials({ apiKey: '', endpoint: '', clientId: '' });
+                  } catch {
+                    addNotification('error', `Failed to connect ${crmProvider}.`);
+                  }
+                }}
+                className="w-full py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest"
+              >
+                Connect & Sync
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMarketingModal && marketingProvider && (
+        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
+          <div className="bg-white rounded-[3rem] shadow-2xl w-full max-w-lg p-10 border border-white/20 relative overflow-hidden">
+            <button onClick={() => setShowMarketingModal(false)} className="absolute top-6 right-6 text-slate-400 hover:text-slate-600"><X size={18} /></button>
+            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Connect {marketingProvider}</h3>
+            <div className="space-y-5">
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">API Key</label>
+                <input
+                  className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                  value={marketingCredentials.apiKey}
+                  onChange={(e) => setMarketingCredentials({ ...marketingCredentials, apiKey: e.target.value })}
+                  placeholder="Paste API key"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Endpoint (optional)</label>
+                <input
+                  className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                  value={marketingCredentials.endpoint}
+                  onChange={(e) => setMarketingCredentials({ ...marketingCredentials, endpoint: e.target.value })}
+                  placeholder="https://api.your-marketing.com"
+                />
+              </div>
+              <button
+                onClick={async () => {
+                  try {
+                    await connectMarketingProvider(marketingProvider, marketingCredentials);
+                    await syncMarketingProvider(marketingProvider);
+                    const status = await getIntegrationsStatus();
+                    setIntegrationStatus(status);
+                    addNotification('success', `${marketingProvider} connected and syncing.`);
+                    setShowMarketingModal(false);
+                    setMarketingCredentials({ apiKey: '', endpoint: '' });
+                  } catch {
+                    addNotification('error', `Failed to connect ${marketingProvider}.`);
+                  }
+                }}
+                className="w-full py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest"
+              >
+                Connect & Sync
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* INVITE MODAL */}
       {showInviteModal && (

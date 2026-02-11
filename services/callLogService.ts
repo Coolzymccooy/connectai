@@ -27,6 +27,10 @@ export const fetchCallLogs = async (filters: CallLogFilters = {}): Promise<Call[
   return apiGet<Call[]>(`/api/calls${query}`);
 };
 
+export const fetchCallById = async (id: string): Promise<Call> => {
+  return apiGet<Call>(`/api/calls/${encodeURIComponent(id)}`);
+};
+
 export const createCall = async (call: Partial<Call>): Promise<Call> => {
   return apiPost<Call>('/api/calls', call);
 };

@@ -51,6 +51,8 @@ export interface Call {
   direction: CallDirection;
   customerName: string;
   phoneNumber: string;
+  customerEmail?: string;
+  customerExtension?: string;
   queue: string;
   startTime: number;
   durationSeconds: number;
@@ -61,6 +63,8 @@ export interface Call {
   crmData?: CrmData;
   agentId?: string;
   agentName?: string;
+  agentEmail?: string;
+  agentExtension?: string;
   targetAgentId?: string;
   participants?: string[];
   extension?: string;
@@ -78,6 +82,8 @@ export interface Call {
   expiresAt?: number;
   piiRedacted?: boolean;
   recordingUrl?: string;
+  recordingId?: string;
+  conferenceName?: string;
 }
 
 export type RsvpStatus = 'pending' | 'accepted' | 'declined' | 'forwarded';
@@ -138,6 +144,7 @@ export interface AppSettings {
       lastSync?: number;
       logs: IntegrationLog[];
     };
+    primaryCrm?: 'HubSpot' | 'Salesforce' | 'Pipedrive';
     webhooks: WebhookConfig[];
     schemaMappings: SchemaMapping[];
     pipedrive: boolean;
@@ -191,6 +198,43 @@ export interface User {
   currentPresence?: AgentStatus;
   allowedNumbers?: string[];
   restrictOutboundNumbers?: boolean;
+  canAccessRecordings?: boolean;
+}
+
+export interface AudienceFilter {
+  industry?: string;
+  lifecycleStage?: string;
+  region?: string;
+  minEngagement?: number;
+  consentRequired?: boolean;
+}
+
+export interface CampaignChannelConfig {
+  email: boolean;
+  sms: boolean;
+  whatsapp: boolean;
+}
+
+export interface JourneyStep {
+  id: string;
+  type: 'send_email' | 'send_sms' | 'send_whatsapp' | 'wait' | 'branch' | 'notify_sales' | 'update_field';
+  label: string;
+  delayHours?: number;
+}
+
+export interface CampaignMetrics {
+  sent: number;
+  delivered: number;
+  opened: number;
+  clicked: number;
+  unsubscribed: number;
+}
+
+export interface CampaignContent {
+  emailSubject?: string;
+  emailBody?: string;
+  smsBody?: string;
+  whatsappBody?: string;
 }
 
 export interface Campaign {
@@ -203,6 +247,11 @@ export interface Campaign {
   successCount: number;
   aiPersona: string;
   hourlyStats: { hour: string; value: number }[];
+  audience?: AudienceFilter;
+  channels?: CampaignChannelConfig;
+  journey?: JourneyStep[];
+  metrics?: CampaignMetrics;
+  content?: CampaignContent;
 }
 
 export type ChannelType = 'sms' | 'whatsapp' | 'call' | 'email' | 'chat';
@@ -228,6 +277,10 @@ export interface Conversation {
   status: 'open' | 'closed';
   teammateId?: string;
   participantIds?: string[];
+  consentStatus?: 'requested' | 'granted' | 'opted_out';
+  consentChannel?: 'whatsapp' | 'sms' | 'voice' | 'chat';
+  consentRequestedAt?: number;
+  consentGivenAt?: number;
 }
 
 export interface Lead {
@@ -235,6 +288,8 @@ export interface Lead {
   name: string;
   company: string;
   phone: string;
+  email?: string;
+  industry?: string;
   status: string;
   notes?: string;
 }

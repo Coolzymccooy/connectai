@@ -3,6 +3,8 @@ self.addEventListener('install', (e) => {
     caches.open('connectai-store').then((cache) => cache.addAll([
       '/',
       '/index.html',
+      '/manifest.json',
+      '/favicon.svg'
     ]))
   );
 });

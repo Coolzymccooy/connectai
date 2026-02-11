@@ -36,9 +36,14 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
   const [liveHistory, setLiveHistory] = useState<Call[]>([]);
   const [ingestionLogs, setIngestionLogs] = useState<string[]>([]);
   const [monitoredCallId, setMonitoredCallId] = useState<string | null>(null);
+  const [monitorSession, setMonitorSession] = useState<{ participantSid?: string; callId?: string } | null>(null);
+  const [monitoringBusy, setMonitoringBusy] = useState(false);
+
+  const simulationEnabled = Boolean(import.meta.env.VITE_DEV_SIMULATION);
 
   // Simulation: Background Ingestion for Call Center
   useEffect(() => {
+    if (!simulationEnabled) return;
     const interval = setInterval(() => {
       const providers = ['Genesys', 'Twilio', 'Five9', 'AmazonConnect'];
       const prov = providers[Math.floor(Math.random() * providers.length)];
@@ -70,7 +75,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       setIngestionLogs(prev => [`[${new Date().toLocaleTimeString()}] Admitted record from ${prov}`, ...prev].slice(0, 6));
     }, 12000); 
     return () => clearInterval(interval);
-  }, []);
+  }, [simulationEnabled]);
 
   // Analytics: Chart Data Hydration
   const chartData = useMemo(() => {
@@ -116,6 +121,36 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     return calls.find(c => c.id === monitoredCallId) || (activeCall?.id === monitoredCallId ? activeCall : null);
   }, [monitoredCallId, calls, activeCall]);
 
+  const [monitorStatus, setMonitorStatus] = useState<'idle' | 'connecting' | 'active' | 'error'>('idle');
+
+  useEffect(() => {
+    if (!monitorSession?.callId) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch('/api/supervisor/monitor/status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ participantSid: monitorSession?.participantSid, callId: monitorSession?.callId }),
+        });
+        if (!res.ok) throw new Error('status failed');
+        const data = await res.json();
+        if (!cancelled) {
+          setMonitorStatus(data.active ? 'active' : 'connecting');
+        }
+      } catch {
+        if (!cancelled) setMonitorStatus('error');
+      }
+    };
+    setMonitorStatus('connecting');
+    const id = window.setInterval(poll, 5000);
+    poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [monitorSession?.callId, monitorSession?.participantSid]);
+
   const filteredHistory = useMemo(() => {
     let list = [...calls, ...liveHistory];
     if (filterSource === 'native') list = list.filter(c => !c.isMigrated);
@@ -129,15 +164,54 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     return list.sort((a, b) => b.startTime - a.startTime);
   }, [calls, liveHistory, filterSource, searchQuery]);
 
+  const liveCallList = useMemo(() => {
+    return globalActiveCalls
+      .map(call => ({
+        ...call,
+        duration: Math.max(0, Math.floor((Date.now() - call.startTime) / 1000)),
+      }))
+      .sort((a, b) => b.startTime - a.startTime);
+  }, [globalActiveCalls]);
+
   const handleMonitor = (agentId: string, mode: 'listening' | 'whispering') => {
     const call = agentActivityMap[agentId];
     if (!call) {
       addNotification?.('error', 'Action failed: Agent is currently offline.');
       return;
     }
-    setMonitoredCallId(call.id);
-    setMonitoringMode(prev => ({ ...prev, [agentId]: mode }));
-    addNotification?.('info', `Now monitoring ${call.agentName}.`);
+    setMonitoringBusy(true);
+    fetch('/api/supervisor/monitor', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ callId: call.id, mode: mode === 'whispering' ? 'whisper' : 'listen' }),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error((await res.json()).error || 'monitor failed');
+        const data = await res.json();
+        setMonitoredCallId(call.id);
+        setMonitoringMode(prev => ({ ...prev, [agentId]: mode }));
+        setMonitorSession({ participantSid: data.participantSid, callId: call.id });
+        addNotification?.('info', `Now monitoring ${call.agentName}.`);
+      })
+      .catch((err) => addNotification?.('error', err?.message || 'Monitor failed'))
+      .finally(() => setMonitoringBusy(false));
+  };
+
+  const stopMonitoring = async () => {
+    if (!monitorSession?.callId && !monitorSession?.participantSid) return;
+    setMonitoringBusy(true);
+    try {
+      await fetch('/api/supervisor/monitor/stop', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ participantSid: monitorSession.participantSid, callId: monitorSession.callId }),
+      });
+      setMonitoredCallId(null);
+      setMonitorSession(null);
+      addNotification?.('info', 'Monitoring ended.');
+    } finally {
+      setMonitoringBusy(false);
+    }
   };
 
   const handleRunRiskAudit = async () => {
@@ -148,7 +222,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     await new Promise(r => setTimeout(r, 2500));
     const newRisks: Record<string, string> = {};
     
-    const lowSentimentCalls = [...calls, ...liveHistory].filter(c => (c.liveSentiment || 100) < 45 || (c.analysis?.sentimentScore || 100) < 45);
+    const lowSentimentCalls = calls.filter(c => (c.liveSentiment || 100) < 45 || (c.analysis?.sentimentScore || 100) < 45);
     
     lowSentimentCalls.forEach(c => {
       if (c.agentId) {
@@ -156,16 +230,9 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       }
     });
 
-    if (Object.keys(newRisks).length === 0) {
-      const agents = team.filter(u => u.role === 'AGENT');
-      if (agents.length > 0) {
-        newRisks[agents[0].id] = "Heuristic Threat: Potential churn detected via behavioral sentiment flux.";
-      }
-    }
-
     setDetectedRisks(newRisks);
     setIsAuditing(false);
-    addNotification?.('error', `Risk scan complete: ${Object.keys(newRisks).length} issues found.`);
+    addNotification?.('info', `Risk scan complete: ${Object.keys(newRisks).length} issues found.`);
     setActiveTab('alerts');
   };
 
@@ -209,7 +276,57 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       <div className="flex-1 overflow-y-auto pr-4 scrollbar-hide relative z-10">
         {/* LIVE FLOOR */}
         {activeTab === 'floor' && (
-           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-10 animate-in fade-in duration-500 pb-12 md:pb-20">
+           <div className="space-y-10 animate-in fade-in duration-500 pb-12 md:pb-20">
+              <div className="bg-[#12161f] rounded-[3rem] border border-white/5 p-6 md:p-10">
+                <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
+                  <div>
+                    <p className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-500">Live Floor</p>
+                    <h3 className="text-3xl font-black text-white italic tracking-tighter mt-3">Active Calls: {liveCallList.length}</h3>
+                    <p className="text-[10px] font-black uppercase tracking-[0.3em] text-brand-400 mt-2">Select a call to monitor</p>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full lg:w-[520px]">
+                    {liveCallList.length === 0 && (
+                      <div className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-600">No active calls</div>
+                    )}
+                    {liveCallList.slice(0, 4).map(call => (
+                      <div key={call.id} className="p-4 rounded-2xl border border-white/10 bg-white/5 flex items-center justify-between">
+                        <div>
+                          <p className="text-xs font-black text-white uppercase">{call.agentName || call.customerName}</p>
+                          <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{call.queue} • {Math.floor(call.duration / 60)}m {call.duration % 60}s</p>
+                        </div>
+                        <button
+                          onClick={() => {
+                            if (monitoredCallId === call.id) {
+                              stopMonitoring();
+                              return;
+                            }
+                            setMonitoringBusy(true);
+                            fetch('/api/supervisor/monitor', {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({ callId: call.id, mode: 'listen' }),
+                            })
+                              .then(async (res) => {
+                                if (!res.ok) throw new Error((await res.json()).error || 'monitor failed');
+                                const data = await res.json();
+                                setMonitoredCallId(call.id);
+                                setMonitorSession({ participantSid: data.participantSid, callId: call.id });
+                                addNotification?.('info', `Monitoring ${call.agentName || call.customerName}.`);
+                              })
+                              .catch((err) => addNotification?.('error', err?.message || 'Monitor failed'))
+                              .finally(() => setMonitoringBusy(false));
+                          }}
+                          disabled={monitoringBusy}
+                          className={`px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest ${monitoredCallId === call.id ? 'bg-brand-500 text-white' : 'bg-white/10 text-slate-300 hover:bg-white/20'}`}
+                        >
+                          {monitoredCallId === call.id ? 'Stop' : 'Listen'}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-10">
               {team?.filter(u => u.role === 'AGENT').map(agent => {
                 const liveCall = agentActivityMap[agent.id];
                 const isLive = !!liveCall;
@@ -249,8 +366,8 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                                <div className="absolute bottom-2 left-6 text-[8px] font-black text-brand-500/40 uppercase tracking-[0.2em]">{isPeer ? 'Remote Telemetry' : 'Local Link'}</div>
                             </div>
                             <div className="flex gap-4">
-                               <button onClick={() => handleMonitor(agent.id, 'listening')} className={`flex-1 py-5 rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all border flex items-center justify-center gap-2 ${monitoredCallId === liveCall.id ? 'bg-brand-500 text-white border-brand-500 shadow-xl' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'}`}><Headset size={14}/> {monitoredCallId === liveCall.id ? 'Monitoring' : 'Monitor'}</button>
-                               <button onClick={() => handleMonitor(agent.id, 'whispering')} className={`flex-1 py-5 rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all border ${mode === 'whispering' ? 'bg-brand-600 text-white border-brand-600 shadow-xl' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'}`}>Whisper</button>
+                               <button onClick={() => handleMonitor(agent.id, 'listening')} disabled={monitoringBusy} className={`flex-1 py-5 rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all border flex items-center justify-center gap-2 ${monitoredCallId === liveCall.id ? 'bg-brand-500 text-white border-brand-500 shadow-xl' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${monitoringBusy ? 'opacity-60 cursor-not-allowed' : ''}`}><Headset size={14}/> {monitoredCallId === liveCall.id ? 'Monitoring' : 'Monitor'}</button>
+                               <button onClick={() => handleMonitor(agent.id, 'whispering')} disabled={monitoringBusy} className={`flex-1 py-5 rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all border ${mode === 'whispering' ? 'bg-brand-600 text-white border-brand-600 shadow-xl' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${monitoringBusy ? 'opacity-60 cursor-not-allowed' : ''}`}>Whisper</button>
                             </div>
                          </div>
                       ) : (
@@ -262,6 +379,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                    </div>
                 );
               })}
+              </div>
            </div>
         )}
 
@@ -422,9 +540,12 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
         <div className="fixed top-0 right-0 w-full md:w-[450px] h-full bg-[#0b0e14] border-l border-white/10 shadow-[-20px_0_50px_rgba(0,0,0,0.5)] z-[100] flex flex-col animate-in slide-in-from-right duration-500">
            <div className="p-6 md:p-10 bg-brand-600 text-white flex justify-between items-center relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 blur-2xl -mr-16 -mt-16"></div>
-              <div className="relative z-10">
+                 <div className="relative z-10">
                  <p className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-200 mb-1">Monitoring Remote Peer</p>
                  <h3 className="text-3xl font-black italic uppercase tracking-tighter">{monitoredCall.agentName || monitoredCall.customerName}</h3>
+                 <div className="mt-2 text-[10px] font-black uppercase tracking-[0.3em] text-brand-200/80">
+                   Customer: {monitoredCall.customerName}
+                 </div>
               </div>
               <button onClick={() => setMonitoredCallId(null)} className="relative z-10 p-3 bg-white/10 hover:bg-white/20 rounded-2xl transition-all"><X size={24}/></button>
            </div>
@@ -432,14 +553,18 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
            <div className="p-6 md:p-10 border-b border-white/5 bg-white/[0.02]">
               <div className="flex justify-between items-center mb-6">
                  <div>
-                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target agent</p>
-                    <p className="text-xl font-black text-white italic tracking-tight">{monitoredCall.customerName}</p>
-                 </div>
-                 <div className="text-right">
-                    <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Sentiment Flux</p>
-                    <p className="text-3xl font-black text-brand-400 italic">{monitoredCall.liveSentiment || monitoredCall.analysis?.sentimentScore || 50}%</p>
-                 </div>
+                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target agent</p>
+                 <p className="text-xl font-black text-white italic tracking-tight">{monitoredCall.agentName || 'Unknown agent'}</p>
               </div>
+              <div className="text-right">
+                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Sentiment Flux</p>
+                 <p className="text-3xl font-black text-brand-400 italic">{monitoredCall.liveSentiment || monitoredCall.analysis?.sentimentScore || 50}%</p>
+              </div>
+           </div>
+           <div className="flex items-center gap-2 mt-4">
+             <div className={`w-2 h-2 rounded-full ${monitorStatus === 'active' ? 'bg-green-500 animate-pulse' : monitorStatus === 'error' ? 'bg-red-500' : 'bg-amber-400 animate-pulse'}`}></div>
+             <p className="text-[9px] font-black uppercase tracking-[0.3em] text-brand-300">{monitorStatus === 'active' ? 'Monitoring Active' : monitorStatus === 'error' ? 'Monitor Error' : 'Connecting'}</p>
+           </div>
               <div className="flex items-center gap-2">
                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
                  <p className="text-[9px] font-black uppercase tracking-[0.3em] text-brand-400">Subscribed to Live Packet Stream</p>
@@ -464,9 +589,28 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
               )}
            </div>
            
-           <div className="p-6 md:p-8 bg-slate-900 border-t border-white/10 grid grid-cols-2 gap-4">
-              <button className="py-5 bg-white text-slate-900 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl">Join call</button>
-              <button onClick={() => setMonitoredCallId(null)} className="py-5 bg-white/5 text-white border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest">Terminate Link</button>
+           <div className="p-6 md:p-8 bg-slate-900 border-t border-white/10 grid grid-cols-3 gap-4">
+              <button
+                onClick={() => monitoredCall?.agentId && handleMonitor(monitoredCall.agentId, 'listening')}
+                disabled={monitoringBusy}
+                className="py-4 bg-white text-slate-900 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl disabled:opacity-60"
+              >
+                Join
+              </button>
+              <button
+                onClick={() => monitoredCall?.agentId && handleMonitor(monitoredCall.agentId, 'whispering')}
+                disabled={monitoringBusy}
+                className="py-4 bg-white/5 text-white border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest disabled:opacity-60"
+              >
+                Coach
+              </button>
+              <button
+                onClick={stopMonitoring}
+                disabled={monitoringBusy}
+                className="py-4 bg-red-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest disabled:opacity-60"
+              >
+                Break
+              </button>
            </div>
         </div>
       )}
