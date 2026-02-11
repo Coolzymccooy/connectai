@@ -1,6 +1,6 @@
 ﻿
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { LayoutDashboard, Phone, Settings, LogOut, Sparkles, Mic, PlayCircle, Bot, Shield, MessageSquare, Bell, X, CheckCircle, Info, AlertTriangle, Trash2, Mail, PhoneIncoming, FileText } from 'lucide-react';
+import { LayoutDashboard, Phone, Settings, LogOut, Sparkles, Mic, PlayCircle, Bot, Shield, MessageSquare, Bell, X, CheckCircle, Info, AlertTriangle, Trash2, Mail, PhoneIncoming, FileText, UserCheck, Loader2 } from 'lucide-react';
 import { Role, User, Call, CallStatus, AgentStatus, AppSettings, Notification, Lead, Campaign, Meeting, CallDirection } from './types';
 import { AgentConsole } from './components/AgentConsole';
 import { SupervisorDashboard } from './components/SupervisorDashboard';
@@ -27,7 +27,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   subscription: {
     plan: 'Growth', seats: 20, balance: 420.50, autoTopUp: true, nextBillingDate: 'Nov 01, 2025',
     usage: { aiTokens: 450000, aiTokenLimit: 1000000, voiceMinutes: 1250, voiceMinuteLimit: 5000 },
-    paymentMethod: 'Mastercard â€¢â€¢â€¢â€¢ 9921'
+    paymentMethod: 'Mastercard •••• 9921'
   },
   ivr: { phoneNumber: '+1 (555) 012-3456', welcomeMessage: 'Welcome to ConnectAI. For sales, press 1. For support, press 2.', options: [{ key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' }, { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' }] },
   voice: { allowedNumbers: [] },
@@ -105,11 +105,47 @@ const App: React.FC = () => {
   ]);
   const [isFirebaseConfigured, setIsFirebaseConfigured] = useState(false);
   const [authNotice, setAuthNotice] = useState<string | null>(null);
+  // Track verification state separate from User | null
+  const [isUnverified, setIsUnverified] = useState(false);
+  
   const mountedRef = useRef(true);
+  const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+
   const [route, setRoute] = useState(() => ({
     pathname: typeof window !== 'undefined' ? window.location.pathname : '/',
     hash: typeof window !== 'undefined' ? window.location.hash : ''
   }));
+
+  // Activity Tracking: 5 minutes idle -> AWAY
+  const resetIdleTimer = useCallback(() => {
+    if (!currentUser || activeCall) return;
+    
+    // If we were away, mark as available
+    if (agentStatus === AgentStatus.AWAY) {
+        setAgentStatus(AgentStatus.AVAILABLE);
+    }
+
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    
+    idleTimerRef.current = setTimeout(() => {
+        if (!activeCall && agentStatus !== AgentStatus.OFFLINE) {
+            setAgentStatus(AgentStatus.AWAY);
+        }
+    }, 5 * 60 * 1000); // 5 minutes
+  }, [currentUser, activeCall, agentStatus]);
+
+  useEffect(() => {
+    window.addEventListener('mousemove', resetIdleTimer);
+    window.addEventListener('keydown', resetIdleTimer);
+    window.addEventListener('click', resetIdleTimer);
+    return () => {
+        window.removeEventListener('mousemove', resetIdleTimer);
+        window.removeEventListener('keydown', resetIdleTimer);
+        window.removeEventListener('click', resetIdleTimer);
+        if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    };
+  }, [resetIdleTimer]);
+
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const handleRouteChange = () => {
@@ -132,22 +168,52 @@ const App: React.FC = () => {
   const isHashApp = hash.startsWith('#/app');
   const isLanding = !isHashApp && (pathname === '/' || pathname.startsWith('/landing'));
   const isAppRoute = isHashApp || pathname.startsWith('/app') || pathname.startsWith('/login');
+
   useEffect(() => {
+    let verificationPoller: NodeJS.Timeout;
+
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       if (!user) {
         localStorage.removeItem('connectai_auth_token');
         setCurrentUser(null);
+        setIsUnverified(false);
         return;
       }
+      
+      // Smart Verification Handling
       if (!user.emailVerified && user.providerData.some((p) => p.providerId === 'password')) {
-        setAuthNotice('Please verify your email before signing in. Check your inbox and spam folder.');
-        await signOut(auth);
+        setIsUnverified(true);
+        setAuthNotice('Verification Pending');
+        // Poll for verification status
+        verificationPoller = setInterval(async () => {
+            await user.reload();
+            if (user.emailVerified) {
+                clearInterval(verificationPoller);
+                setIsUnverified(false);
+                setAuthNotice(null);
+                // Trigger re-render/logic by forcing update or just letting effect run
+                // But onAuthStateChanged might not fire on reload alone, so we proceed manually:
+                finishLogin(user);
+            }
+        }, 3000);
         return;
       }
+
       if (user.emailVerified) {
+        setIsUnverified(false);
         localStorage.removeItem('connectai_pending_verification_email');
         setAuthNotice(null);
       }
+      
+      finishLogin(user);
+    });
+    return () => {
+        unsubscribe();
+        if (verificationPoller) clearInterval(verificationPoller);
+    };
+  }, [isFirebaseConfigured]);
+
+  const finishLogin = async (user: any) => {
       const storedRole = (localStorage.getItem(`connectai_role_${user.uid}`) as Role) || Role.AGENT;
       const roleTemplate = DEFAULT_SETTINGS.team.find(u => u.role === storedRole);
       const profile: User = {
@@ -167,9 +233,7 @@ const App: React.FC = () => {
       setView(storedRole === Role.SUPERVISOR ? 'supervisor' : storedRole === Role.ADMIN ? 'admin' : 'agent');
       if (storedRole === Role.AGENT) setAgentStatus(AgentStatus.AVAILABLE);
       if (isFirebaseConfigured) await dbService.saveUser(profile);
-    });
-    return () => unsubscribe();
-  }, [isFirebaseConfigured]);
+  };
 
   const persistCall = useCallback(async (call: Call) => {
     if (!isFirebaseConfigured) return;
@@ -569,6 +633,34 @@ const App: React.FC = () => {
   };
 
   if (isLanding) return <LandingPage />;
+  
+  // Handling Unverified Users smartly
+  if (isUnverified) {
+      return (
+        <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-6">
+            <div className="bg-white p-10 rounded-[2rem] shadow-xl text-center max-w-md w-full border border-slate-100">
+                <div className="w-16 h-16 bg-amber-50 text-amber-600 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <UserCheck size={32} />
+                </div>
+                <h2 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-4">Verify Your Identity</h2>
+                <p className="text-slate-500 mb-8 font-medium">We've sent a verification link to your email. Please check your inbox and click the link to activate your session.</p>
+                
+                <div className="flex items-center justify-center gap-3 text-brand-600 mb-8 animate-pulse">
+                    <Loader2 size={18} className="animate-spin" />
+                    <span className="text-xs font-black uppercase tracking-widest">Waiting for verification...</span>
+                </div>
+
+                <button onClick={() => window.location.reload()} className="w-full py-4 bg-slate-900 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg">
+                    I've Verified My Email
+                </button>
+                <button onClick={() => signOut(auth).then(() => { setIsUnverified(false); setCurrentUser(null); })} className="mt-4 text-slate-400 text-xs font-bold uppercase tracking-widest hover:text-slate-600">
+                    Sign Out
+                </button>
+            </div>
+        </div>
+      );
+  }
+
   if (!isAppRoute && !currentUser) return <LandingPage />;
   if (!currentUser) return <LoginScreen onLogin={handleLogin} externalMessage={authNotice} onClearExternalMessage={() => setAuthNotice(null)} />;
 
