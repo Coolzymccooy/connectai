@@ -53,9 +53,13 @@ const CallSchema = new mongoose.Schema({
   isRecording: Boolean,
   transcriptionEnabled: Boolean,
   recordingUrl: String,
+  recordingId: String,
   expiresAt: Number,
   piiRedacted: Boolean,
 }, baseOptions);
+CallSchema.index({ tenantId: 1, startTime: -1 });
+CallSchema.index({ tenantId: 1, agentId: 1, startTime: -1 });
+CallSchema.index({ tenantId: 1, externalId: 1 });
 
 const CampaignSchema = new mongoose.Schema({
   ...tenantField,
@@ -92,10 +96,13 @@ const RecordingSchema = new mongoose.Schema({
   mimeType: String,
   size: Number,
   storagePath: String,
+  storageProvider: String,
   createdBy: String,
   createdAt: { type: Number, default: () => Date.now() },
   expiresAt: Number,
 }, baseOptions);
+RecordingSchema.index({ tenantId: 1, createdAt: -1 });
+RecordingSchema.index({ tenantId: 1, callId: 1 });
 
 const SettingsSchema = new mongoose.Schema({
   ...tenantField,
@@ -117,6 +124,8 @@ const ConversationSchema = new mongoose.Schema({
   teammateId: String,
   participantIds: [String],
 }, baseOptions);
+ConversationSchema.index({ tenantId: 1, lastMessageTime: -1 });
+ConversationSchema.index({ tenantId: 1, participantIds: 1 });
 
 const MessageSchema = new mongoose.Schema({
   ...tenantField,
@@ -128,6 +137,7 @@ const MessageSchema = new mongoose.Schema({
   timestamp: { type: Number, default: () => Date.now() },
   attachments: [Object],
 }, baseOptions);
+MessageSchema.index({ tenantId: 1, conversationId: 1, timestamp: 1 });
 
 const TenantSchema = new mongoose.Schema({
   name: { type: String, required: true },

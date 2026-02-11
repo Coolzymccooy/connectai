@@ -5,6 +5,8 @@ import compression from 'compression';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import mongoose from 'mongoose';
+import http from 'http';
+import https from 'https';
 import { GoogleGenAI, Type } from '@google/genai';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -16,6 +18,9 @@ import { globalQueue } from './services/queueManager.js';
 import { startDialer } from './services/dialerEngine.js';
 import { AuditLog } from './models/AuditLog.js';
 import { User, Call, Campaign, Disposition, Recording, Setting, Conversation, Message, Tenant, Job } from './models/index.js';
+import { isStorageEnabled, uploadRecordingBuffer, downloadRecordingBuffer } from './services/storageService.js';
+import { sendWhatsAppMessage } from './services/termiiService.js';
+import { getFirestore } from './services/firebaseAdminService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -28,10 +33,17 @@ if (process.env.TWILIO_ACCOUNT_SID) {
 
 // --- DB CONNECTION ---
 if (process.env.MONGO_URI) {
-  mongoose.connect(process.env.MONGO_URI)
+  mongoose.connect(process.env.MONGO_URI, {
+    maxPoolSize: Number(process.env.MONGO_MAX_POOL_SIZE || 20),
+    minPoolSize: Number(process.env.MONGO_MIN_POOL_SIZE || 2),
+  })
     .then(() => console.log('✅ MongoDB Connected'))
     .catch(err => console.error('❌ DB Error:', err));
 }
+
+const maxSockets = Number(process.env.HTTP_MAX_SOCKETS || 128);
+http.globalAgent.maxSockets = maxSockets;
+https.globalAgent.maxSockets = maxSockets;
 
 const app = express();
 app.set('trust proxy', 1);
@@ -47,22 +59,22 @@ app.use(cors({
 
 // --- RATE LIMITING (DDoS Protection) ---
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
+  max: Number(process.env.API_RATE_LIMIT_MAX || 150),
   standardHeaders: true,
   legacyHeaders: false,
 });
 app.use('/api/', limiter);
 
 const twilioLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 120,
+  windowMs: Number(process.env.TWILIO_RATE_LIMIT_WINDOW_MS || 60 * 1000),
+  max: Number(process.env.TWILIO_RATE_LIMIT_MAX || 200),
   standardHeaders: true,
   legacyHeaders: false,
 });
 const aiLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 60,
+  windowMs: Number(process.env.AI_RATE_LIMIT_WINDOW_MS || 60 * 1000),
+  max: Number(process.env.AI_RATE_LIMIT_MAX || 90),
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -153,6 +165,13 @@ const getMetrics = (tenantId) => {
   return metricsByTenant.get(tenantId);
 };
 
+const jobStats = {
+  lastRunAt: null,
+  lastError: null,
+  lastProcessed: 0,
+  pendingCount: 0,
+};
+
 const getSettingsForTenant = async (tenantId) => {
   if (isMongoReady()) {
     const doc = await Setting.findOne({ tenantId }).lean();
@@ -212,14 +231,45 @@ const buildRouteTargets = (settings, fallbackIdentity = 'agent') => {
   return targets;
 };
 
-const buildDialTwiml = (identity, actionUrl) => `<?xml version="1.0" encoding="UTF-8"?>
+const buildDialTwiml = (identity, actionUrl, recordingCallbackUrl) => `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Dial action="${actionUrl}" method="POST" timeout="20">
+  <Dial action="${actionUrl}" method="POST" timeout="20" record="record-from-answer" recordingStatusCallback="${recordingCallbackUrl}" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed">
     <Client>${identity}</Client>
   </Dial>
 </Response>`;
 
+const buildConferenceTwiml = (conferenceName, { muted = false, startOnEnter = true, endOnExit = true } = {}) => `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial>
+    <Conference
+      startConferenceOnEnter="${startOnEnter}"
+      endConferenceOnExit="${endOnExit}"
+      muted="${muted}"
+      beep="false"
+    >${conferenceName}</Conference>
+  </Dial>
+</Response>`;
+
 const getBaseUrl = (req) => process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+
+const getConferenceName = (callSid) => `conf_${callSid}`;
+
+const findConferenceSid = async (conferenceName) => {
+  if (!twilioClient) return null;
+  const list = await twilioClient.conferences.list({ friendlyName: conferenceName, status: 'in-progress', limit: 1 });
+  return list?.[0]?.sid || null;
+};
+
+const addConferenceParticipant = async (conferenceName, participant) => {
+  if (!twilioClient) throw new Error('Twilio client not configured');
+  let conferenceSid = await findConferenceSid(conferenceName);
+  if (!conferenceSid) {
+    await new Promise(r => setTimeout(r, 500));
+    conferenceSid = await findConferenceSid(conferenceName);
+  }
+  if (!conferenceSid) throw new Error('Conference not active');
+  return twilioClient.conferences(conferenceSid).participants.create(participant);
+};
 
 const enqueueJob = async (tenantId, type, payload = {}) => {
   const job = {
@@ -265,6 +315,43 @@ const fetchPendingJobs = async (limit = 5) => {
   return stores.jobs.filter(j => j.status === 'pending' && j.nextRunAt <= now).slice(0, limit);
 };
 
+const cleanupRetention = async () => {
+  const now = Date.now();
+  const callRetentionDays = Number(process.env.CALL_RETENTION_DAYS || 90);
+  const recordingRetentionDays = Number(process.env.RECORDING_RETENTION_DAYS || 30);
+  const callCutoff = now - callRetentionDays * 24 * 60 * 60 * 1000;
+  const recordingCutoff = now - recordingRetentionDays * 24 * 60 * 60 * 1000;
+
+  if (isMongoReady()) {
+    await Call.deleteMany({ startTime: { $lte: callCutoff } }).catch(() => {});
+    await Recording.deleteMany({ createdAt: { $lte: recordingCutoff } }).catch(() => {});
+  } else {
+    const callsBefore = stores.calls.length;
+    stores.calls = stores.calls.filter(c => (c.startTime || 0) > callCutoff);
+    if (callsBefore !== stores.calls.length) await saveStore('calls', stores.calls);
+    const recBefore = stores.recordings.length;
+    stores.recordings = stores.recordings.filter(r => (r.createdAt || 0) > recordingCutoff);
+    if (recBefore !== stores.recordings.length) await saveStore('recordings', stores.recordings);
+  }
+
+  try {
+    const db = await getFirestore();
+    if (db) {
+      const callsSnap = await db.collection('calls').where('expiresAt', '<=', now).limit(200).get();
+      const batch = db.batch();
+      callsSnap.forEach(doc => batch.delete(doc.ref));
+      if (!callsSnap.empty) await batch.commit();
+
+      const msgSnap = await db.collection('messages').where('timestamp', '<=', callCutoff).limit(200).get();
+      const batch2 = db.batch();
+      msgSnap.forEach(doc => batch2.delete(doc.ref));
+      if (!msgSnap.empty) await batch2.commit();
+    }
+  } catch {
+    // ignore firestore cleanup errors
+  }
+};
+
 const getCallForJob = async (tenantId, callId) => {
   if (isMongoReady()) {
     const byExternal = await Call.findOne({ tenantId, externalId: callId }).lean();
@@ -275,8 +362,89 @@ const getCallForJob = async (tenantId, callId) => {
   return stores.calls.find(c => c.tenantId === tenantId && c.id === callId);
 };
 
+const fetchLeadsForCampaign = async () => {
+  const db = await getFirestore().catch(() => null);
+  if (!db) return [];
+  const snapshot = await db.collection('leads').limit(500).get();
+  return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+};
+
+const filterLeadsForAudience = (leads, audience = {}) => {
+  return leads.filter((lead) => {
+    const phone = String(lead.phone || '').trim();
+    if (audience.region === 'UK' && phone && !phone.startsWith('+44')) return false;
+    if (audience.region === 'NG' && phone && !phone.startsWith('+234')) return false;
+    if (audience.lifecycleStage && lead.status) {
+      const status = String(lead.status).toLowerCase();
+      if (!status.includes(String(audience.lifecycleStage).toLowerCase())) return false;
+    }
+    if (audience.industry && lead.company) {
+      const company = String(lead.company).toLowerCase();
+      if (!company.includes(String(audience.industry).toLowerCase())) return false;
+    }
+    return true;
+  });
+};
+
+const sendCampaignEmail = async ({ to, subject, text }) => {
+  const apiKey = process.env.SENDGRID_API_KEY;
+  const from = process.env.SENDGRID_FROM_EMAIL;
+  if (!apiKey || !from) {
+    throw new Error('SendGrid not configured');
+  }
+  const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      personalizations: [{ to: [{ email: to }] }],
+      from: { email: from },
+      subject,
+      content: [{ type: 'text/plain', value: text }],
+    }),
+  });
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    throw new Error(`SendGrid error ${res.status}: ${errText || 'send failed'}`);
+  }
+  return true;
+};
+
+const sendCampaignSms = async ({ to, message }) => {
+  const apiKey = process.env.TERMII_API_KEY;
+  const baseUrl = process.env.TERMII_BASE_URL;
+  const endpoint = process.env.TERMII_SMS_ENDPOINT || process.env.TERMII_WHATSAPP_ENDPOINT;
+  const senderId = process.env.TERMII_SENDER_ID;
+  const channel = process.env.TERMII_SMS_CHANNEL || 'generic';
+  if (!apiKey || !baseUrl || !endpoint || !senderId) {
+    throw new Error('Termii SMS config missing');
+  }
+  const url = `${baseUrl.replace(/\/$/, '')}/${endpoint.replace(/^\//, '')}`;
+  const payload = {
+    api_key: apiKey,
+    to,
+    from: senderId,
+    sms: message,
+    type: 'plain',
+    channel,
+  };
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(text || `Termii request failed (${res.status})`);
+  }
+  return res.json();
+};
+
 const processJobs = async () => {
   const jobs = await fetchPendingJobs(5);
+  jobStats.pendingCount = jobs.length;
   for (const job of jobs) {
     const jobId = job.id;
     await updateJob(jobId, { status: 'running', attempts: (job.attempts || 0) + 1 });
@@ -320,6 +488,76 @@ const processJobs = async () => {
         await updateJob(jobId, { status: 'completed', result: { totalCalls, totalRecordings, totalCampaigns } });
         continue;
       }
+      if (job.type === 'campaign_send') {
+        const campaign = stores.marketingCampaigns.find(c => c.id === job.payload?.campaignId && c.tenantId === job.tenantId);
+        if (!campaign) throw new Error('Campaign not found');
+        if (campaign.status !== 'running') {
+          await updateJob(jobId, { status: 'completed', result: { ok: true, skipped: 'campaign not running' } });
+          continue;
+        }
+
+        const leads = await fetchLeadsForCampaign();
+        if (leads.length === 0) {
+          await updateJob(jobId, { status: 'completed', result: { ok: true, skipped: 'no leads' } });
+          continue;
+        }
+
+        const audienceLeads = filterLeadsForAudience(leads, campaign.audience || {});
+        const channelEmail = campaign.type === 'email' || campaign.channels?.email;
+        const channelSms = campaign.type === 'sms' || campaign.channels?.sms;
+        if (!channelEmail && !channelSms) {
+          await updateJob(jobId, { status: 'completed', result: { ok: true, skipped: 'no channels enabled' } });
+          continue;
+        }
+
+        let sent = 0;
+        let delivered = 0;
+        let processed = 0;
+        const subject = campaign.content?.emailSubject || `ConnectAI Campaign: ${campaign.name}`;
+        const smsBody = campaign.content?.smsBody || `Hi {{name}}, this is ${campaign.aiPersona || 'ConnectAI'}. Reply to learn more about ${campaign.name}.`;
+        for (const lead of audienceLeads) {
+          const toEmail = lead.email || lead.customerEmail;
+          const toPhone = lead.phone;
+          const personalizedSms = smsBody.replace('{{name}}', lead.name || 'there');
+          if (channelEmail && toEmail) {
+            processed += 1;
+            const text = campaign.content?.emailBody || `Hi ${lead.name || 'there'},\n\n${campaign.aiPersona} here from ConnectAI. We're reaching out about ${campaign.name}. Reply to this email if you'd like a quick walkthrough.\n\nThanks,\nConnectAI Team`;
+            try {
+              await sendCampaignEmail({ to: toEmail, subject, text });
+              sent += 1;
+              delivered += 1;
+            } catch (err) {
+              log('warn', 'campaign.email_failed', { campaignId: campaign.id, to: toEmail, error: err?.message || err });
+            }
+          }
+          if (channelSms && toPhone) {
+            processed += 1;
+            try {
+              await sendCampaignSms({ to: toPhone, message: personalizedSms });
+              sent += 1;
+              delivered += 1;
+            } catch (err) {
+              log('warn', 'campaign.sms_failed', { campaignId: campaign.id, to: toPhone, error: err?.message || err });
+            }
+          }
+        }
+
+        const nextCampaign = {
+          ...campaign,
+          processedCount: (campaign.processedCount || 0) + processed,
+          successCount: (campaign.successCount || 0) + sent,
+          metrics: {
+            ...(campaign.metrics || { sent: 0, delivered: 0, opened: 0, clicked: 0, unsubscribed: 0 }),
+            sent: (campaign.metrics?.sent || 0) + sent,
+            delivered: (campaign.metrics?.delivered || 0) + delivered,
+          },
+          lastRunAt: Date.now(),
+        };
+        stores.marketingCampaigns = upsertById(stores.marketingCampaigns, nextCampaign);
+        await saveStore('marketingCampaigns', stores.marketingCampaigns);
+        await updateJob(jobId, { status: 'completed', result: { sent, delivered, processed } });
+        continue;
+      }
       await updateJob(jobId, { status: 'completed', result: { ok: true } });
     } catch (err) {
       const attempts = (job.attempts || 0) + 1;
@@ -329,13 +567,22 @@ const processJobs = async () => {
         error: err?.message || 'job failed',
         nextRunAt: Date.now() + (retry ? 60_000 : 0),
       });
+      jobStats.lastError = err?.message || 'job failed';
     }
   }
+  jobStats.lastRunAt = Date.now();
+  jobStats.lastProcessed = jobs.length;
+  if (jobStats.pendingCount > Number(process.env.JOB_BACKLOG_WARN_THRESHOLD || 20)) {
+    log('warn', 'jobs.backlog', { count: jobStats.pendingCount });
+  }
+  await cleanupRetention();
 };
 
-setInterval(() => {
-  processJobs().catch(() => {});
-}, 30_000);
+if (process.env.RUN_JOB_WORKER_INLINE !== 'false') {
+  setInterval(() => {
+    processJobs().catch(() => {});
+  }, Number(process.env.JOB_WORKER_INTERVAL_MS || 30_000));
+}
 
 app.use((req, res, next) => {
   req.requestId = crypto.randomUUID();
@@ -343,8 +590,35 @@ app.use((req, res, next) => {
   next();
 });
 
+const requestMetrics = {
+  total: 0,
+  errors: 0,
+  latencies: [],
+  lastErrorAt: null,
+};
+const recordLatency = (ms) => {
+  requestMetrics.latencies.push(ms);
+  if (requestMetrics.latencies.length > 200) requestMetrics.latencies.shift();
+};
+const summarizeLatencies = () => {
+  if (requestMetrics.latencies.length === 0) return { avg: 0, p95: 0, max: 0 };
+  const sorted = [...requestMetrics.latencies].sort((a, b) => a - b);
+  const avg = Math.round(sorted.reduce((a, b) => a + b, 0) / sorted.length);
+  const p95 = sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1];
+  const max = sorted[sorted.length - 1];
+  return { avg, p95, max };
+};
+
 app.use((req, res, next) => {
+  const start = Date.now();
   res.on('finish', () => {
+    const duration = Date.now() - start;
+    requestMetrics.total += 1;
+    recordLatency(duration);
+    if (res.statusCode >= 400) {
+      requestMetrics.errors += 1;
+      requestMetrics.lastErrorAt = Date.now();
+    }
     log('info', 'request.completed', {
       requestId: req.requestId,
       method: req.method,
@@ -521,6 +795,48 @@ const normalizeSettingsStore = (raw) => {
   return [{ tenantId: DEFAULT_TENANT_ID, data: raw }];
 };
 
+const buildExportBundle = async (tenantId) => {
+  const version = '1.0.4';
+  const exportedAt = new Date().toISOString();
+  if (isMongoReady()) {
+    const [calls, campaigns, recordings, users, settings, conversations, messages] = await Promise.all([
+      Call.find({ tenantId }).lean(),
+      Campaign.find({ tenantId }).lean(),
+      Recording.find({ tenantId }).lean(),
+      User.find({ tenantId }).lean(),
+      Setting.find({ tenantId }).lean(),
+      Conversation.find({ tenantId }).lean(),
+      Message.find({ tenantId }).lean(),
+    ]);
+    return {
+      version,
+      exportedAt,
+      clusterData: {
+        calls: calls.map(toPublic),
+        campaigns: campaigns.map(toPublic),
+        recordings: recordings.map(toPublic),
+        users: users.map(toPublic),
+        settings: settings.map(toPublic),
+        conversations: conversations.map(toPublic),
+        messages: messages.map(toPublic),
+      },
+    };
+  }
+  return {
+    version,
+    exportedAt,
+    clusterData: {
+      calls: stores.calls.filter(c => c.tenantId === tenantId),
+      campaigns: stores.campaigns.filter(c => c.tenantId === tenantId),
+      recordings: stores.recordings.filter(r => r.tenantId === tenantId),
+      users: stores.users.filter(u => u.tenantId === tenantId),
+      settings: stores.settingsByTenant.filter(s => s.tenantId === tenantId),
+      conversations: stores.conversations ? stores.conversations.filter(c => c.tenantId === tenantId) : [],
+      messages: stores.messages ? stores.messages.filter(m => m.tenantId === tenantId) : [],
+    },
+  };
+};
+
 const stores = {
   calls: normalizeTenantArray(await loadStore('calls', [])),
   tenants: await loadStore('tenants', []),
@@ -593,6 +909,11 @@ const MS_OAUTH = {
 const AccessToken = twilio.jwt.AccessToken;
 const { VoiceGrant } = AccessToken;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
+const twilioClient = (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN)
+  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+  : null;
+const TWILIO_MONITORING_ENABLED = process.env.TWILIO_MONITORING_ENABLED === 'true';
 
 const verifyTwilioSignature = (req, res, next) => {
   if (!TWILIO_AUTH_TOKEN) return next();
@@ -629,10 +950,60 @@ const signToken = (payload) => {
   return h.digest('hex');
 };
 
+const extractRecordingIdFromUrl = (url = '') => {
+  const tokenMatch = String(url).match(/[?&]token=([^&]+)/);
+  if (!tokenMatch) return '';
+  const token = tokenMatch[1];
+  const parts = token.split('.');
+  return parts.length >= 2 ? parts[1] : '';
+};
+
+const canAccessRecordings = async (req) => {
+  if (!req?.user) return false;
+  if (req.user.role === UserRole.ADMIN) return true;
+  if (req.user.role !== UserRole.SUPERVISOR) return false;
+  const settings = await getSettingsForTenant(req.tenantId);
+  const team = Array.isArray(settings?.team) ? settings.team : [];
+  const email = String(req.user.email || '').toLowerCase();
+  const match = team.find((member) => member.id === req.user.uid || (member.email && member.email.toLowerCase() === email));
+  return Boolean(match?.canAccessRecordings);
+};
+
 const createSilenceWav = (durationSeconds = 1, sampleRate = 8000) => {
   const samples = Math.max(1, Math.floor(sampleRate * durationSeconds));
   const pcmBuffer = Buffer.alloc(samples * 2, 0);
   return createWavBuffer(pcmBuffer, { sampleRate, channels: 1, bitDepth: 16 });
+};
+
+const downloadTwilioRecording = async (recordingUrl) => {
+  if (!recordingUrl) throw new Error('missing recording url');
+  if (!process.env.TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+    throw new Error('twilio auth not configured');
+  }
+  const targetUrl = recordingUrl.endsWith('.wav') ? recordingUrl : `${recordingUrl}.wav`;
+  const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  const response = await fetch(targetUrl, {
+    headers: { Authorization: `Basic ${auth}` },
+  });
+  if (!response.ok) {
+    throw new Error(`twilio recording fetch failed (${response.status})`);
+  }
+  const arrayBuffer = await response.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+};
+
+const requestTwilioTranscription = async (recordingSid, callbackUrl) => {
+  if (!recordingSid) return null;
+  if (!twilioClient) throw new Error('twilio client not configured');
+  try {
+    const transcription = await twilioClient.recordings(recordingSid).transcriptions.create({
+      transcriptionCallback: callbackUrl,
+    });
+    return transcription;
+  } catch (err) {
+    console.error('Twilio transcription request failed', err);
+    return null;
+  }
 };
 
 const buildRecordingUrl = (req, tenantId, externalId, ttlSeconds = 3600) => {
@@ -655,14 +1026,32 @@ const ensureRecordingForCall = async (req, call) => {
 
   if (existing && (existing.recordingUrl || existing.url)) return;
 
-  await ensureRecordingsDir();
   const externalId = existing?.externalId || existing?.id || `rec_${callId}`;
-  const filePath = path.join(recordingsDir, `${externalId}.wav`);
-  try {
-    await fs.access(filePath);
-  } catch {
-    const wavBuffer = createSilenceWav(1);
-    await fs.writeFile(filePath, wavBuffer);
+  const useStorage = await isStorageEnabled();
+  const objectPath = `recordings/${externalId}.wav`;
+  let filePath = path.join(recordingsDir, `${externalId}.wav`);
+  let size = 0;
+  let storageProvider = 'local';
+  let storagePath = filePath;
+  const wavBuffer = createSilenceWav(1);
+  if (useStorage) {
+    const stored = await uploadRecordingBuffer(objectPath, wavBuffer, 'audio/wav');
+    size = stored?.size || 0;
+    storageProvider = stored?.storageProvider || 'gcs';
+    storagePath = stored?.storagePath || objectPath;
+  } else {
+    await ensureRecordingsDir();
+    try {
+      await fs.access(filePath);
+    } catch {
+      await fs.writeFile(filePath, wavBuffer);
+    }
+    try {
+      const stats = await fs.stat(filePath);
+      size = stats.size || 0;
+    } catch {
+      size = 0;
+    }
   }
 
   const recordingUrl = buildRecordingUrl(req, tenantId, externalId);
@@ -672,30 +1061,31 @@ const ensureRecordingForCall = async (req, call) => {
     callId,
     filename: `${externalId}.wav`,
     mimeType: 'audio/wav',
-    size: 0,
-    storagePath: filePath,
+    size,
+    storagePath,
+    storageProvider,
     recordingUrl,
     createdAt: Date.now(),
   };
 
-  if (isMongoReady()) {
-    await Recording.findOneAndUpdate(
-      { tenantId, externalId },
-      recording,
-      { upsert: true, new: true }
-    );
-    await Call.findOneAndUpdate(
-      { tenantId, externalId: callId },
-      { recordingUrl }
-    );
-  } else {
-    const stored = { id: externalId, ...recording };
-    stores.recordings = upsertById(stores.recordings, stored);
-    await saveStore('recordings', stores.recordings);
-    stores.calls = stores.calls.map(c => (c.id === callId && c.tenantId === tenantId) ? { ...c, recordingUrl } : c);
-    await saveStore('calls', stores.calls);
-  }
-};
+    if (isMongoReady()) {
+      await Recording.findOneAndUpdate(
+        { tenantId, externalId },
+        recording,
+        { upsert: true, new: true }
+      );
+      await Call.findOneAndUpdate(
+        { tenantId, externalId: callId },
+        { recordingUrl, recordingId: externalId }
+      );
+    } else {
+      const stored = { id: externalId, ...recording };
+      stores.recordings = upsertById(stores.recordings, stored);
+      await saveStore('recordings', stores.recordings);
+      stores.calls = stores.calls.map(c => (c.id === callId && c.tenantId === tenantId) ? { ...c, recordingUrl, recordingId: externalId } : c);
+      await saveStore('calls', stores.calls);
+    }
+  };
 
 const removeById = (items, id) => items.filter(i => i.id !== id);
 
@@ -845,6 +1235,45 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, geminiConfigured: Boolean(GEMINI_API_KEY) });
 });
 
+app.get('/api/health/deps', async (req, res) => {
+  const mongo = isMongoReady();
+  const firebase = Boolean(await getFirestore().catch(() => null));
+  const storage = await isStorageEnabled().catch(() => false);
+  const integrationStatus = getIntegrationsStore(DEFAULT_TENANT_ID)?.data || {};
+  res.json({
+    ok: true,
+    mongo,
+    firebase,
+    storage,
+    integrations: integrationStatus,
+    jobWorker: {
+      lastRunAt: jobStats.lastRunAt,
+      lastError: jobStats.lastError,
+      lastProcessed: jobStats.lastProcessed,
+      pendingCount: jobStats.pendingCount,
+    },
+    requestMetrics: summarizeLatencies(),
+    rateLimits: {
+      api: { windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000), max: Number(process.env.API_RATE_LIMIT_MAX || 150) },
+      twilio: { windowMs: Number(process.env.TWILIO_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.TWILIO_RATE_LIMIT_MAX || 200) },
+      ai: { windowMs: Number(process.env.AI_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.AI_RATE_LIMIT_MAX || 90) },
+    },
+  });
+});
+
+app.post('/api/jobs/process', async (req, res) => {
+  const token = String(req.headers['x-worker-token'] || '');
+  if (!process.env.WORKER_TOKEN || token !== process.env.WORKER_TOKEN) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  try {
+    await processJobs();
+    res.json({ ok: true, processed: jobStats.lastProcessed });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'job process failed' });
+  }
+});
+
 app.use('/api', (req, res, next) => {
   if (req.path === '/health' || req.path === '/recordings/download') return next();
   return authenticate(req, res, next);
@@ -888,6 +1317,101 @@ app.post('/api/gemini/draft', async (req, res) => {
     res.json({ text: response.text || "I'll look into that for you." });
   } catch (error) {
     res.status(500).json({ text: 'Error generating draft.' });
+  }
+});
+
+app.post('/api/gemini/campaign-draft', async (req, res) => {
+  if (!ensureGemini(res)) return;
+  const { campaign } = req.body || {};
+  if (!campaign?.name) return res.status(400).json({ error: 'campaign is required' });
+  const ai = getClient();
+  const audience = campaign.audience || {};
+  const prompt = `You are a B2B email copywriter for the UK market. Draft a short outbound email for a campaign.
+Campaign name: ${campaign.name}
+Persona: ${campaign.aiPersona || 'Professional concierge'}
+Audience: ${JSON.stringify(audience)}
+Return JSON with keys: subject, body.
+Constraints:
+- 1 short subject line (max 7 words)
+- Body under 90 words
+- Professional, clear, and friendly
+- No emojis
+- End with a simple call-to-action question`;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: TEXT_MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            subject: { type: Type.STRING },
+            body: { type: Type.STRING },
+          },
+        },
+      },
+    });
+    const parsed = response.text ? JSON.parse(response.text) : {};
+    res.json({
+      subject: parsed.subject || `ConnectAI Campaign: ${campaign.name}`,
+      body: parsed.body || `Hi there,\n\nWe are reaching out about ${campaign.name}.\n\nThanks,\nConnectAI Team`,
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Error generating campaign draft.' });
+  }
+});
+
+app.post('/api/gemini/lead-enrich', async (req, res) => {
+  if (!ensureGemini(res)) return;
+  const { lead } = req.body || {};
+  if (!lead?.name) return res.status(400).json({ error: 'lead is required' });
+  const ai = getClient();
+  const prompt = `You are a sales operations assistant. Enrich this lead with best-guess company and industry.
+Lead: ${JSON.stringify(lead)}
+Return JSON with keys: company, industry, notes.
+If unknown, return empty string.`;
+  try {
+    const response = await ai.models.generateContent({
+      model: TEXT_MODEL,
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            company: { type: Type.STRING },
+            industry: { type: Type.STRING },
+            notes: { type: Type.STRING },
+          },
+        },
+      },
+    });
+    const parsed = response.text ? JSON.parse(response.text) : {};
+    res.json({
+      company: parsed.company || '',
+      industry: parsed.industry || '',
+      notes: parsed.notes || '',
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Error enriching lead.' });
+  }
+});
+
+app.post('/api/gemini/help', async (req, res) => {
+  if (!ensureGemini(res)) return;
+  const { question } = req.body || {};
+  if (!question) return res.status(400).json({ error: 'question is required' });
+  const ai = getClient();
+  const prompt = `You are the in-app help assistant for ConnectAI.
+Answer concisely (3-6 sentences) and include the exact screen name or tab when relevant.
+Question: ${question}`;
+  try {
+    const response = await ai.models.generateContent({ model: TEXT_MODEL, contents: prompt });
+    res.json({ text: response.text || 'Help response unavailable.' });
+  } catch {
+    res.status(500).json({ error: 'Help response unavailable.' });
   }
 });
 
@@ -1279,34 +1803,72 @@ app.delete('/api/dispositions/:id', async (req, res) => {
 
 // --- CALLS ---
 app.get('/api/calls', authenticate, async (req, res) => {
-  const tenantId = req.tenantId;
-  const { status, direction, agentId, startDate, endDate, limit = 100 } = req.query || {};
-  const filter = { tenantId };
-  if (status) filter.status = status;
-  if (direction) filter.direction = direction;
-  if (agentId) filter.agentId = agentId;
-  if (startDate || endDate) {
-    filter.startTime = {};
+    const tenantId = req.tenantId;
+    const { status, direction, agentId, startDate, endDate, limit = 100 } = req.query || {};
+    const filter = { tenantId };
+    const allowRecordings = await canAccessRecordings(req);
+    const decorateCall = (call) => {
+      const base = isMongoReady() ? toPublic(call) : { ...call };
+      if (!allowRecordings) {
+        delete base.recordingUrl;
+        delete base.recordingId;
+        return base;
+      }
+      const recordingId = base.recordingId || extractRecordingIdFromUrl(base.recordingUrl);
+      if (recordingId) base.recordingId = recordingId;
+      return base;
+    };
+    if (status) filter.status = status;
+    if (direction) filter.direction = direction;
+    if (agentId) filter.agentId = agentId;
+    if (startDate || endDate) {
+      filter.startTime = {};
     if (startDate) filter.startTime.$gte = Number(startDate);
     if (endDate) filter.startTime.$lte = Number(endDate);
   }
-  if (isMongoReady()) {
-    const items = await Call.find(filter)
-      .sort({ startTime: -1 })
-      .limit(Math.min(Number(limit) || 100, 500))
-      .lean();
-    return res.json(items.map(toPublic));
-  }
-  const items = (stores.calls || [])
-    .filter(c => c.tenantId === tenantId)
-    .filter(c => (status ? c.status === status : true))
+    if (isMongoReady()) {
+      const items = await Call.find(filter)
+        .sort({ startTime: -1 })
+        .limit(Math.min(Number(limit) || 100, 500))
+        .lean();
+      return res.json(items.map(decorateCall));
+    }
+    const items = (stores.calls || [])
+      .filter(c => c.tenantId === tenantId)
+      .filter(c => (status ? c.status === status : true))
     .filter(c => (direction ? c.direction === direction : true))
-    .filter(c => (agentId ? c.agentId === agentId : true))
-    .filter(c => (startDate ? c.startTime >= Number(startDate) : true))
-    .filter(c => (endDate ? c.startTime <= Number(endDate) : true))
-    .sort((a, b) => b.startTime - a.startTime)
-    .slice(0, Math.min(Number(limit) || 100, 500));
-  res.json(items);
+      .filter(c => (agentId ? c.agentId === agentId : true))
+      .filter(c => (startDate ? c.startTime >= Number(startDate) : true))
+      .filter(c => (endDate ? c.startTime <= Number(endDate) : true))
+      .sort((a, b) => b.startTime - a.startTime)
+      .slice(0, Math.min(Number(limit) || 100, 500));
+    res.json(items.map(decorateCall));
+  });
+
+app.get('/api/calls/:id', authenticate, async (req, res) => {
+  const tenantId = req.tenantId;
+  const externalId = req.params.id;
+  const allowRecordings = await canAccessRecordings(req);
+  const decorateCall = (call) => {
+    if (!call) return call;
+    const base = isMongoReady() ? toPublic(call) : { ...call };
+    if (!allowRecordings) {
+      delete base.recordingUrl;
+      delete base.recordingId;
+      return base;
+    }
+    const recordingId = base.recordingId || extractRecordingIdFromUrl(base.recordingUrl);
+    if (recordingId) base.recordingId = recordingId;
+    return base;
+  };
+  if (isMongoReady()) {
+    const item = await Call.findOne({ tenantId, externalId }).lean();
+    if (!item) return res.status(404).json({ error: 'not found' });
+    return res.json(decorateCall(item));
+  }
+  const item = (stores.calls || []).find(c => c.tenantId === tenantId && c.id === externalId);
+  if (!item) return res.status(404).json({ error: 'not found' });
+  res.json(decorateCall(item));
 });
 
 app.post('/api/calls', authenticate, async (req, res) => {
@@ -1394,13 +1956,16 @@ app.post('/api/jobs', authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (r
 
 // --- RECORDINGS ---
 app.get('/api/recordings', async (req, res) => {
-  const tenantId = req.tenantId;
-  if (isMongoReady()) {
-    const items = await Recording.find({ tenantId }).lean();
-    return res.json(items.map(toPublic));
-  }
-  res.json(stores.recordings.filter(r => r.tenantId === tenantId));
-});
+    const tenantId = req.tenantId;
+    if (!(await canAccessRecordings(req))) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    if (isMongoReady()) {
+      const items = await Recording.find({ tenantId }).lean();
+      return res.json(items.map(toPublic));
+    }
+    res.json(stores.recordings.filter(r => r.tenantId === tenantId));
+  });
 
 app.post('/api/recordings', async (req, res) => {
   const tenantId = req.tenantId;
@@ -1440,28 +2005,40 @@ app.put('/api/recordings/:id', async (req, res) => {
 });
 
 app.post('/api/recordings/upload', async (req, res) => {
-  const tenantId = req.tenantId;
-  const { base64, mimeType = 'audio/wav', filename, callId } = req.body || {};
-  if (!base64) return res.status(400).json({ error: 'base64 required' });
-  await ensureRecordingsDir();
-  const externalId = crypto.randomUUID();
-  const ext = (filename && filename.includes('.')) ? filename.split('.').pop() : 'wav';
-  const filePath = path.join(recordingsDir, `${externalId}.${ext}`);
-  const buffer = Buffer.from(base64, 'base64');
-  await fs.writeFile(filePath, buffer);
-  const retentionDays = Number(process.env.RECORDING_RETENTION_DAYS || 30);
-  const expiresAt = Date.now() + retentionDays * 24 * 60 * 60 * 1000;
-  const recording = {
-    tenantId,
-    externalId,
-    callId: callId || null,
-    mimeType,
-    filename: filename || `${externalId}.${ext}`,
-    size: buffer.length,
-    storagePath: filePath,
-    createdAt: Date.now(),
-    expiresAt,
-  };
+    const tenantId = req.tenantId;
+    const { base64, mimeType = 'audio/wav', filename, callId } = req.body || {};
+    if (!base64) return res.status(400).json({ error: 'base64 required' });
+    const externalId = crypto.randomUUID();
+    const ext = (filename && filename.includes('.')) ? filename.split('.').pop() : 'wav';
+    const buffer = Buffer.from(base64, 'base64');
+    const retentionDays = Number(process.env.RECORDING_RETENTION_DAYS || 30);
+    const expiresAt = Date.now() + retentionDays * 24 * 60 * 60 * 1000;
+    const useStorage = await isStorageEnabled();
+    let storageProvider = 'local';
+    let storagePath = '';
+    if (useStorage) {
+      const objectPath = `recordings/${externalId}.${ext}`;
+      const stored = await uploadRecordingBuffer(objectPath, buffer, mimeType);
+      storageProvider = stored?.storageProvider || 'gcs';
+      storagePath = stored?.storagePath || objectPath;
+    } else {
+      await ensureRecordingsDir();
+      const filePath = path.join(recordingsDir, `${externalId}.${ext}`);
+      await fs.writeFile(filePath, buffer);
+      storagePath = filePath;
+    }
+    const recording = {
+      tenantId,
+      externalId,
+      callId: callId || null,
+      mimeType,
+      filename: filename || `${externalId}.${ext}`,
+      size: buffer.length,
+      storagePath,
+      storageProvider,
+      createdAt: Date.now(),
+      expiresAt,
+    };
   if (isMongoReady()) {
     const created = await Recording.create(recording);
     await writeAuditLog(req, 'RECORDING_UPLOAD', externalId, { callId });
@@ -1475,9 +2052,12 @@ app.post('/api/recordings/upload', async (req, res) => {
 });
 
 app.post('/api/recordings/:id/signed-url', async (req, res) => {
-  const tenantId = req.tenantId;
-  const { ttlSeconds = 3600 } = req.body || {};
-  const externalId = req.params.id;
+    const tenantId = req.tenantId;
+    if (!(await canAccessRecordings(req))) {
+      return res.status(403).json({ error: 'forbidden' });
+    }
+    const { ttlSeconds = 3600 } = req.body || {};
+    const externalId = req.params.id;
   const rec = isMongoReady()
     ? await Recording.findOne({ tenantId, externalId }).lean()
     : stores.recordings.find(r => r.tenantId === tenantId && r.id === externalId);
@@ -1490,28 +2070,36 @@ app.post('/api/recordings/:id/signed-url', async (req, res) => {
 });
 
 app.get('/api/recordings/download', async (req, res) => {
-  const token = req.query?.token || '';
-  const format = String(req.query?.format || '').toLowerCase();
-  const [tenantId, externalId, expires, sig] = String(token).split('.');
-  if (!tenantId || !externalId || !expires || !sig) return res.status(400).send('invalid token');
-  const expected = signToken(`${tenantId}:${externalId}:${expires}`);
-  if (expected !== sig) return res.status(403).send('invalid signature');
-  if (Date.now() > Number(expires)) return res.status(403).send('token expired');
+    const token = req.query?.token || '';
+    const format = String(req.query?.format || '').toLowerCase();
+    const download = String(req.query?.download || '') === '1';
+    const [tenantId, externalId, expires, sig] = String(token).split('.');
+    if (!tenantId || !externalId || !expires || !sig) return res.status(400).send('invalid token');
+    const expected = signToken(`${tenantId}:${externalId}:${expires}`);
+    if (expected !== sig) return res.status(403).send('invalid signature');
+    if (Date.now() > Number(expires)) return res.status(403).send('token expired');
   const rec = isMongoReady()
     ? await Recording.findOne({ tenantId, externalId }).lean()
     : stores.recordings.find(r => r.tenantId === tenantId && r.id === externalId);
-  if (!rec) return res.status(404).send('not found');
-  try {
-    const data = await fs.readFile(rec.storagePath || rec.filePath);
-    const isMp3 = format === 'mp3';
-    res.setHeader('Content-Type', isMp3 ? 'audio/mpeg' : (rec.mimeType || 'audio/wav'));
-    const filename = isMp3 ? `${externalId}.mp3` : (rec.filename || `${externalId}.wav`);
-    res.setHeader('Content-Disposition', `attachment; filename=\"${filename}\"`);
-    res.send(data);
-  } catch {
-    res.status(404).send('file missing');
-  }
-});
+    if (!rec) return res.status(404).send('not found');
+    try {
+      let data = null;
+      if (rec.storageProvider === 'gcs') {
+        data = await downloadRecordingBuffer(rec.storagePath);
+      } else {
+        data = await fs.readFile(rec.storagePath || rec.filePath);
+      }
+      if (!data) return res.status(404).send('file missing');
+      const isMp3 = format === 'mp3';
+      res.setHeader('Content-Type', isMp3 ? 'audio/mpeg' : (rec.mimeType || 'audio/wav'));
+      const filename = isMp3 ? `${externalId}.mp3` : (rec.filename || `${externalId}.wav`);
+      res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename=\"${filename}\"`);
+      res.setHeader('Content-Length', data.length);
+      res.send(data);
+    } catch {
+      res.status(404).send('file missing');
+    }
+  });
 
 // --- CALENDAR ---
 app.get('/api/calendar/events', (req, res) => {
@@ -1723,14 +2311,21 @@ app.post('/api/marketing/campaigns', async (req, res) => {
   const campaign = { id: payload.id || crypto.randomUUID(), tenantId, ...payload, updatedAt: Date.now() };
   stores.marketingCampaigns = upsertById(stores.marketingCampaigns, campaign);
   await saveStore('marketingCampaigns', stores.marketingCampaigns);
+  if (campaign.status === 'running') {
+    await enqueueJob(tenantId, 'campaign_send', { campaignId: campaign.id });
+  }
   res.json(campaign);
 });
 
 app.put('/api/marketing/campaigns/:id', async (req, res) => {
   const tenantId = req.tenantId;
+  const existing = stores.marketingCampaigns.find(c => c.id === req.params.id && c.tenantId === tenantId);
   const campaign = { ...req.body, id: req.params.id, tenantId, updatedAt: Date.now() };
   stores.marketingCampaigns = upsertById(stores.marketingCampaigns, campaign);
   await saveStore('marketingCampaigns', stores.marketingCampaigns);
+  if (campaign.status === 'running' && existing?.status !== 'running') {
+    await enqueueJob(tenantId, 'campaign_send', { campaignId: campaign.id });
+  }
   res.json(campaign);
 });
 
@@ -1758,6 +2353,95 @@ app.post('/api/marketing/:provider/sync', async (req, res) => {
   res.json({ ok: true });
 });
 
+// --- TERMII (WhatsApp / Messaging) ---
+app.post('/api/termii/whatsapp/send', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
+  try {
+    const { to, message, channel } = req.body || {};
+    if (!to || !message) return res.status(400).json({ error: 'to and message required' });
+    const result = await sendWhatsAppMessage({ to, message, channel });
+    res.json({ ok: true, result });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'Termii send failed' });
+  }
+});
+
+app.post('/api/termii/webhook', async (req, res) => {
+  try {
+    const payload = req.body || {};
+    const from = String(payload.from || payload.phone_number || payload.sender || payload.msisdn || '').trim();
+    const to = String(payload.to || payload.recipient || '').trim();
+    const text = String(payload.sms || payload.message || payload.text || '').trim();
+    const channel = String(payload.channel || 'whatsapp').toLowerCase();
+    if (!from || !text) {
+      return res.status(400).json({ error: 'invalid payload' });
+    }
+
+    const db = await getFirestore();
+    if (!db) {
+      return res.status(500).json({ error: 'firebase admin not configured' });
+    }
+
+    const settingsSnap = await db.collection('settings').doc('global_config').get();
+    const settings = settingsSnap.exists ? settingsSnap.data() : null;
+    const team = Array.isArray(settings?.team) ? settings.team : [];
+    const participantIds = team.map((t) => t.id).filter(Boolean);
+    if (participantIds.length === 0) {
+      participantIds.push('u_admin');
+    }
+
+    const conversationId = `termii_${from.replace(/\W/g, '')}`;
+    const now = Date.now();
+    const consentText = 'By continuing this conversation, you consent to processing of your data in line with Nigeria\'s Data Protection Act (NDPA). Reply STOP to opt out.';
+    const convRef = db.collection('conversations').doc(conversationId);
+    const existingSnap = await convRef.get();
+    const existing = existingSnap.exists ? existingSnap.data() : null;
+    const consentStatus = existing?.consentStatus || 'requested';
+    const conversation = {
+      id: conversationId,
+      contactName: `${channel.toUpperCase()} • ${from}`,
+      contactPhone: from,
+      channel,
+      lastMessage: text,
+      lastMessageTime: now,
+      unreadCount: 1,
+      status: 'open',
+      participantIds,
+      consentStatus,
+      consentChannel: 'whatsapp',
+      consentRequestedAt: existing?.consentRequestedAt || now,
+    };
+
+    await convRef.set(conversation, { merge: true });
+    await db.collection('messages').add({
+      conversationId,
+      id: `m_${now}`,
+      channel,
+      sender: 'customer',
+      text,
+      timestamp: now,
+      to,
+      from,
+      source: 'termii',
+    });
+
+    if (!existing?.consentStatus) {
+      await db.collection('messages').add({
+        conversationId,
+        id: `m_consent_${now}`,
+        channel,
+        sender: 'ai',
+        text: consentText,
+        timestamp: now + 1,
+        source: 'consent',
+      });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'webhook failed' });
+  }
+});
+
 // --- REPORTS ---
 app.get('/api/reports/summary', async (req, res) => {
   const tenantId = req.tenantId;
@@ -1775,6 +2459,17 @@ app.get('/api/reports/summary', async (req, res) => {
   res.json({ totalCalls, totalCampaigns, totalRecordings, generatedAt: Date.now() });
 });
 
+// --- EXPORTS ---
+app.get('/api/export', authenticate, authorize([UserRole.ADMIN]), async (req, res) => {
+  try {
+    const tenantId = req.tenantId;
+    const bundle = await buildExportBundle(tenantId);
+    res.json(bundle);
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'export failed' });
+  }
+});
+
 app.get('/api/integrations/status', (req, res) => {
   const tenantId = req.tenantId;
   const store = getIntegrationsStore(tenantId);
@@ -1784,6 +2479,89 @@ app.get('/api/integrations/status', (req, res) => {
 app.get('/api/metrics/calls', authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
   const tenantId = req.tenantId;
   res.json(getMetrics(tenantId));
+});
+
+app.get('/api/metrics/summary', authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
+  res.json({
+    requests: {
+      total: requestMetrics.total,
+      errors: requestMetrics.errors,
+      lastErrorAt: requestMetrics.lastErrorAt,
+      latency: summarizeLatencies(),
+    },
+    jobs: jobStats,
+  });
+});
+
+app.post('/api/supervisor/monitor', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
+  const { callId, mode = 'listen', identity } = req.body || {};
+  if (!callId) return res.status(400).json({ error: 'callId required' });
+  if (!twilioClient) return res.status(500).json({ error: 'Twilio not configured' });
+  if (!TWILIO_MONITORING_ENABLED) return res.status(400).json({ error: 'Monitoring not enabled' });
+
+  const conferenceName = getConferenceName(callId);
+  const supervisorIdentity = identity || req.user?.uid || req.user?.email || 'supervisor';
+  const participant = {
+    from: `client:${supervisorIdentity}`,
+    to: `client:${supervisorIdentity}`,
+    muted: mode === 'listen',
+  };
+  if (mode === 'whisper') {
+    participant.coach = callId;
+    participant.muted = false;
+  }
+  if (mode === 'barge') {
+    participant.muted = false;
+  }
+  try {
+    const created = await addConferenceParticipant(conferenceName, participant);
+    res.json({ ok: true, participantSid: created.sid, conferenceName });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'monitor failed' });
+  }
+});
+
+app.post('/api/supervisor/monitor/stop', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
+  const { participantSid, callId } = req.body || {};
+  if (!twilioClient) return res.status(500).json({ error: 'Twilio not configured' });
+  try {
+    if (participantSid) {
+      await twilioClient.participants(participantSid).update({ hold: true });
+      return res.json({ ok: true });
+    }
+    if (callId) {
+      const conferenceName = getConferenceName(callId);
+      const conferenceSid = await findConferenceSid(conferenceName);
+      if (!conferenceSid) return res.status(404).json({ error: 'Conference not active' });
+      const parts = await twilioClient.conferences(conferenceSid).participants.list({ limit: 20 });
+      await Promise.all(parts.map(p => twilioClient.conferences(conferenceSid).participants(p.sid).remove().catch(() => {})));
+      return res.json({ ok: true });
+    }
+    res.status(400).json({ error: 'participantSid or callId required' });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'stop failed' });
+  }
+});
+
+app.post('/api/supervisor/monitor/status', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
+  const { participantSid, callId } = req.body || {};
+  if (!twilioClient) return res.status(500).json({ error: 'Twilio not configured' });
+  try {
+    if (participantSid) {
+      const participant = await twilioClient.participants(participantSid).fetch();
+      return res.json({ active: participant?.status === 'in-progress', status: participant?.status });
+    }
+    if (callId) {
+      const conferenceName = getConferenceName(callId);
+      const conferenceSid = await findConferenceSid(conferenceName);
+      if (!conferenceSid) return res.json({ active: false });
+      const parts = await twilioClient.conferences(conferenceSid).participants.list({ limit: 20 });
+      return res.json({ active: parts.length > 0 });
+    }
+    res.status(400).json({ error: 'participantSid or callId required' });
+  } catch (err) {
+    res.status(500).json({ error: err?.message || 'status failed' });
+  }
 });
 
 const extractE164 = (value = '') => {
@@ -1804,44 +2582,78 @@ const extractClientIdentity = (value = '') => {
 };
 
 app.post('/twilio/voice', verifyTwilioSignature, async (req, res) => {
-  const tenantId = req.tenantId || DEFAULT_TENANT_ID;
-  const toRaw = req.body?.To || req.body?.Called || '';
-  const clientIdentity = extractClientIdentity(toRaw) || req.body?.identity || req.query?.identity;
-  const dialTo = extractE164(toRaw);
-  const callerId = process.env.TWILIO_CALLER_ID;
+    const tenantId = req.tenantId || DEFAULT_TENANT_ID;
+    const toRaw = req.body?.To || req.body?.Called || '';
+    const clientIdentity = extractClientIdentity(toRaw) || req.body?.identity || req.query?.identity;
+    const dialTo = extractE164(toRaw);
+    const callerId = process.env.TWILIO_CALLER_ID;
+    const recordingCallbackUrl = `${getBaseUrl(req)}/twilio/recording/status`;
+    const callSid = req.body?.CallSid || crypto.randomUUID();
+    const conferenceName = getConferenceName(callSid);
 
-  if (clientIdentity) {
-    const safeIdentity = String(clientIdentity || 'agent').trim() || 'agent';
-    const metrics = getMetrics(tenantId);
-    metrics.outboundTotal += 1;
-    metrics.routed += 1;
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+    if (TWILIO_MONITORING_ENABLED) {
+      const metrics = getMetrics(tenantId);
+      metrics.outboundTotal += 1;
+      metrics.routed += 1;
+      res.type('text/xml').send(buildConferenceTwiml(conferenceName, { muted: false, startOnEnter: true, endOnExit: true }));
+
+      if (clientIdentity) {
+        const safeIdentity = String(clientIdentity || 'agent').trim() || 'agent';
+        addConferenceParticipant(conferenceName, {
+          from: `client:${safeIdentity}`,
+          to: `client:${safeIdentity}`,
+          muted: false,
+          endConferenceOnExit: true,
+        }).catch(err => console.error('monitoring add participant failed', err?.message || err));
+        return;
+      }
+
+      if (dialTo) {
+        if (!callerId) return;
+        addConferenceParticipant(conferenceName, {
+          from: callerId,
+          to: dialTo,
+          record: true,
+          recordingStatusCallback: recordingCallbackUrl,
+          recordingStatusCallbackEvent: ['completed'],
+        }).catch(err => console.error('monitoring add participant failed', err?.message || err));
+        return;
+      }
+      return;
+    }
+
+    if (clientIdentity) {
+      const safeIdentity = String(clientIdentity || 'agent').trim() || 'agent';
+      const metrics = getMetrics(tenantId);
+      metrics.outboundTotal += 1;
+      metrics.routed += 1;
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Dial>
+  <Dial record="record-from-answer" recordingStatusCallback="${recordingCallbackUrl}" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed">
     <Client>${safeIdentity}</Client>
   </Dial>
 </Response>`;
-    res.type('text/xml').send(twiml);
-    return;
-  }
-
-  if (dialTo) {
-    if (!callerId) {
-      res.status(500).type('text/plain').send('TWILIO_CALLER_ID missing');
+      res.type('text/xml').send(twiml);
       return;
     }
-    const metrics = getMetrics(tenantId);
-    metrics.outboundTotal += 1;
-    metrics.routed += 1;
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+
+    if (dialTo) {
+      if (!callerId) {
+        res.status(500).type('text/plain').send('TWILIO_CALLER_ID missing');
+        return;
+      }
+      const metrics = getMetrics(tenantId);
+      metrics.outboundTotal += 1;
+      metrics.routed += 1;
+      const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Dial callerId="${callerId}">
+  <Dial callerId="${callerId}" record="record-from-answer" recordingStatusCallback="${recordingCallbackUrl}" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed">
     <Number>${dialTo}</Number>
   </Dial>
 </Response>`;
-    res.type('text/xml').send(twiml);
-    return;
-  }
+      res.type('text/xml').send(twiml);
+      return;
+    }
 
   const settings = await getSettingsForTenant(tenantId);
   const ivrSettings = settings.ivr || defaultSettings.ivr;
@@ -1860,13 +2672,134 @@ app.post('/twilio/voice', verifyTwilioSignature, async (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
+app.post('/twilio/recording/status', verifyTwilioSignature, async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const recordingUrl = req.body?.RecordingUrl;
+  const recordingSid = req.body?.RecordingSid;
+  if (!callSid || !recordingUrl) {
+    return res.status(400).send('missing recording data');
+  }
+
+  try {
+    const callRecord = isMongoReady()
+      ? await Call.findOne({ externalId: callSid }).lean()
+      : (stores.calls || []).find(c => c.id === callSid);
+    const tenantId = callRecord?.tenantId || req.tenantId || DEFAULT_TENANT_ID;
+    const externalId = `rec_${callSid}`;
+    await ensureRecordingsDir();
+    const data = await downloadTwilioRecording(recordingUrl);
+    const useStorage = await isStorageEnabled();
+    let storageProvider = 'local';
+    let storagePath = '';
+    if (useStorage) {
+      const objectPath = `recordings/${externalId}.wav`;
+      const stored = await uploadRecordingBuffer(objectPath, data, 'audio/wav');
+      storageProvider = stored?.storageProvider || 'gcs';
+      storagePath = stored?.storagePath || objectPath;
+    } else {
+      await ensureRecordingsDir();
+      const filePath = path.join(recordingsDir, `${externalId}.wav`);
+      await fs.writeFile(filePath, data);
+      storagePath = filePath;
+    }
+
+    const signedUrl = buildRecordingUrl(req, tenantId, externalId);
+    const recording = {
+      tenantId,
+      externalId,
+      callId: callSid,
+      filename: `${externalId}.wav`,
+      mimeType: 'audio/wav',
+      size: data.length,
+      storagePath,
+      storageProvider,
+      recordingUrl: signedUrl,
+      createdAt: Date.now(),
+      createdBy: 'twilio',
+      recordingSid,
+    };
+
+    if (isMongoReady()) {
+      await Recording.findOneAndUpdate(
+        { tenantId, externalId },
+        recording,
+        { upsert: true, new: true }
+      );
+      await Call.findOneAndUpdate(
+        { tenantId, externalId: callSid },
+        { recordingUrl: signedUrl, recordingId: externalId }
+      );
+    } else {
+      const stored = { id: externalId, ...recording };
+      stores.recordings = upsertById(stores.recordings, stored);
+      await saveStore('recordings', stores.recordings);
+      stores.calls = stores.calls.map(c => (c.id === callSid && c.tenantId === tenantId) ? { ...c, recordingUrl: signedUrl, recordingId: externalId } : c);
+      await saveStore('calls', stores.calls);
+    }
+
+    const callbackUrl = `${getBaseUrl(req)}/twilio/transcription/status`;
+    if (recordingSid) {
+      await requestTwilioTranscription(recordingSid, callbackUrl);
+    }
+
+    res.json({ ok: true, externalId });
+  } catch (err) {
+    console.error('Recording callback failed', err);
+    res.status(500).send('recording fetch failed');
+  }
+});
+
+app.post('/twilio/transcription/status', verifyTwilioSignature, async (req, res) => {
+  const callSid = req.body?.CallSid;
+  const transcriptionText = req.body?.TranscriptionText;
+  if (!callSid || !transcriptionText) {
+    return res.status(400).send('missing transcription data');
+  }
+
+  try {
+    const segment = {
+      id: `tr_${Date.now()}`,
+      speaker: 'customer',
+      text: String(transcriptionText),
+      timestamp: Date.now(),
+      isFinal: true,
+    };
+    if (isMongoReady()) {
+      const call = await Call.findOneAndUpdate(
+        { externalId: callSid },
+        { $push: { transcript: segment }, transcriptionEnabled: true },
+        { new: true }
+      ).lean();
+      if (call?.tenantId) {
+        await enqueueJob(call.tenantId, 'summary', { callId: callSid });
+        await enqueueJob(call.tenantId, 'report', { callId: callSid });
+      }
+    } else {
+      const idx = (stores.calls || []).findIndex(c => c.id === callSid);
+      if (idx >= 0) {
+        const existing = stores.calls[idx];
+        const transcript = Array.isArray(existing.transcript) ? [...existing.transcript, segment] : [segment];
+        stores.calls[idx] = { ...existing, transcript, transcriptionEnabled: true };
+        await saveStore('calls', stores.calls);
+        await enqueueJob(existing.tenantId || DEFAULT_TENANT_ID, 'summary', { callId: callSid });
+        await enqueueJob(existing.tenantId || DEFAULT_TENANT_ID, 'report', { callId: callSid });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Transcription callback failed', err);
+    res.status(500).send('transcription update failed');
+  }
+});
+
 app.post('/twilio/voice/incoming', verifyTwilioSignature, async (req, res) => {
   const tenantId = req.tenantId || DEFAULT_TENANT_ID;
   const identityOverride = (req.query?.identity || req.body?.identity || '').toString().trim();
   const settings = await getSettingsForTenant(tenantId);
   const targets = identityOverride ? [identityOverride] : buildRouteTargets(settings, 'agent');
   const callSid = req.body?.CallSid || crypto.randomUUID();
-  callRouteState.set(callSid, { targets, index: 0, tenantId });
+  const conferenceName = getConferenceName(callSid);
+  callRouteState.set(callSid, { targets, index: 0, tenantId, conferenceName });
 
   const metrics = getMetrics(tenantId);
   metrics.inboundTotal += 1;
@@ -1904,7 +2837,21 @@ app.post('/twilio/voice/incoming', verifyTwilioSignature, async (req, res) => {
   }
 
   const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
-  res.type('text/xml').send(buildDialTwiml(targets[0], actionUrl));
+  const recordingCallbackUrl = `${getBaseUrl(req)}/twilio/recording/status`;
+  if (TWILIO_MONITORING_ENABLED) {
+    res.type('text/xml').send(buildConferenceTwiml(conferenceName, { muted: false, startOnEnter: true, endOnExit: true }));
+    const firstTarget = targets[0];
+    if (firstTarget) {
+      addConferenceParticipant(conferenceName, {
+        from: `client:${firstTarget}`,
+        to: `client:${firstTarget}`,
+        muted: false,
+        endConferenceOnExit: true,
+      }).catch(err => console.error('monitoring add participant failed', err?.message || err));
+    }
+    return;
+  }
+  res.type('text/xml').send(buildDialTwiml(targets[0], actionUrl, recordingCallbackUrl));
 });
 
 app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => {
@@ -1912,6 +2859,10 @@ app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => 
   const dialStatus = req.body?.DialCallStatus;
   const state = callRouteState.get(callSid);
   if (!state) {
+    res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
+    return;
+  }
+  if (TWILIO_MONITORING_ENABLED) {
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
     return;
   }
@@ -1948,7 +2899,8 @@ app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => 
   metrics.retries += 1;
   callRouteState.set(callSid, { targets, index: nextIndex, tenantId });
   const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
-  res.type('text/xml').send(buildDialTwiml(targets[nextIndex], actionUrl));
+  const recordingCallbackUrl = `${getBaseUrl(req)}/twilio/recording/status`;
+  res.type('text/xml').send(buildDialTwiml(targets[nextIndex], actionUrl, recordingCallbackUrl));
 });
 
 app.post('/twilio/voice/handle', verifyTwilioSignature, async (req, res) => {
@@ -1983,7 +2935,8 @@ app.post('/twilio/voice/handle', verifyTwilioSignature, async (req, res) => {
 
   const callSid = req.body?.CallSid || crypto.randomUUID();
   const targets = buildRouteTargets(settings, 'agent');
-  callRouteState.set(callSid, { targets, index: 0, tenantId });
+  const conferenceName = getConferenceName(callSid);
+  callRouteState.set(callSid, { targets, index: 0, tenantId, conferenceName });
 
   if (isMongoReady()) {
     await Call.findOneAndUpdate(
@@ -2020,7 +2973,21 @@ app.post('/twilio/voice/handle', verifyTwilioSignature, async (req, res) => {
   metrics.lastRouteAt = Date.now();
 
   const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
-  res.type('text/xml').send(buildDialTwiml(targets[0], actionUrl));
+  const recordingCallbackUrl = `${getBaseUrl(req)}/twilio/recording/status`;
+  if (TWILIO_MONITORING_ENABLED) {
+    res.type('text/xml').send(buildConferenceTwiml(conferenceName, { muted: false, startOnEnter: true, endOnExit: true }));
+    const firstTarget = targets[0];
+    if (firstTarget) {
+      addConferenceParticipant(conferenceName, {
+        from: `client:${firstTarget}`,
+        to: `client:${firstTarget}`,
+        muted: false,
+        endConferenceOnExit: true,
+      }).catch(err => console.error('monitoring add participant failed', err?.message || err));
+    }
+    return;
+  }
+  res.type('text/xml').send(buildDialTwiml(targets[0], actionUrl, recordingCallbackUrl));
 });
 
 app.post('/api/gemini/tts', async (req, res) => {
