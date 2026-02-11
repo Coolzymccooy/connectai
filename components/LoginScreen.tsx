@@ -105,9 +105,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
     setError(null);
     setMessage(null);
     try {
-      // 1. Start Auth immediately (don't wait for policy if possible, but we need policy for invite-only)
-      // We'll run policy check in parallel if not cached, but logic requires it first for blocking.
-      // However, prefetch makes this fast.
       const policyCheck = await enforcePolicy(email);
       if (policyCheck.error) {
         setError(policyCheck.error);
@@ -117,9 +114,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
 
       const result = await signInWithEmailAndPassword(auth, email, password);
       const user = result.user;
-      
-      // Let App.tsx handle the verification state instead of signing out here
-      // This allows the "Smart Response" (polling for verification)
       
       const resolvedRole = policyCheck.policy?.invite?.role || role;
       onLogin(resolvedRole, { uid: user.uid, email: user.email, displayName: user.displayName });
@@ -152,7 +146,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
       setMessage('Account created. Check your email to verify before signing in.');
       setPendingVerificationEmail(email);
       localStorage.setItem('connectai_pending_verification_email', email);
-      // We stay logged in, App.tsx will show verification screen
     } catch (err: any) {
       setError(friendlyError(err));
     } finally {
@@ -219,133 +212,125 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4 sm:p-6 transition-all duration-500">
-      <div className="max-w-5xl w-full grid grid-cols-1 md:grid-cols-2 bg-white rounded-[2rem] shadow-2xl overflow-hidden min-h-[600px] border border-slate-100">
-        {/* Left: Brand Side */}
-        <div className="bg-brand-950 p-12 text-white flex flex-col justify-between relative overflow-hidden">
-          <div className="absolute top-0 left-0 w-full h-full opacity-20 pointer-events-none">
-             <div className="absolute top-[-50%] left-[-50%] w-[200%] h-[200%] bg-[radial-gradient(circle,rgba(99,102,241,0.4)_0%,transparent_60%)] animate-pulse-slow"></div>
+      <div className="max-w-5xl w-full grid grid-cols-1 md:grid-cols-2 bg-white rounded-2xl shadow-xl overflow-hidden min-h-[560px] border border-slate-100">
+        {/* Left: Brand Side (Restored Original Blue) */}
+        <div className="bg-brand-900 p-12 text-white flex flex-col justify-between relative overflow-hidden">
+          <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
+            <div className="absolute top-[-50%] left-[-50%] w-[200%] h-[200%] bg-[radial-gradient(circle,rgba(255,255,255,0.8)_0%,transparent_60%)]"></div>
           </div>
 
           <div className="z-10">
-            <div className="w-14 h-14 bg-brand-600 rounded-2xl flex items-center justify-center text-white font-black text-2xl shadow-xl shadow-brand-900/50 mb-8 border border-white/10">
+            <div className="w-12 h-12 bg-brand-500 rounded-xl flex items-center justify-center text-white font-bold text-2xl shadow-lg mb-6">
               C
             </div>
-            <h1 className="text-4xl font-black italic tracking-tighter mb-4 text-transparent bg-clip-text bg-gradient-to-r from-white to-slate-400">ConnectAI</h1>
-            <p className="text-brand-200 font-medium text-lg max-w-sm leading-relaxed">The AI-native contact center for the modern enterprise.</p>
+            <h1 className="text-3xl font-bold mb-2">ConnectAI</h1>
+            <p className="text-brand-200">The AI-native contact center for modern SMBs.</p>
           </div>
 
-          <div className="space-y-6 z-10">
-            <div className="flex items-center space-x-4 text-sm text-brand-100 group">
-              <div className="p-3 bg-white/5 rounded-2xl group-hover:bg-brand-500/20 transition-colors"><Headset size={20} /></div>
-              <span className="font-bold tracking-wide">Neural Softphone</span>
+          <div className="space-y-4 z-10">
+            <div className="flex items-center space-x-3 text-sm text-brand-100">
+              <div className="p-2 bg-white/10 rounded-lg"><Headset size={16} /></div>
+              <span>AI-powered Softphone</span>
             </div>
-            <div className="flex items-center space-x-4 text-sm text-brand-100 group">
-              <div className="p-3 bg-white/5 rounded-2xl group-hover:bg-brand-500/20 transition-colors"><LayoutDashboard size={20} /></div>
-              <span className="font-bold tracking-wide">Real-time Analytics</span>
+            <div className="flex items-center space-x-3 text-sm text-brand-100">
+              <div className="p-2 bg-white/10 rounded-lg"><LayoutDashboard size={16} /></div>
+              <span>Real-time Analytics</span>
             </div>
-            <div className="flex items-center space-x-4 text-sm text-brand-100 group">
-              <div className="p-3 bg-white/5 rounded-2xl group-hover:bg-brand-500/20 transition-colors"><Shield size={20} /></div>
-              <span className="font-bold tracking-wide">Enterprise Security</span>
+            <div className="flex items-center space-x-3 text-sm text-brand-100">
+              <div className="p-2 bg-white/10 rounded-lg"><Shield size={16} /></div>
+              <span>Enterprise Compliance</span>
             </div>
           </div>
 
-          <div className="flex items-center gap-2 mt-8 opacity-50">
-             <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-             <p className="text-[10px] font-black uppercase tracking-[0.2em]">System Operational</p>
-          </div>
+          <p className="text-xs text-brand-300 mt-8">v1.0.4-MVP • Phase 3 Complete</p>
         </div>
 
         {/* Right: Auth Form */}
-        <div className="p-8 md:p-12 flex flex-col justify-center bg-white relative">
+        <div className="p-12 flex flex-col justify-center">
           
-          <div className="flex items-center gap-2 mb-8 bg-slate-100/50 p-1.5 rounded-2xl w-fit self-center md:self-start">
-            <button onClick={() => setMode('login')} className={`px-6 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${mode === 'login' ? 'bg-white text-slate-900 shadow-md' : 'text-slate-400 hover:text-slate-600'}`}>Sign In</button>
-            <button onClick={() => setMode('signup')} className={`px-6 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all ${mode === 'signup' ? 'bg-white text-slate-900 shadow-md' : 'text-slate-400 hover:text-slate-600'}`}>Sign Up</button>
+          <div className="flex items-center gap-3 mb-6">
+            <button onClick={() => setMode('login')} className={`px-4 py-2 rounded-xl text-sm font-bold ${mode === 'login' ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Sign In</button>
+            <button onClick={() => setMode('signup')} className={`px-4 py-2 rounded-xl text-sm font-bold ${mode === 'signup' ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Create Account</button>
+            <button onClick={() => setMode('reset')} className={`px-4 py-2 rounded-xl text-sm font-bold ${mode === 'reset' ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Forgot Password</button>
           </div>
 
-          <div className="mb-8">
-             <h2 className="text-3xl font-black text-slate-800 italic uppercase tracking-tighter mb-2">{mode === 'signup' ? 'Join the Cluster' : mode === 'reset' ? 'Reset Access' : 'Welcome Back'}</h2>
-             <p className="text-slate-500 font-medium text-sm">{mode === 'reset' ? 'Enter your email to receive a recovery link.' : 'Sign in to access your workspace.'}</p>
+          <div className="mb-6">
+             <h2 className="text-2xl font-bold text-slate-800 mb-2">{mode === 'signup' ? 'Create your account' : mode === 'reset' ? 'Reset your password' : 'Welcome Back'}</h2>
+             <p className="text-slate-500">{mode === 'reset' ? 'Enter your email to receive a recovery link.' : 'Use email authentication for a persistent session.'}</p>
           </div>
 
-          <form onSubmit={mode === 'login' ? handleLogin : mode === 'signup' ? handleSignup : handleReset} className="space-y-5">
+          <form onSubmit={mode === 'login' ? handleLogin : mode === 'signup' ? handleSignup : handleReset} className="space-y-4">
             {mode === 'signup' && (
-              <div className="group bg-slate-50 border-2 border-slate-100 rounded-2xl px-4 py-3 focus-within:border-brand-500 focus-within:bg-white transition-all flex items-center gap-3">
-                <User size={18} className="text-slate-400 group-focus-within:text-brand-500 transition-colors" />
+              <div className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-xl">
+                <User size={16} className="text-slate-400" />
                 <input
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Full Name"
-                  className="w-full bg-transparent outline-none text-sm font-bold text-slate-700 placeholder:text-slate-400 placeholder:font-medium"
+                  placeholder="Full name"
+                  className="w-full outline-none text-sm"
                   required
                 />
               </div>
             )}
 
-            <div className="group bg-slate-50 border-2 border-slate-100 rounded-2xl px-4 py-3 focus-within:border-brand-500 focus-within:bg-white transition-all flex items-center gap-3">
-              <Mail size={18} className="text-slate-400 group-focus-within:text-brand-500 transition-colors" />
+            <div className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-xl">
+              <Mail size={16} className="text-slate-400" />
               <input
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 onBlur={handleEmailBlur}
-                placeholder="Email Address"
+                placeholder="Email address"
                 type="email"
-                className="w-full bg-transparent outline-none text-sm font-bold text-slate-700 placeholder:text-slate-400 placeholder:font-medium"
+                className="w-full outline-none text-sm"
                 required
               />
             </div>
 
             {mode !== 'reset' && (
-              <div className="group bg-slate-50 border-2 border-slate-100 rounded-2xl px-4 py-3 focus-within:border-brand-500 focus-within:bg-white transition-all flex items-center gap-3">
-                <KeyRound size={18} className="text-slate-400 group-focus-within:text-brand-500 transition-colors" />
+              <div className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-xl">
+                <KeyRound size={16} className="text-slate-400" />
                 <input
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Password"
                   type="password"
-                  className="w-full bg-transparent outline-none text-sm font-bold text-slate-700 placeholder:text-slate-400 placeholder:font-medium"
+                  className="w-full outline-none text-sm"
                   required
                 />
               </div>
             )}
 
             {mode === 'signup' && (
-              <div className="group bg-slate-50 border-2 border-slate-100 rounded-2xl px-4 py-3 focus-within:border-brand-500 focus-within:bg-white transition-all flex items-center gap-3">
-                <Shield size={18} className="text-slate-400 group-focus-within:text-brand-500 transition-colors" />
+              <div className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-xl">
+                <Shield size={16} className="text-slate-400" />
                 <select
-                  className="w-full bg-transparent text-sm font-bold text-slate-600 outline-none cursor-pointer"
+                  className="w-full bg-transparent text-sm font-semibold text-slate-600 outline-none"
                   value={role}
                   onChange={(e) => setRole(e.target.value as Role)}
                 >
-                  <option value={Role.AGENT}>Agent Role</option>
-                  <option value={Role.SUPERVISOR}>Supervisor Role</option>
-                  <option value={Role.ADMIN}>Admin Role</option>
+                  <option value={Role.AGENT}>Agent</option>
+                  <option value={Role.SUPERVISOR}>Supervisor</option>
+                  <option value={Role.ADMIN}>Admin</option>
                 </select>
               </div>
             )}
             
-            {mode === 'login' && (
-               <div className="flex justify-end">
-                  <button type="button" onClick={() => setMode('reset')} className="text-[10px] font-black uppercase tracking-widest text-slate-400 hover:text-brand-600 transition-colors">Forgot Password?</button>
-               </div>
-            )}
-
             {error && (
-               <div className="bg-red-50 border border-red-100 text-red-600 p-4 rounded-2xl text-xs font-bold flex items-start gap-3 animate-in slide-in-from-top-2">
-                  <AlertCircle size={16} className="shrink-0 mt-0.5"/>
+               <div className="bg-red-50 border border-red-100 text-red-600 p-3 rounded-xl text-xs font-bold flex items-start gap-2">
+                  <AlertCircle size={14} className="shrink-0 mt-0.5"/>
                   <span>{error}</span>
                </div>
             )}
             
             {message && (
-               <div className="bg-green-50 border border-green-100 text-green-700 p-4 rounded-2xl text-xs font-bold flex items-start gap-3 animate-in slide-in-from-top-2">
-                  <CheckCircle size={16} className="shrink-0 mt-0.5"/>
+               <div className="bg-green-50 border border-green-100 text-green-700 p-3 rounded-xl text-xs font-bold flex items-start gap-2">
+                  <CheckCircle size={14} className="shrink-0 mt-0.5"/>
                   <span>{message}</span>
                </div>
             )}
 
             {externalMessage && (
-              <div className="bg-amber-50 border border-amber-100 text-amber-700 p-4 rounded-2xl text-xs font-bold flex items-start justify-between gap-3 animate-in slide-in-from-top-2">
+              <div className="bg-amber-50 border border-amber-100 text-amber-700 p-3 rounded-xl text-xs font-bold flex items-start justify-between gap-2">
                 <span>{externalMessage}</span>
                 {onClearExternalMessage && (
                   <button type="button" className="text-[10px] font-black uppercase tracking-widest hover:text-amber-900 underline" onClick={onClearExternalMessage}>
@@ -358,35 +343,26 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
             <button
               type="submit"
               disabled={busy}
-              className="w-full py-4 bg-slate-900 text-white rounded-2xl text-[11px] font-black uppercase tracking-[0.2em] hover:bg-slate-800 active:scale-[0.98] transition-all shadow-xl shadow-slate-200 flex items-center justify-center gap-3 disabled:opacity-70 disabled:cursor-not-allowed"
+              className="w-full py-3 bg-brand-600 text-white rounded-xl font-bold hover:bg-brand-700 transition-all flex items-center justify-center gap-2"
             >
-              {busy ? <Loader2 size={18} className="animate-spin" /> : mode === 'login' ? 'Initialize Session' : mode === 'signup' ? 'Create Account' : 'Send Link'}
-              {!busy && <ArrowRight size={16}/>}
+              {busy ? <Loader2 size={16} className="animate-spin" /> : mode === 'login' ? 'Sign In' : mode === 'signup' ? 'Create Account' : 'Send Reset Link'}
             </button>
-
-            {mode === 'login' && (
-              <div className="relative py-2">
-                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-100"></div></div>
-                <div className="relative flex justify-center"><span className="bg-white px-4 text-[10px] font-black uppercase text-slate-300 tracking-widest">Or Continue With</span></div>
-              </div>
-            )}
 
             {mode === 'login' && (
               <button
                 type="button"
                 onClick={handleGoogleSignIn}
                 disabled={busy}
-                className="w-full py-4 bg-white border-2 border-slate-100 text-slate-600 rounded-2xl text-[11px] font-black uppercase tracking-[0.2em] hover:border-slate-200 hover:bg-slate-50 transition-all flex items-center justify-center gap-3"
+                className="w-full py-3 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold hover:bg-slate-50 transition-all flex items-center justify-center gap-2"
               >
-                <img src="https://www.google.com/favicon.ico" alt="Google" className="w-4 h-4" />
-                Google Workspace
+                Continue with Google
               </button>
             )}
           </form>
           
-          <div className="mt-8 flex items-center justify-center gap-2 text-[10px] font-bold text-slate-300 uppercase tracking-widest">
-            <Lock size={12} />
-            <span>256-Bit SSL Encrypted</span>
+          <div className="mt-8 flex items-center justify-center text-xs text-slate-400">
+            <Lock size={12} className="mr-1" />
+            <span>Secure 256-bit Encrypted Connection</span>
           </div>
         </div>
       </div>
