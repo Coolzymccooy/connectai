@@ -378,20 +378,20 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   return (
     <div className="h-full flex flex-col bg-slate-50 overflow-hidden">
       {/* Header */}
-      <div className="bg-white border-b px-4 md:px-10 pt-5 md:pt-8 shrink-0">
-         <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 md:mb-8 gap-4">
-            <h2 className="text-2xl md:text-3xl font-black text-slate-800 italic uppercase tracking-tighter">Admin Settings</h2>
+      <div className="bg-white border-b px-6 pt-6 shrink-0">
+         <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 gap-4">
+            <h2 className="text-2xl font-black text-slate-800 italic uppercase tracking-tighter">Admin Settings</h2>
             <div className="flex items-center gap-4">
-               <button onClick={handleSaveAll} className="px-6 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest">
+               <button onClick={handleSaveAll} className="px-5 py-2 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all">
                  Save Settings
                </button>
-               <div className="px-4 py-2 bg-brand-50 rounded-2xl border border-brand-100 flex items-center gap-2">
-                  <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                  <span className="text-[10px] font-black uppercase text-brand-600 tracking-widest">System: Active</span>
+               <div className="px-3 py-1.5 bg-brand-50 rounded-xl border border-brand-100 flex items-center gap-2">
+                  <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
+                  <span className="text-[9px] font-black uppercase text-brand-600 tracking-widest">System: Active</span>
                </div>
             </div>
          </div>
-         <div className="flex space-x-6 md:space-x-12 overflow-x-auto scrollbar-hide">
+         <div className="flex space-x-8 overflow-x-auto scrollbar-hide">
             {[
               { id: 'general', label: 'Integrations' },
               { id: 'ivr', label: 'Call Routing' },
@@ -403,7 +403,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
               <button 
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)} 
-                className={`pb-4 whitespace-nowrap text-[10px] font-black uppercase tracking-widest transition-all ${activeTab === tab.id ? 'border-b-4 border-brand-600 text-brand-600' : 'text-slate-400 border-transparent hover:text-slate-600'}`}
+                className={`pb-3 whitespace-nowrap text-[10px] font-black uppercase tracking-widest transition-all border-b-2 ${activeTab === tab.id ? 'border-brand-600 text-brand-600' : 'text-slate-400 border-transparent hover:text-slate-600'}`}
               >
                 {tab.label}
               </button>
@@ -411,12 +411,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
          </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto p-6 md:p-10 scrollbar-hide pb-16">
+      <div className="flex-1 overflow-y-auto p-6 scrollbar-hide pb-12">
         {/* INTEGRATIONS TAB */}
         {activeTab === 'general' && (
-           <div className="max-w-5xl space-y-6 animate-in fade-in">
-              <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-sm">
-                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Access Control</h4>
+           <div className="max-w-4xl space-y-6 animate-in fade-in">
+              <div className="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-sm">
+                <h4 className="text-lg font-black uppercase italic tracking-tight mb-4">Access Control</h4>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
                   <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
                     Invite-Only Onboarding
@@ -611,21 +611,21 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
 
         {/* ROUTING TAB */}
         {activeTab === 'ivr' && (
-           <div className="max-w-5xl space-y-10 animate-in fade-in">
-              <div className="bg-white rounded-[3.5rem] p-12 border border-slate-200 shadow-xl overflow-hidden relative">
-                 <div className="flex justify-between items-start mb-12">
+           <div className="max-w-4xl space-y-8 animate-in fade-in">
+              <div className="bg-white rounded-[2rem] p-8 border border-slate-200 shadow-xl overflow-hidden relative">
+                 <div className="flex justify-between items-start mb-8">
                    <div>
-                     <h3 className="text-4xl font-black italic uppercase tracking-tighter mb-2 text-slate-800">Call Routing Architect</h3>
+                     <h3 className="text-3xl font-black italic uppercase tracking-tighter mb-2 text-slate-800">Call Routing Architect</h3>
                      <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic">Global settings</p>
                    </div>
                    {!isIvrEditing ? (
-                     <button onClick={() => setIsIvrEditing(true)} className="px-10 py-5 bg-brand-600 text-white rounded-[1.8rem] text-[10px] font-black uppercase tracking-widest shadow-2xl hover:bg-brand-700 transition-all flex items-center gap-3">
-                       <Edit3 size={18}/> Modify Logic Matrix
+                     <button onClick={() => setIsIvrEditing(true)} className="px-6 py-3 bg-brand-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg hover:bg-brand-700 transition-all flex items-center gap-2">
+                       <Edit3 size={16}/> Modify Logic Matrix
                      </button>
                    ) : (
-                     <div className="flex gap-4">
-                        <button onClick={() => setIsIvrEditing(false)} className="px-8 py-5 bg-slate-100 text-slate-500 rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest">Discard</button>
-                        <button onClick={handleSaveIvr} className="px-10 py-5 bg-green-600 text-white rounded-[1.5rem] text-[10px] font-black uppercase tracking-widest shadow-2xl">Deploy Architecture</button>
+                     <div className="flex gap-3">
+                        <button onClick={() => setIsIvrEditing(false)} className="px-5 py-3 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-black uppercase tracking-widest">Discard</button>
+                        <button onClick={handleSaveIvr} className="px-6 py-3 bg-green-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-lg">Deploy Architecture</button>
                      </div>
                    )}
                  </div>
@@ -697,12 +697,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
 
         {/* Setup TAB */}
         {activeTab === 'migration' && (
-           <div className="max-w-5xl space-y-12 animate-in fade-in">
-              <div className="bg-white rounded-[3.5rem] border border-slate-200 p-12 shadow-xl overflow-hidden relative">
-                 <div className="flex items-center gap-6 mb-12">
-                    <div className="w-20 h-20 bg-brand-600 rounded-[2rem] flex items-center justify-center text-white shadow-2xl"><CloudDownload size={40}/></div>
+           <div className="max-w-4xl space-y-8 animate-in fade-in">
+              <div className="bg-white rounded-[2rem] border border-slate-200 p-8 shadow-xl overflow-hidden relative">
+                 <div className="flex items-center gap-6 mb-8">
+                    <div className="w-16 h-16 bg-brand-600 rounded-2xl flex items-center justify-center text-white shadow-xl"><CloudDownload size={32}/></div>
                     <div>
-                       <h3 className="text-4xl font-black text-slate-800 uppercase italic tracking-tighter">Legacy Ingestion</h3>
+                       <h3 className="text-3xl font-black text-slate-800 uppercase italic tracking-tighter">Legacy Ingestion</h3>
                        <p className="text-xs font-black text-slate-400 uppercase tracking-widest">Bridge established: connectai // {selectedProvider || 'NULL'}</p>
                     </div>
                  </div>
@@ -730,8 +730,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
 
         {/* TEAM TAB */}
         {activeTab === 'team' && (
-          <div className="max-w-5xl space-y-8 animate-in slide-in-from-bottom duration-500">
-            <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
+          <div className="max-w-4xl space-y-6 animate-in slide-in-from-bottom duration-500">
+            <div className="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-sm">
               <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Invite Staff</h4>
               <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-4">
                 <input

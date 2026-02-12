@@ -1087,18 +1087,18 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
         {/* TEAM DIRECTORY */}
         {activeTab === 'team' && (
-             <div className="h-full flex flex-col space-y-6 md:space-y-8 animate-in slide-in-from-bottom">
-                <div className="flex flex-col lg:flex-row lg:justify-between lg:items-end px-2 md:px-4 gap-4">
+             <div className="h-full flex flex-col space-y-6 animate-in slide-in-from-bottom">
+                <div className="flex flex-col lg:flex-row lg:justify-between lg:items-end px-2 gap-4">
                  <div>
-                      <h3 className="text-5xl font-black text-slate-800 uppercase italic tracking-tighter">Team Directory</h3>
-                      <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.4em] mt-2 italic">See who is online</p>
+                      <h3 className="text-3xl font-black text-slate-800 uppercase italic tracking-tighter">Team Directory</h3>
+                      <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.2em] mt-1 italic">See who is online</p>
                  </div>
-                   <div className="relative w-full md:w-80">
-                    <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-400" size={18}/>
-                    <input type="text" placeholder="Search roster..." className="w-full bg-white border border-slate-200 rounded-2xl py-4 pl-14 pr-6 text-xs font-bold outline-none focus:border-brand-500 shadow-xl transition-all" />
+                   <div className="relative w-full md:w-72">
+                    <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16}/>
+                    <input type="text" placeholder="Search roster..." className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-12 pr-4 text-xs font-bold outline-none focus:border-brand-500 shadow-lg transition-all" />
                  </div>
               </div>
-                <div className="flex-1 bg-white rounded-[3.5rem] border border-slate-200 shadow-2xl p-6 md:p-10 overflow-y-auto scrollbar-hide">
+                <div className="flex-1 bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 overflow-y-auto scrollbar-hide">
                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 md:gap-7">
                     {settings.team.map(member => (
                          <div key={member.id} className="bg-white border border-slate-100 p-5 md:p-6 rounded-[2.5rem] group hover:border-brand-500/30 hover:shadow-2xl transition-all relative overflow-hidden">
