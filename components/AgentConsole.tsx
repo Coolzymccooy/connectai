@@ -1100,7 +1100,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
               </div>
                 <div className="flex-1 bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 overflow-y-auto scrollbar-hide">
                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {[user].map(u => (
+                      {[user, ...user.role === 'ADMIN' ? [] : []].map(u => (
                          <div key={u.id} className="flex items-center gap-4 p-4 border border-slate-100 rounded-2xl hover:border-brand-200 hover:bg-brand-50/50 transition-all group">
                             <div className="relative">
                                <img src={u.avatarUrl} className="w-12 h-12 rounded-xl border border-slate-200 shadow-sm" />
@@ -1325,4 +1325,3 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     </div>
   );
 };
-// End of component
