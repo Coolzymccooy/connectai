@@ -222,10 +222,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col justify-center items-center p-4 sm:p-6 transition-all duration-500">
-      <div className="max-w-5xl w-full grid grid-cols-1 md:grid-cols-2 bg-white rounded-2xl shadow-xl overflow-hidden min-h-[560px] border border-slate-100">
-        {/* Left: Brand Side */}
-        <div className="bg-brand-900 p-12 text-white flex flex-col justify-between relative overflow-hidden">
+    <div className="min-h-[100dvh] bg-slate-50 flex flex-col justify-center items-center p-4 sm:p-6 transition-all duration-500 overflow-y-auto">
+      <div className="max-w-5xl w-full grid grid-cols-1 md:grid-cols-2 bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-100 min-h-0 md:min-h-[560px] my-auto">
+        {/* Left: Brand Side - Hidden on Mobile to prioritize Login */}
+        <div className="hidden md:flex bg-brand-900 p-12 text-white flex-col justify-between relative overflow-hidden">
           <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
             <div className="absolute top-[-50%] left-[-50%] w-[200%] h-[200%] bg-[radial-gradient(circle,rgba(255,255,255,0.8)_0%,transparent_60%)]"></div>
           </div>
@@ -257,17 +257,22 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
         </div>
 
         {/* Right: Auth Form */}
-        <div className="p-12 flex flex-col justify-center">
+        <div className="p-6 md:p-12 flex flex-col justify-center w-full">
           
-          <div className="flex items-center gap-3 mb-6">
-            <button onClick={() => setMode('login')} className={`px-4 py-2 rounded-xl text-sm font-bold ${mode === 'login' ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Sign In</button>
-            <button onClick={() => setMode('signup')} className={`px-4 py-2 rounded-xl text-sm font-bold ${mode === 'signup' ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Create Account</button>
-            <button onClick={() => setMode('reset')} className={`px-4 py-2 rounded-xl text-sm font-bold ${mode === 'reset' ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Forgot Password</button>
+          {/* Mobile Header (Visible only on mobile) */}
+          <div className="md:hidden flex items-center gap-3 mb-8">
+             <div className="w-10 h-10 bg-brand-600 rounded-lg flex items-center justify-center text-white font-bold text-xl">C</div>
+             <h1 className="text-xl font-bold text-slate-900">ConnectAI</h1>
+          </div>
+
+          <div className="flex items-center gap-2 mb-6 bg-slate-100/50 p-1 rounded-xl w-full sm:w-fit">
+            <button onClick={() => setMode('login')} className={`flex-1 sm:flex-none px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${mode === 'login' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Sign In</button>
+            <button onClick={() => setMode('signup')} className={`flex-1 sm:flex-none px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${mode === 'signup' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Sign Up</button>
           </div>
 
           <div className="mb-6">
-             <h2 className="text-2xl font-bold text-slate-800 mb-2">{mode === 'signup' ? 'Create your account' : mode === 'reset' ? 'Reset your password' : 'Welcome Back'}</h2>
-             <p className="text-slate-500">{mode === 'reset' ? 'Enter your email to receive a recovery link.' : 'Use email authentication for a persistent session.'}</p>
+             <h2 className="text-xl md:text-2xl font-bold text-slate-800 mb-1">{mode === 'signup' ? 'Create account' : mode === 'reset' ? 'Reset password' : 'Welcome Back'}</h2>
+             <p className="text-xs md:text-sm text-slate-500">{mode === 'reset' ? 'We\'ll email you a recovery link.' : 'Enter your credentials to access the workspace.'}</p>
           </div>
 
           <form onSubmit={mode === 'login' ? handleLogin : mode === 'signup' ? handleSignup : handleReset} className="space-y-4">

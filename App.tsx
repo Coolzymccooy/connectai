@@ -667,31 +667,33 @@ const App: React.FC = () => {
   const isMeetingActive = activeCall && (activeCall.status !== CallStatus.ENDED) && (activeCall.direction === 'internal' || activeCall.isVideo);
 
   return (
-    <div className="flex h-screen bg-slate-50 app-compact flex-col md:flex-row">
+    <div className="flex h-[100dvh] bg-slate-50 app-compact flex-col md:flex-row overflow-hidden">
       <ToastContainer notifications={notifications} removeNotification={() => { }} />
       {!isMeetingActive && (
-        <div className="w-full md:w-24 h-16 md:h-full bg-brand-900 flex flex-row md:flex-col items-center px-4 md:px-0 md:py-8 space-x-4 md:space-x-0 md:space-y-10 z-50 shadow-2xl shrink-0">
+        <div className="w-full md:w-20 h-16 md:h-full bg-brand-900 flex flex-row md:flex-col items-center justify-between md:justify-start px-4 md:px-0 md:py-6 z-50 shadow-xl shrink-0">
           <button
             onClick={() => { window.location.href = '/'; }}
-            className="w-10 h-10 md:w-12 md:h-12 bg-brand-500 rounded-2xl flex items-center justify-center text-white font-black text-xl md:text-2xl shadow-xl italic tracking-tighter hover:scale-[1.02] transition-transform"
+            className="w-10 h-10 bg-brand-500 rounded-xl flex items-center justify-center text-white font-black text-xl shadow-lg hover:scale-105 transition-transform"
             title="Go to Landing"
           >
             C
           </button>
-          <nav className="flex-1 flex flex-row md:flex-col items-center space-x-4 md:space-x-0 md:space-y-8">
-            <button onClick={() => setView('agent')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'agent' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Agent Workspace"><Phone size={20} /></button>
-            <button onClick={() => setView('logs')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'logs' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Call Logs"><FileText size={20} /></button>
-            <button onClick={() => setShowSoftphone(!showSoftphone)} className={`p-3 md:p-4 rounded-2xl transition-all ${showSoftphone ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Soft Box"><PhoneIncoming size={20} /></button>
-            {(currentUser.role !== Role.AGENT) && <button onClick={() => setView('supervisor')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'supervisor' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Supervisor"><LayoutDashboard size={20} /></button>}
-            {(currentUser.role === Role.ADMIN) && <button onClick={() => setView('admin')} className={`p-3 md:p-4 rounded-2xl transition-all ${view === 'admin' ? 'bg-white/10 text-white shadow-xl' : 'text-slate-500 hover:text-white'}`} title="Admin"><Settings size={20} /></button>}
+          
+          <nav className="flex flex-row md:flex-col items-center gap-2 md:gap-6 md:mt-8">
+            <button onClick={() => setView('agent')} className={`p-2.5 rounded-xl transition-all ${view === 'agent' ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`} title="Agent Workspace"><Phone size={20} /></button>
+            <button onClick={() => setView('logs')} className={`p-2.5 rounded-xl transition-all ${view === 'logs' ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`} title="Call Logs"><FileText size={20} /></button>
+            <button onClick={() => setShowSoftphone(!showSoftphone)} className={`p-2.5 rounded-xl transition-all ${showSoftphone ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`} title="Soft Box"><PhoneIncoming size={20} /></button>
+            {(currentUser.role !== Role.AGENT) && <button onClick={() => setView('supervisor')} className={`p-2.5 rounded-xl transition-all ${view === 'supervisor' ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`} title="Supervisor"><LayoutDashboard size={20} /></button>}
+            {(currentUser.role === Role.ADMIN) && <button onClick={() => setView('admin')} className={`p-2.5 rounded-xl transition-all ${view === 'admin' ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`} title="Admin"><Settings size={20} /></button>}
           </nav>
-          <button onClick={() => signOut(auth).then(() => setCurrentUser(null))} className="text-slate-500 hover:text-white p-3 md:p-4"><LogOut size={20} /></button>
+
+          <button onClick={() => signOut(auth).then(() => setCurrentUser(null))} className="text-slate-400 hover:text-white p-2.5 md:mt-auto md:mb-4"><LogOut size={20} /></button>
         </div>
       )}
-      <div className="flex-1 flex flex-col h-screen overflow-hidden">
+      <div className="flex-1 flex flex-col h-full overflow-hidden relative">
         {!isMeetingActive && (
-          <header className="h-16 md:h-20 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-10 z-40 shadow-sm shrink-0">
-            <h1 className="text-xl md:text-2xl font-black text-slate-800 uppercase italic tracking-tighter">{view} HUB</h1>
+          <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-8 z-40 shadow-sm shrink-0">
+            <h1 className="text-lg md:text-xl font-black text-slate-800 uppercase italic tracking-tighter">{view} HUB</h1>
             <HeaderProfileMenu user={currentUser} status={agentStatus} onStatusChange={setAgentStatus} onLogout={() => signOut(auth).then(() => setCurrentUser(null))} onUpdateUser={updateUserProfile} />
           </header>
         )}
