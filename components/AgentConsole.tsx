@@ -1,4 +1,4 @@
-﻿import React, { useRef, useEffect, useState, useMemo } from 'react';
+import React, { useRef, useEffect, useState, useMemo } from 'react';
 import { 
   Activity, Sparkles, Target, ChevronRight, Phone, Zap, Info, MessageSquare, Send, Mail, Briefcase, 
   X, Plus, ClipboardCheck, User as UserIcon, Radio, Search, Filter, ArrowRight, BarChart3,
@@ -1099,1401 +1099,225 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                  </div>
               </div>
                 <div className="flex-1 bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 overflow-y-auto scrollbar-hide">
-                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 md:gap-7">
-                    {settings.team.map(member => (
-                         <div key={member.id} className="bg-white border border-slate-100 p-5 md:p-6 rounded-[2.5rem] group hover:border-brand-500/30 hover:shadow-2xl transition-all relative overflow-hidden">
-                          <div className="flex items-center gap-5 mb-6 relative z-10">
-                             <div className="relative">
-                                <img src={member.avatarUrl} className="w-16 h-16 rounded-[1.5rem] border-2 border-white shadow-lg" />
-                                <div className={`absolute -bottom-1 -right-1 w-6 h-6 rounded-full border-4 border-slate-50 ${
-                                  member.currentPresence === AgentStatus.AVAILABLE ? 'bg-green-500' :
-                                  member.currentPresence === AgentStatus.BUSY ? 'bg-red-500' : 'bg-slate-400'
-                                } shadow-sm`}></div>
-                             </div>
-                             <div>
-                                <h4 className="text-lg font-black uppercase italic tracking-tighter text-slate-800 leading-tight">{member.name}</h4>
-                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">{member.role}</p>
-                             </div>
-                             <span className="ml-auto text-[9px] font-black uppercase tracking-widest text-slate-400 px-3 py-1 rounded-full bg-slate-50 border border-slate-100">
-                               {member.currentPresence === AgentStatus.AVAILABLE ? 'Online' : member.currentPresence === AgentStatus.BUSY ? 'Busy' : 'Offline'}
-                             </span>
-                          </div>
-                          <div className="grid grid-cols-1 gap-3 relative z-10">
-                             <div className="grid grid-cols-2 gap-3">
-                                <button 
-                                  onClick={() => handleInternalLink(member, false)}
-                                  disabled={member.id === user.id}
-                                  className="flex items-center justify-center gap-2 py-3 bg-white border-2 border-slate-100 rounded-xl text-[8px] font-black uppercase tracking-widest text-slate-600 hover:bg-brand-50 hover:border-brand-500/20 hover:text-brand-600 transition-all disabled:opacity-30"
-                                >
-                                     <Phone size={14}/> Call
-                                </button>
-                                <button 
-                                  onClick={() => handleInternalLink(member, true)}
-                                  disabled={member.id === user.id}
-                                  className="flex items-center justify-center gap-2 py-3 bg-brand-600 text-white rounded-xl text-[8px] font-black uppercase tracking-widest hover:bg-brand-700 transition-all disabled:opacity-30 shadow-lg"
-                                >
-                                     <Video size={14}/> Video Call
-                                </button>
-                             </div>
-                             <button 
-                               onClick={() => handleMessageTeammate(member)}
-                               disabled={member.id === user.id}
-                               className="flex items-center justify-center gap-2 py-3 bg-white border-2 border-slate-100 rounded-xl text-[8px] font-black uppercase tracking-widest text-slate-600 hover:bg-brand-50 hover:border-brand-500/20 hover:text-brand-600 transition-all disabled:opacity-30"
-                             >
-                                  <MessageCircle size={14}/> Message
-                             </button>
-                          </div>
-                          <div className="mt-5 pt-5 border-t border-slate-200/50 flex justify-between items-center text-[9px] font-black uppercase tracking-widest text-slate-400 relative z-10 italic">
-                             <span>Extension: {member.extension}</span>
-                               <span className="opacity-40">Team member</span>
-                          </div>
-                       </div>
-                    ))}
-                 </div>
-              </div>
-           </div>
+                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                      {[user, ...user.role === 'ADMIN' ? [] : []].map(u => (
+                         <div key={u.id} className="flex items-center gap-4 p-4 border border-slate-100 rounded-2xl hover:border-brand-200 hover:bg-brand-50/50 transition-all group">
+                            <div className="relative">
+                               <img src={u.avatarUrl} className="w-12 h-12 rounded-xl border border-slate-200 shadow-sm" />
+                               <div className={`absolute -bottom-1 -right-1 w-3 h-3 rounded-full border-2 border-white ${u.currentPresence === 'AVAILABLE' ? 'bg-green-500' : 'bg-slate-300'}`}></div>
+                            </div>
+                            <div className="flex-1">
+                               <p className="font-bold text-slate-800 text-sm">{u.name}</p>
+                               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">{u.role}</p>
+                            </div>
+                            <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                               <button onClick={() => handleInternalLink(u, false)} className="p-2 bg-white border border-slate-200 rounded-lg text-slate-400 hover:text-brand-600 hover:border-brand-200 shadow-sm"><Phone size={14}/></button>
+                               <button onClick={() => handleInternalLink(u, true)} className="p-2 bg-white border border-slate-200 rounded-lg text-slate-400 hover:text-brand-600 hover:border-brand-200 shadow-sm"><Video size={14}/></button>
+                               <button onClick={() => handleMessageTeammate(u)} className="p-2 bg-white border border-slate-200 rounded-lg text-slate-400 hover:text-brand-600 hover:border-brand-200 shadow-sm"><MessageSquare size={14}/></button>
+                            </div>
+                         </div>
+                      ))}
+                   </div>
+                </div>
+             </div>
         )}
 
-        {/* CAMPAIGNS HUB */}
-        {activeTab === 'campaigns' && (
-           <div className="h-full flex flex-col space-y-4 animate-in slide-in-from-right">
-              <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end px-4 gap-4">
+      {/* Campaign Creation Modal */}
+      {showCampaignModal && (
+        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 md:p-6 animate-in fade-in">
+           <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden relative">
+              <div className="p-6 md:p-8 border-b border-slate-100 flex justify-between items-center shrink-0">
                  <div>
-                    <h3 className="text-2xl font-black text-slate-800 uppercase italic tracking-tighter">Campaigns</h3>
-                    <p className="text-[9px] font-black uppercase text-slate-400 tracking-[0.35em] mt-2 italic">Autonomous Wave Orchestration</p>
+                    <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800">Orchestrate Wave</h3>
+                    <p className="text-[10px] font-black uppercase text-slate-400 tracking-[0.2em]">New Campaign</p>
                  </div>
-                 <button
-                   onClick={() => {
-                     if (!canManage) {
-                       addNotification('error', 'Only Admin/Supervisor can create campaigns.');
-                       return;
-                     }
-                     setShowCampaignModal(true);
-                   }}
-                   className={`px-5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest flex items-center gap-2 shadow-xl transition-all active:scale-95 ${canManage ? 'bg-brand-900 text-white hover:bg-slate-800' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
-                   disabled={!canManage}
-                 >
-                   <Plus size={12}/> Create Campaign
-                 </button>
-              </div>
-              <div className="flex-1 bg-white rounded-[1.8rem] border border-slate-200 shadow-xl p-4 overflow-y-auto scrollbar-hide">
-                 <div className="space-y-4">
-                    {campaigns.map(cam => (
-                       <div key={cam.id} className="bg-slate-50 border border-slate-100 p-4 rounded-[1.6rem] group hover:border-brand-500/30 transition-all shadow-sm">
-                          <div className="flex justify-between items-start mb-4">
-                             <div className="flex items-center gap-6">
-                                <div className={`w-10 h-10 rounded-[1rem] flex items-center justify-center shadow ${
-                                   cam.type === 'call' ? 'bg-orange-500 text-white' : 'bg-brand-600 text-white'
-                                }`}>
-                                   {cam.type === 'call' ? <PhoneOutgoing size={18}/> : <Mail size={18}/>}
-                                </div>
-                                <div>
-                                   <div className="flex items-center gap-4 mb-2">
-                                      <h4 className="text-lg font-black uppercase italic tracking-tighter text-slate-800">{cam.name}</h4>
-                                      <span className="px-3 py-1 bg-green-100 text-green-700 text-[8px] font-black uppercase rounded-md tracking-widest border border-green-200">{cam.status}</span>
-                                   </div>
-                                   <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                                      <Sparkles size={12} className="text-brand-500"/> AI Persona: {cam.aiPersona}
-                                   </p>
-                                </div>
-                             </div>
-                             <div className="flex gap-3">
-                                <button
-                                  onClick={() => {
-                                    const nextStatus = cam.status === 'running' ? 'paused' : 'running';
-                                    if (nextStatus === 'running') {
-                                      if (!hasActiveChannel(cam)) {
-                                        addNotification('error', 'Select at least one channel before starting.');
-                                        return;
-                                      }
-                                      if (cam.audience?.consentRequired === false) {
-                                        addNotification('error', 'Consent is required before starting this campaign.');
-                                        return;
-                                      }
-                                      if (!cam.journey || cam.journey.length === 0) {
-                                        addNotification('error', 'Add at least one journey step before starting.');
-                                        return;
-                                      }
-                                    }
-                                    const next = { ...cam, status: nextStatus };
-                                    onUpdateCampaign?.(next);
-                                    addNotification('success', `Campaign ${next.status === 'running' ? 'resumed' : 'paused'}.`);
-                                  }}
-                                  className={`px-3.5 py-2 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all ${cam.status === 'running' ? 'bg-amber-500/10 text-amber-600 border border-amber-200' : 'bg-brand-600 text-white shadow hover:bg-brand-700'}`}
-                                >
-                                  {cam.status === 'running' ? 'Pause' : 'Start'}
-                                </button>
-                                <button
-                                  onClick={() => setCampaignDetail(cam)}
-                                  className="p-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-all text-slate-400"
-                                >
-                                  <BarChart3 size={14}/>
-                                </button>
-                                <button
-                                  onClick={() => setCampaignConfig({
-                                    ...cam,
-                                    audience: cam.audience || { industry: '', lifecycleStage: 'Lead', region: 'UK', minEngagement: 0, consentRequired: true },
-                                    channels: cam.channels || { email: false, sms: false, whatsapp: false },
-                                    journey: cam.journey || [{ id: `step_${Date.now()}`, type: 'send_email', label: 'First touch' }],
-                                    content: cam.content || { emailSubject: '', emailBody: '' },
-                                  })}
-                                  className="p-2 bg-white border border-slate-200 rounded-lg hover:bg-slate-100 transition-all text-slate-400"
-                                >
-                                  <Settings size={14}/>
-                                </button>
-                             </div>
-                          </div>
-                          <div className="grid grid-cols-4 gap-3">
-                             <div className="p-3 bg-white rounded-[1rem] border border-slate-200/50 shadow-sm text-center">
-                                <p className="text-[8px] font-black uppercase text-slate-400 mb-1 tracking-widest italic">TARGET</p>
-                                <p className="text-lg font-black italic text-slate-800">{cam.targetCount}</p>
-                             </div>
-                             <div className="p-3 bg-white rounded-[1rem] border border-slate-200/50 shadow-sm text-center">
-                                <p className="text-[8px] font-black uppercase text-slate-400 mb-1 tracking-widest italic">PROCESSED</p>
-                                <p className="text-lg font-black italic text-slate-800">{cam.processedCount}</p>
-                             </div>
-                             <div className="p-3 bg-white rounded-[1rem] border border-slate-200/50 shadow-sm text-center">
-                                <p className="text-[8px] font-black uppercase text-slate-400 mb-1 tracking-widest italic">SUCCESS</p>
-                                <p className="text-lg font-black italic text-green-600">{cam.successCount}</p>
-                             </div>
-                             <div className="p-3 bg-white rounded-[1rem] border border-slate-200/50 shadow-sm flex flex-col justify-center items-center">
-                                <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden mb-2 shadow-inner">
-                                   <div className="h-full bg-brand-500 transition-all duration-1000" style={{ width: `${(cam.processedCount / cam.targetCount) * 100}%` }}></div>
-                                </div>
-                                <p className="text-[8px] font-black uppercase text-slate-400 tracking-widest">{Math.round((cam.processedCount / cam.targetCount) * 100)}% COMPLETE</p>
-                             </div>
-                          </div>
-                       </div>
-                    ))}
-                 </div>
-              </div>
-           </div>
-        )}
-
-        {/* POWER DIALER (Outbound) */}
-        {activeTab === 'outbound' && (
-           <div className="h-full flex flex-col lg:flex-row gap-6 lg:gap-8 animate-in slide-in-from-left">
-              <div className="w-full lg:w-[450px] flex flex-col space-y-6">
-                 <div className="bg-white rounded-[3rem] border border-slate-200 shadow-xl flex flex-col overflow-hidden h-full">
-                    <div className="p-10 border-b bg-slate-900 text-white flex justify-between items-center shrink-0">
-                       <div>
-                          <h3 className="text-2xl font-black uppercase italic tracking-tighter">Call Queue</h3>
-                          <p className="text-[10px] font-black uppercase text-brand-400 tracking-[0.4em] mt-1">Ready for Dialing</p>
-                       </div>
-                       <div className="p-4 bg-white/10 rounded-2xl"><Users size={24}/></div>
-                    </div>
-                    <div className="px-6 py-4 border-b bg-white flex items-center gap-3">
-                       <button onClick={startNextInQueue} className="px-4 py-2 bg-brand-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest shadow hover:bg-brand-700 transition-all">Next Call</button>
-                       <button
-                         onClick={() => {
-                           if (!canManage) {
-                             addNotification('error', 'Only Admin/Supervisor can add leads.');
-                             return;
-                           }
-                           setShowLeadModal(true);
-                         }}
-                         className={`px-4 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest shadow transition-all ${canManage ? 'bg-slate-900 text-white hover:bg-slate-800' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
-                         disabled={!canManage}
-                       >
-                         Add Lead
-                       </button>
-                       <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">{queueOrder.length} queued</span>
-                    </div>
-                    <div className="p-6 border-b bg-slate-50">
-                       <div className="relative">
-                          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16}/>
-                          <input 
-                            value={dialerSearch}
-                            onChange={e => setDialerSearch(e.target.value)}
-                            type="text" placeholder="Search target node..." className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-12 pr-4 text-xs font-bold outline-none focus:border-brand-500 shadow-inner" 
-                          />
-                       </div>
-                    </div>
-                    <div className="flex-1 overflow-y-auto scrollbar-hide p-6 space-y-3">
-                       {leads.filter(l => l.name.toLowerCase().includes(dialerSearch.toLowerCase())).map(lead => (
-                          <button 
-                            key={lead.id} 
-                            onClick={() => fetchBrief(lead)}
-                            className={`w-full p-6 rounded-2xl text-left transition-all border-2 flex items-center gap-4 group ${selectedLeadId === lead.id ? 'bg-brand-50 border-brand-500 shadow-lg' : 'border-transparent hover:bg-slate-50'}`}
-                          >
-                             <div className={`w-12 h-12 rounded-xl flex items-center justify-center font-black italic shadow-sm transition-transform group-hover:scale-105 ${selectedLeadId === lead.id ? 'bg-brand-600 text-white' : 'bg-slate-200 text-slate-500'}`}>{lead.name.charAt(0)}</div>
-                             <div className="flex-1 min-w-0">
-                                <h4 className="font-black text-slate-800 uppercase text-xs truncate group-hover:text-brand-600">{lead.name}</h4>
-                                <p className="text-[10px] font-bold text-slate-400 truncate mt-0.5">{lead.company}</p>
-                             </div>
-                             <span className={`text-[8px] font-black uppercase tracking-widest px-2.5 py-1 rounded-md border ${
-                               queueStatus[lead.id] === 'completed' ? 'bg-green-100 text-green-700 border-green-200' :
-                               queueStatus[lead.id] === 'in_progress' ? 'bg-amber-100 text-amber-700 border-amber-200' :
-                               'bg-slate-100 text-slate-500 border-slate-200'
-                             }`}>
-                               {queueStatus[lead.id] || 'queued'}
-                             </span>
-                             <ChevronRight size={16} className={`text-slate-300 transition-transform ${selectedLeadId === lead.id ? 'translate-x-1 text-brand-500' : ''}`}/>
-                          </button>
-                       ))}
-                    </div>
-                 </div>
-              </div>
-
-              <div className="flex-1 bg-white rounded-[4rem] border border-slate-200 shadow-2xl flex flex-col overflow-hidden relative min-h-[420px]">
-                 {selectedLeadId ? (
-                    <>
-                       <div className="p-12 border-b bg-slate-50 flex justify-between items-start shrink-0">
-                          <div className="flex items-center gap-10">
-                             <div className="w-28 h-28 rounded-[3rem] bg-brand-900 flex items-center justify-center text-white text-5xl font-black italic shadow-2xl relative overflow-hidden">
-                                <div className="absolute inset-0 bg-brand-500 opacity-20 blur-xl animate-pulse"></div>
-                                <span className="relative z-10">{leads.find(l => l.id === selectedLeadId)?.name.charAt(0)}</span>
-                             </div>
-                             <div>
-                                <h2 className="text-5xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">{leads.find(l => l.id === selectedLeadId)?.name}</h2>
-                                <p className="text-xl font-bold text-slate-400 flex items-center gap-3">
-                                   <Briefcase size={20}/> {leads.find(l => l.id === selectedLeadId)?.company}
-                                </p>
-                             </div>
-                          </div>
-                          <div className="flex gap-4">
-                             <button onClick={handleLeadCall} className="px-10 py-5 bg-green-600 text-white rounded-[1.6rem] text-xs font-black uppercase tracking-[0.3em] shadow-2xl hover:bg-green-700 transition-all flex items-center gap-4 active:scale-95 group">
-                                <PhoneOutgoing size={20} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform"/> Start Call
-                             </button>
-                             <button onClick={() => selectedLeadId && markQueueComplete(selectedLeadId)} className="px-6 py-5 bg-slate-900 text-white rounded-[1.6rem] text-[10px] font-black uppercase tracking-widest shadow-xl hover:bg-slate-800 transition-all">Mark Done</button>
-                          </div>
-                       </div>
-
-                       <div className="flex-1 overflow-y-auto p-12 scrollbar-hide">
-                          <div className="grid grid-cols-12 gap-12">
-                             <div className="col-span-8 space-y-12">
-                                <section className="relative">
-                                   <div className="flex items-center gap-4 mb-8">
-                                      <div className="p-3 bg-brand-50 rounded-xl text-brand-600"><Sparkles size={24}/></div>
-                                      <h4 className="text-[11px] font-black uppercase tracking-[0.5em] text-slate-400">AI Briefing</h4>
-                                   </div>
-                                   <div className="bg-slate-50 p-12 rounded-[3.5rem] border-2 border-slate-100 shadow-inner relative min-h-[250px] flex items-center justify-center">
-                                      {isLoadingBrief ? (
-                                         <div className="flex flex-col items-center gap-6 opacity-30 italic">
-                                            <RefreshCw size={48} className="animate-spin text-brand-500"/>
-                                            <p className="text-sm font-black uppercase tracking-widest">Synthesizing Public Telemetry...</p>
-                                         </div>
-                                      ) : (
-                                         <p className="text-2xl font-medium italic text-slate-700 leading-relaxed text-center">"{leadBrief || "Strategic matrix standby. Select a node to initiate profiling."}"</p>
-                                      )}
-                                   </div>
-                                </section>
-
-                                <div className="grid grid-cols-2 gap-8">
-                                   <div className="p-8 bg-white border border-slate-100 rounded-[2.5rem] shadow-sm group hover:border-brand-500/20 transition-all">
-                                      <p className="text-[9px] font-black uppercase text-slate-400 mb-4 tracking-widest flex items-center gap-2 italic"><Phone size={12}/> ADMISSION ENDPOINT</p>
-                                      <p className="text-2xl font-black text-slate-800 tracking-tight">{leads.find(l => l.id === selectedLeadId)?.phone}</p>
-                                   </div>
-                                   <div className="p-8 bg-white border border-slate-100 rounded-[2.5rem] shadow-sm group hover:border-brand-500/20 transition-all">
-                                      <p className="text-[9px] font-black uppercase text-slate-400 mb-4 tracking-widest flex items-center gap-2 italic"><Target size={12}/> CORE STATUS</p>
-                                      <span className="px-4 py-1.5 bg-blue-100 text-blue-700 text-[10px] font-black uppercase rounded-lg tracking-widest border border-blue-200">
-                                         {leads.find(l => l.id === selectedLeadId)?.status}
-                                      </span>
-                                   </div>
-                                </div>
-                             </div>
-
-                             <div className="col-span-4 space-y-12">
-                                <section className="bg-slate-900 rounded-[3rem] p-10 text-white shadow-2xl relative overflow-hidden h-full">
-                                   <div className="absolute top-0 right-0 w-48 h-48 bg-brand-500/10 blur-[60px] -mr-24 -mt-24"></div>
-                                   <h4 className="text-[11px] font-black uppercase tracking-[0.4em] text-brand-400 mb-10 flex items-center gap-3"><Terminal size={18}/> Notes</h4>
-                                   <div className="space-y-6">
-                                      <textarea 
-                                        value={leadNotes[selectedLeadId] || leads.find(l => l.id === selectedLeadId)?.notes || ""} 
-                                        onChange={e => setLeadNotes({...leadNotes, [selectedLeadId]: e.target.value})}
-                                        className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-sm italic text-slate-300 leading-relaxed outline-none focus:border-brand-500 h-40 resize-none"
-                                        placeholder="Enter packet admissions metadata..."
-                                      />
-                                      <button className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-brand-400 hover:text-white transition-all"><CheckCircle size={14}/> Save Metadata</button>
-                                   </div>
-                                </section>
-                             </div>
-                          </div>
-                       </div>
-                    </>
-                 ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center opacity-10 italic grayscale">
-                       <Radio size={120} className="mb-8 animate-pulse"/>
-                       <p className="text-4xl font-black uppercase tracking-[0.8em]">Dialer Standby</p>
-                    </div>
-                 )}
-              </div>
-           </div>
-        )}
-
-        {/* OMNICHANNEL / UNIFIED INBOX */}
-        {activeTab === 'omnichannel' && (
-           <div className="h-full flex flex-col lg:flex-row gap-6 animate-in slide-in-from-right">
-              <div className="w-full lg:w-80 bg-white rounded-[2.2rem] border border-slate-200 shadow-xl flex flex-col overflow-hidden">
-                 <div className="p-5 border-b bg-slate-50 flex items-center justify-between">
-                    <h3 className="text-lg font-black uppercase italic tracking-tighter text-slate-800">Inbox</h3>
-                    <div className="w-8 h-8 bg-brand-600 rounded-lg flex items-center justify-center text-white text-[10px] font-black">{conversations.filter(c => c.unreadCount > 0).length}</div>
-                 </div>
-                 <div className="flex-1 overflow-y-auto scrollbar-hide p-4 space-y-3">
-                    {conversations.map(conv => {
-                      const isClosed = conv.status === 'closed';
-                      return (
-                       <button key={conv.id} onClick={() => setSelectedConvId(conv.id)} className={`w-full p-4 rounded-[1.6rem] text-left transition-all border-2 group ${selectedConvId === conv.id ? 'bg-brand-50 border-brand-500 shadow-lg' : 'border-transparent hover:bg-slate-50'} ${isClosed ? 'opacity-60' : ''}`}>
-                          <div className="flex justify-between items-start mb-2">
-                             <h4 className="font-black text-slate-800 uppercase text-xs italic group-hover:text-brand-600">{conv.contactName}</h4>
-                             <span className="text-[9px] font-black text-slate-400">{new Date(conv.lastMessageTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
-                          </div>
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-[11px] text-slate-500 line-clamp-1 italic leading-relaxed">"{conv.lastMessage}"</p>
-                            {isClosed && <span className="text-[8px] font-black uppercase tracking-widest text-slate-400">Closed</span>}
-                          </div>
-                       </button>
-                      );
-                    })}
-                 </div>
+                 <button onClick={() => setShowCampaignModal(false)} className="p-3 hover:bg-slate-50 rounded-xl transition-all"><X size={20} className="text-slate-400"/></button>
               </div>
               
-              <div className="flex-1 bg-white rounded-[2.8rem] border border-slate-200 shadow-2xl flex flex-col overflow-hidden relative min-h-[420px]">
-                 {activeConversation ? (
-                    <>
-                      <div className="p-6 border-b bg-slate-900 text-white flex justify-between items-center relative">
-                         <div className="flex items-center gap-6">
-                            <div className="w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center"><MessageCircle size={22}/></div>
-                            <div>
-                               <h4 className="font-black italic uppercase text-xl tracking-tighter">{activeConversation.contactName}</h4>
-                               <p className="text-[10px] font-black text-brand-400 uppercase tracking-[0.3em]">{activeConversation.channel} HUB PORT</p>
-                            </div>
-                         </div>
-                         <div className="flex gap-4 items-center">
-                            <button onClick={() => onOutboundCall?.(activeConversation.contactPhone)} className="p-4 bg-white/10 rounded-2xl hover:bg-white/20 transition-all text-white shadow-lg"><Phone size={18}/></button>
-                            <div className="relative">
-                               <button onClick={() => setShowInboxMenu(!showInboxMenu)} className="p-4 bg-white/10 rounded-2xl hover:bg-white/20 transition-all"><MoreVertical size={20}/></button>
-                               {showInboxMenu && (
-                                  <div className="absolute right-0 top-full mt-4 w-64 bg-[#12161f] border border-white/10 rounded-3xl shadow-3xl z-50 p-4 animate-in zoom-in-95 overflow-hidden">
-                                     <button onClick={() => { setShowContactModal(true); setShowInboxMenu(false); }} className="w-full text-left p-4 hover:bg-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 transition-all"><Eye size={16}/> View contact</button>
-                                     <button onClick={() => { setShowThreadSettings(true); setShowInboxMenu(false); }} className="w-full text-left p-4 hover:bg-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 transition-all"><Settings size={16}/> Settings</button>
-                                     <button onClick={() => { setShowTerminateConfirm(true); setShowInboxMenu(false); }} className="w-full text-left p-4 hover:bg-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-red-400 flex items-center gap-3 transition-all"><Trash2 size={16}/> Terminate Thread</button>
-                                  </div>
-                               )}
-                            </div>
-                         </div>
-                      </div>
-                      {activeConversation.channel === 'whatsapp' && activeConversation.consentStatus !== 'granted' && (
-                        <div className="px-6 py-4 bg-amber-50 border-b border-amber-100 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                          <div>
-                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">NDPR Consent Required</p>
-                            <p className="text-xs text-amber-700 mt-1">{NDPR_CONSENT_TEXT}</p>
-                          </div>
+              <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-8 scrollbar-hide">
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="space-y-6">
+                       <div className="space-y-2">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Campaign Name</label>
+                          <input 
+                            className="w-full bg-slate-50 border-2 border-slate-100 rounded-xl p-4 font-bold text-sm outline-none focus:border-brand-500"
+                            placeholder="e.g., Q3 Re-engagement"
+                            value={newCampaign.name}
+                            onChange={e => setNewCampaign({...newCampaign, name: e.target.value})}
+                          />
+                       </div>
+                       <div className="space-y-2">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Channel Type</label>
                           <div className="flex gap-2">
-                            <button onClick={() => handleSendMessage(NDPR_CONSENT_TEXT)} className="px-3 py-2 rounded-lg bg-amber-600 text-white text-[9px] font-black uppercase tracking-widest">Send Consent</button>
-                            <button onClick={markConsentGranted} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase tracking-widest">Mark Consent</button>
-                            <button onClick={markConsentOptOut} className="px-3 py-2 rounded-lg bg-white border border-amber-200 text-amber-700 text-[9px] font-black uppercase tracking-widest">Opt Out</button>
+                             {['call', 'sms', 'email', 'whatsapp'].map(t => (
+                                <button 
+                                  key={t}
+                                  onClick={() => setNewCampaign({...newCampaign, type: t as any})}
+                                  className={`flex-1 py-3 rounded-xl text-[9px] font-black uppercase tracking-widest border-2 transition-all ${newCampaign.type === t ? 'border-brand-500 bg-brand-50 text-brand-600' : 'border-slate-100 bg-white text-slate-400 hover:border-slate-200'}`}
+                                >
+                                   {t}
+                                </button>
+                             ))}
                           </div>
-                        </div>
-                      )}
-                      
-                      <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-slate-50/50">
-                        {activeMessages.map(m => (
-                          <div key={m.id} className={`flex ${m.sender === 'agent' ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`max-w-[70%] p-5 rounded-[1.8rem] text-sm leading-relaxed shadow-sm ${m.sender === 'agent' ? 'bg-brand-600 text-white rounded-br-none' : 'bg-white border border-slate-100 text-slate-800 rounded-bl-none'}`}>
-                              {m.text && <p className="font-medium italic">"{m.text}"</p>}
-                              {m.attachments?.map((att, i) => (
-                                <div key={i} className="mt-4 p-4 bg-black/10 rounded-2xl flex items-center gap-4 border border-white/5 group/file cursor-pointer hover:bg-black/20 transition-all">
-                                  <div className="w-10 h-10 bg-brand-500/20 rounded-xl flex items-center justify-center text-brand-400 group-hover/file:text-white"><FileText size={20}/></div>
-                                  <div className="flex-1 min-w-0">
-                                     <p className="text-xs font-black truncate uppercase tracking-widest">{att.name}</p>
-                                     <p className="text-[9px] opacity-60 font-bold">{(att.size / 1024).toFixed(1)} KB attachment</p>
-                                  </div>
-                                  <Download size={14} className="opacity-40 group-hover/file:opacity-100 transition-opacity"/>
-                                </div>
-                              ))}
-                            </div>
+                       </div>
+                       <div className="space-y-2">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Target Volume</label>
+                          <div className="flex items-center gap-4 bg-slate-50 border-2 border-slate-100 rounded-xl p-4">
+                             <Target size={20} className="text-brand-500"/>
+                             <input 
+                               type="number"
+                               className="bg-transparent font-black text-xl outline-none w-full"
+                               value={newCampaign.target}
+                               onChange={e => setNewCampaign({...newCampaign, target: parseInt(e.target.value)})}
+                             />
+                             <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Leads</span>
                           </div>
-                        ))}
-                      </div>
+                       </div>
+                    </div>
 
-                      <div className="p-6 border-t bg-white space-y-4">
-                         {aiDraftText && (
-                            <div className="p-6 bg-brand-50 border-2 border-brand-200 rounded-[2rem] relative animate-in slide-in-from-bottom duration-300">
-                               <button onClick={() => setAiDraftText(null)} className="absolute top-6 right-6 text-brand-400 hover:text-brand-600"><X size={18}/></button>
-                               <div className="flex items-center gap-3 mb-3">
-                                  <Sparkles size={16} className="text-brand-600"/>
-                                  <p className="text-[10px] font-black uppercase tracking-widest text-brand-600">Suggested Reply</p>
-                               </div>
-                               <p className="text-sm font-medium italic text-slate-700 leading-relaxed">"{aiDraftText}"</p>
-                               <div className="mt-6 flex gap-4">
-                                  <button onClick={() => handleSendMessage(aiDraftText)} className="px-6 py-2.5 bg-brand-600 text-white rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-brand-700 shadow-lg">Send</button>
-                                  <button onClick={() => setMessageInput(aiDraftText)} className="px-6 py-2.5 bg-white border border-brand-200 text-brand-600 rounded-xl text-[9px] font-black uppercase tracking-widest hover:bg-brand-50">Edit Logic</button>
-                               </div>
-                            </div>
-                         )}
-                         <input type="file" ref={fileInputRef} onChange={handleFileAttach} className="hidden" multiple />
-                         <div className="flex gap-3">
-                            <button onClick={() => fileInputRef.current?.click()} className="p-4 bg-slate-100 text-slate-400 rounded-2xl hover:bg-slate-200 transition-all border border-slate-200 shadow-inner group"><Paperclip size={20} className="group-hover:rotate-12 transition-transform"/></button>
-                            <button onClick={handleGenerateDraft} disabled={isDrafting} className="p-4 bg-brand-50 text-brand-600 rounded-2xl hover:bg-brand-100 transition-all shadow-sm flex items-center justify-center relative overflow-hidden">
-                               {isDrafting ? <RefreshCw size={20} className="animate-spin"/> : <Sparkles size={20}/>}
-                            </button>
-                            <input type="text" value={messageInput} onChange={e => setMessageInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleSendMessage()} placeholder="Type a message..." className="flex-1 bg-slate-100 p-4 rounded-[2rem] border border-slate-200 italic outline-none focus:border-brand-500 font-medium shadow-inner" />
-                            <button onClick={() => handleSendMessage()} className="p-4 bg-slate-900 text-white rounded-[1.8rem] shadow-2xl hover:bg-slate-800 transition-all group active:scale-95"><Send size={20} className="group-hover:translate-x-1 group-hover:-translate-y-1 transition-transform"/></button>
-                         </div>
-                      </div>
-                    </>
-                 ) : (
-                    <div className="flex-1 flex flex-col items-center justify-center opacity-10 italic grayscale">
-                       <MessageSquare size={96} className="mb-6"/>
-                       <p className="text-2xl font-black uppercase tracking-[0.5em]">Select a conversation</p>
+                    <div className="space-y-6">
+                       <div className="space-y-2">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Message Style</label>
+                          <div className="grid grid-cols-2 gap-2">
+                             {['Professional Concierge', 'Friendly Assistant', 'Technical Handoff', 'Closing Logic'].map(p => (
+                                <button 
+                                  key={p}
+                                  onClick={() => setNewCampaign({...newCampaign, persona: p})}
+                                  className={`py-3 px-2 rounded-xl text-[8px] font-black uppercase tracking-widest border-2 transition-all truncate ${newCampaign.persona === p ? 'border-brand-900 bg-brand-900 text-white' : 'border-slate-100 bg-white text-slate-400 hover:border-slate-200'}`}
+                                >
+                                   {p}
+                                </button>
+                             ))}
+                          </div>
+                       </div>
+                       
+                       <div className="space-y-4 pt-2">
+                          <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Audience</label>
+                          <div className="grid grid-cols-2 gap-3">
+                             <input className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none" placeholder="Industry" value={newCampaign.audience.industry} onChange={e => setNewCampaign({...newCampaign, audience: {...newCampaign.audience, industry: e.target.value}})} />
+                             <select className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none" value={newCampaign.audience.lifecycleStage} onChange={e => setNewCampaign({...newCampaign, audience: {...newCampaign.audience, lifecycleStage: e.target.value}})}>
+                                <option>Lead</option><option>MQL</option><option>SQL</option><option>Customer</option>
+                             </select>
+                             <select className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none" value={newCampaign.audience.region} onChange={e => setNewCampaign({...newCampaign, audience: {...newCampaign.audience, region: e.target.value}})}>
+                                <option>UK</option><option>US</option><option>EU</option><option>APAC</option>
+                             </select>
+                             <input type="number" className="bg-slate-50 border border-slate-200 rounded-xl p-3 text-xs font-bold outline-none" placeholder="Min Score" value={newCampaign.audience.minEngagement} onChange={e => setNewCampaign({...newCampaign, audience: {...newCampaign.audience, minEngagement: parseInt(e.target.value)}})} />
+                          </div>
+                          <label className="flex items-center gap-3 text-[10px] font-black uppercase tracking-widest text-slate-500 cursor-pointer">
+                             <input type="checkbox" checked={newCampaign.audience.consentRequired} onChange={e => setNewCampaign({...newCampaign, audience: {...newCampaign.audience, consentRequired: e.target.checked}})} className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
+                             Consent Required
+                          </label>
+                       </div>
+                    </div>
+                 </div>
+
+                 {newCampaign.type !== 'call' && (
+                    <div className="pt-6 border-t border-slate-100 animate-in slide-in-from-bottom-4">
+                       <h4 className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4">Journey Steps</h4>
+                       <div className="space-y-3">
+                          {newCampaign.journey.map((step, idx) => (
+                             <div key={step.id} className="flex items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl">
+                                <span className="w-6 h-6 bg-white rounded-full flex items-center justify-center text-[10px] font-black border border-slate-200 text-slate-400">{idx + 1}</span>
+                                <select className="bg-transparent text-[10px] font-black uppercase tracking-widest outline-none w-32" value={step.type} onChange={e => {
+                                   const next = [...newCampaign.journey];
+                                   next[idx].type = e.target.value as any;
+                                   setNewCampaign({...newCampaign, journey: next});
+                                }}>
+                                   <option value="send_email">Send Email</option>
+                                   <option value="send_sms">Send SMS</option>
+                                   <option value="wait">Wait</option>
+                                   <option value="notify_sales">Notify Sales</option>
+                                </select>
+                                <input className="flex-1 bg-transparent text-xs font-bold outline-none" value={step.label} onChange={e => {
+                                   const next = [...newCampaign.journey];
+                                   next[idx].label = e.target.value;
+                                   setNewCampaign({...newCampaign, journey: next});
+                                }} />
+                                <button onClick={() => {
+                                   const next = newCampaign.journey.filter((_, i) => i !== idx);
+                                   setNewCampaign({...newCampaign, journey: next});
+                                }} className="p-2 hover:bg-white rounded-lg text-slate-400 hover:text-red-500 transition-colors"><Trash2 size={14}/></button>
+                             </div>
+                          ))}
+                          <button onClick={() => setNewCampaign({...newCampaign, journey: [...newCampaign.journey, { id: `step_${Date.now()}`, type: 'wait', label: 'New Step' }]})} className="w-full py-3 border-2 border-dashed border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest text-slate-400 hover:border-brand-200 hover:text-brand-500 transition-all">+ Add Step</button>
+                       </div>
                     </div>
                  )}
               </div>
-           </div>
-        )}
 
-        {/* LEADS HUB */}
-        {activeTab === 'leads' && (
-          <div className="h-full flex flex-col gap-6 animate-in slide-in-from-right">
-            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end px-4 gap-4">
-              <div>
-                <h3 className="text-2xl font-black text-slate-800 uppercase italic tracking-tighter">Leads</h3>
-                <p className="text-[9px] font-black uppercase text-slate-400 tracking-[0.35em] mt-2 italic">Bulk Import + AI-ready</p>
-              </div>
-              <button
-                onClick={() => {
-                  if (!canManage) {
-                    addNotification('error', 'Only Admin/Supervisor can add leads.');
-                    return;
-                  }
-                  setShowLeadModal(true);
-                }}
-                className={`px-5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest flex items-center gap-2 shadow-xl transition-all active:scale-95 ${canManage ? 'bg-brand-900 text-white hover:bg-slate-800' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
-                disabled={!canManage}
-              >
-                <Plus size={12}/> Add Lead
-              </button>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 flex-1 overflow-hidden">
-              <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 flex flex-col gap-4">
-                <h4 className="text-sm font-black uppercase tracking-widest text-slate-600">CSV Import</h4>
-                <input
-                  type="file"
-                  accept=".csv,text/csv"
-                  disabled={!canManage}
-                  onChange={(e) => {
-                    if (!canManage) return;
-                    const file = e.target.files?.[0];
-                    if (!file) return;
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                      setLeadCsvText(String(reader.result || ''));
-                    };
-                    reader.readAsText(file);
-                  }}
-                  className="text-xs font-bold text-slate-500 disabled:opacity-50"
-                />
-                <textarea
-                  value={leadCsvText}
-                  onChange={(e) => setLeadCsvText(e.target.value)}
-                  placeholder="Paste CSV here. Headers: name, company, phone, email, status, notes"
-                  className="min-h-[180px] bg-slate-50 border border-slate-200 rounded-2xl p-4 text-xs font-bold text-slate-600 outline-none focus:border-brand-500"
-                />
-                {leadCsvColumns.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Column Mapping</p>
-                    {['name', 'company', 'phone', 'email', 'status', 'notes', 'industry'].map((field) => (
-                      <div key={field} className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
-                        <span>{field}</span>
-                        <select
-                          className="bg-slate-50 border border-slate-200 rounded-lg px-2 py-1 text-[10px] font-black uppercase"
-                          value={leadCsvMapping[field] ?? -1}
-                          onChange={(e) => setLeadCsvMapping({ ...leadCsvMapping, [field]: Number(e.target.value) })}
-                        >
-                          <option value={-1}>Ignore</option>
-                          {leadCsvColumns.map((col, idx) => (
-                            <option key={`${field}_${col}_${idx}`} value={idx}>{col}</option>
-                          ))}
-                        </select>
-                      </div>
-                    ))}
-                    <button onClick={applyLeadMapping} className="w-full py-2 border border-dashed border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest text-slate-500 hover:border-brand-500 hover:text-brand-600">
-                      Apply Mapping
-                    </button>
-                  </div>
-                )}
-                <div className="flex gap-3">
-                  <button onClick={handleParseLeadCsv} className="flex-1 py-3 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest">
-                    Preview
-                  </button>
-                  <button onClick={handleImportLeads} disabled={leadImporting || !canManage} className="flex-1 py-3 bg-brand-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest disabled:opacity-60">
-                    {leadImporting ? 'Importing...' : 'Import'}
-                  </button>
-                  <button onClick={handleEnrichLeads} disabled={leadEnriching || leadCsvRows.length === 0} className="flex-1 py-3 bg-white border border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest text-slate-600 disabled:opacity-60">
-                    {leadEnriching ? 'Enriching...' : 'AI Enrich'}
-                  </button>
-                </div>
-                {leadCsvErrors.length > 0 && (
-                  <div className="text-[10px] font-bold text-red-500 space-y-1">
-                    {leadCsvErrors.slice(0, 4).map(err => (
-                      <div key={err}>{err}</div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="lg:col-span-2 bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 flex flex-col overflow-hidden">
-                <div className="flex items-center justify-between mb-4">
-                  <h4 className="text-sm font-black uppercase tracking-widest text-slate-600">Lead Preview</h4>
-                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">{leadCsvRows.length} parsed</span>
-                </div>
-                <div className="flex-1 overflow-y-auto scrollbar-hide space-y-3">
-                  {(leadCsvRows.length ? leadCsvRows : leads.slice(0, 20)).map(lead => (
-                    <div key={lead.id} className="p-4 rounded-2xl border border-slate-100 bg-slate-50/80 flex items-center justify-between">
-                      <div>
-                        <div className="text-xs font-black uppercase text-slate-800">{lead.name}</div>
-                        <div className="text-[10px] font-bold text-slate-400">{lead.company} • {lead.phone}</div>
-                        {lead.industry && <div className="text-[10px] font-bold text-slate-400">{lead.industry}</div>}
-                        {lead.email && <div className="text-[10px] font-bold text-slate-400">{lead.email}</div>}
-                      </div>
-                      <span className="text-[9px] font-black uppercase tracking-widest px-3 py-1 rounded-full border border-slate-200 text-slate-500">{lead.status}</span>
-                    </div>
-                  ))}
-                  {leadCsvRows.length === 0 && leads.length === 0 && (
-                    <div className="text-sm font-bold text-slate-400">No leads yet. Import or add a lead to begin.</div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* HELP CORNER */}
-        {activeTab === 'help' && (
-          <div className="h-full flex flex-col gap-6 animate-in slide-in-from-right">
-            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end px-4 gap-4">
-              <div>
-                <h3 className="text-2xl font-black text-slate-800 uppercase italic tracking-tighter">Help Corner</h3>
-                <p className="text-[9px] font-black uppercase text-slate-400 tracking-[0.35em] mt-2 italic">End-to-end guidance</p>
-              </div>
-            </div>
-            <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.2fr] gap-6 flex-1 overflow-hidden">
-              <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 flex flex-col gap-4">
-                <h4 className="text-sm font-black uppercase tracking-widest text-slate-600">Preset Questions</h4>
-                <div className="grid gap-3">
-                  {HELP_QUESTIONS.map((q) => (
-                    <button
-                      key={q.id}
-                      onClick={() => {
-                        setHelpMessages(prev => [...prev, { id: `h_${Date.now()}`, sender: 'user', text: q.question }, { id: `h_${Date.now()}_bot`, sender: 'bot', text: q.answer }]);
-                      }}
-                      className="w-full text-left p-4 rounded-2xl border border-slate-100 bg-slate-50 text-xs font-bold text-slate-600 hover:border-brand-500 hover:text-brand-700"
-                    >
-                      {q.question}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 flex flex-col overflow-hidden">
-                <div className="flex items-center justify-between mb-4">
-                  <h4 className="text-sm font-black uppercase tracking-widest text-slate-600">Ask ConnectAI</h4>
-                  <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">AI Guide</span>
-                </div>
-                <div className="flex-1 overflow-y-auto scrollbar-hide space-y-3">
-                  {helpMessages.map((msg) => (
-                    <div key={msg.id} className={`p-3 rounded-2xl text-xs font-bold ${msg.sender === 'user' ? 'bg-brand-600 text-white ml-auto w-[80%]' : 'bg-slate-100 text-slate-700 w-[80%]'}`}>
-                      {msg.text}
-                    </div>
-                  ))}
-                </div>
-                <div className="mt-4 flex gap-3">
-                  <input
-                    value={helpInput}
-                    onChange={(e) => setHelpInput(e.target.value)}
-                    placeholder="Ask anything about the app..."
-                    className="flex-1 bg-slate-50 border border-slate-200 rounded-xl px-4 py-3 text-xs font-bold"
-                  />
-                  <button
-                    onClick={() => handleHelpAsk()}
-                    className="px-4 py-3 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-                  >
-                    Ask
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* CALENDAR VIEW */}
-        {activeTab === 'calendar' && (
-           <div className="h-full flex flex-col space-y-6 md:space-y-8 animate-in fade-in">
-            <div className="flex flex-col lg:flex-row lg:justify-between lg:items-end px-2 md:px-4 gap-4">
-              <div>
-                <h3 className="text-3xl font-black text-slate-800 uppercase italic tracking-tighter">Calendar</h3>
-                <p className="text-[9px] font-black uppercase text-slate-400 tracking-[0.35em] mt-2 italic">Your meetings</p>
-              </div>
-              <button onClick={() => setShowScheduleModal(true)} className="px-6 py-3 bg-slate-900 text-white rounded-xl text-[9px] font-black uppercase tracking-widest flex items-center gap-3 shadow-xl hover:bg-slate-800 transition-all active:scale-95"><Plus size={16}/> Schedule Meeting</button>
-            </div>
-
-            <div className="flex-1 bg-white rounded-[2.5rem] border border-slate-200 shadow-xl flex flex-col overflow-hidden relative">
-              <div className="hidden lg:block overflow-x-auto">
-                <div className="min-w-[900px] grid grid-cols-[100px_1fr_1fr_1fr_1fr_1fr] border-b bg-slate-50 shadow-sm relative z-10">
-                  <div className="p-4"></div>
-                  {DAYS.map(day => (
-                    <div key={day} className="p-4 text-center border-l border-slate-200/50">
-                      <span className="text-[9px] font-black uppercase tracking-[0.35em] text-slate-400 mb-1 block">{day}</span>
-                      <span className="text-lg font-black italic text-slate-800 tracking-tighter">1{DAYS.indexOf(day) + 2}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="hidden lg:block flex-1 overflow-y-auto scrollbar-hide relative bg-white">
-                {HOURS.map(hour => (
-                  <div key={hour} className="min-w-[900px] grid grid-cols-[100px_1fr_1fr_1fr_1fr_1fr] h-20 border-b border-slate-100 group">
-                    <div className="p-3 text-[9px] font-black text-slate-300 text-right pr-6 uppercase tracking-widest">{hour}:00</div>
-                    {DAYS.map(day => {
-                      const event = meetings
-                        .map(m => {
-                          const d = new Date(m.startTime);
-                          return { ...m, day: DAYS[d.getDay() - 1], hour: d.getHours() };
-                        })
-                        .find(e => e.day === day && e.hour === hour);
-
-                      return (
-                        <div key={day} className="border-l border-slate-100 relative hover:bg-slate-50/50 transition-all">
-                          {event && (
-                            <div className={`absolute inset-2 rounded-[1.5rem] p-3 text-left shadow-lg hover:scale-[1.02] transition-all animate-in zoom-in-95 group/event ${event.attendees.some(a => a.userId === user.id) ? 'bg-brand-900 text-white' : 'bg-white border-2 border-slate-100 text-slate-600'}`}>
-                              <div className="flex justify-between items-start mb-2">
-                                <p className="text-[8px] font-black uppercase tracking-widest opacity-60 italic">{hour}:00 meeting</p>
-                                {event.isRecurring && <Repeat size={10} className="opacity-40" />}
-                              </div>
-                              <p className="font-black italic uppercase tracking-tighter text-xs leading-tight line-clamp-2">{event.title}</p>
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                {event.attendees.find(a => a.userId === user.id)?.status === 'pending' && (
-                                  <>
-                                    <button
-                                      onClick={() => handleAcceptMeeting(event)}
-                                      className="px-2.5 py-1 rounded-lg bg-white/10 text-[8px] font-black uppercase tracking-widest"
-                                    >
-                                      Accept
-                                    </button>
-                                    <button
-                                      onClick={() => handleDeclineMeeting(event)}
-                                      className="px-2.5 py-1 rounded-lg bg-white/10 text-[8px] font-black uppercase tracking-widest"
-                                    >
-                                      Decline
-                                    </button>
-                                  </>
-                                )}
-                                {(event.organizerId === user.id || event.attendees.find(a => a.userId === user.id)?.status === 'accepted') && (
-                                  <button
-                                    onClick={() => handleJoinMeeting(event)}
-                                    className="px-2.5 py-1 rounded-lg bg-brand-600 text-[8px] font-black uppercase tracking-widest text-white"
-                                  >
-                                    Join
-                                  </button>
-                                )}
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                ))}
-              </div>
-
-              <div className="lg:hidden flex-1 overflow-y-auto p-6 space-y-4">
-                {meetings.length === 0 ? (
-                  <div className="text-slate-400 text-sm font-bold">No meetings yet.</div>
-                ) : (
-                  meetings
-                    .slice()
-                    .sort((a, b) => a.startTime - b.startTime)
-                    .map(meeting => (
-                      <div key={meeting.id} className="p-4 rounded-2xl border border-slate-100 bg-slate-50/60">
-                        <div className="flex items-center justify-between">
-                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">
-                            {new Date(meeting.startTime).toLocaleDateString()}
-                          </span>
-                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">
-                            {meeting.status}
-                          </span>
-                        </div>
-                        <div className="mt-2 text-sm font-black text-slate-800 uppercase italic line-clamp-2">{meeting.title}</div>
-                        <div className="text-[10px] text-slate-500 mt-1">
-                          {Math.round(meeting.duration)} min • {meeting.attendees.length} attendees
-                        </div>
-                      </div>
-                    ))
-                )}
-              </div>
-            </div>
-
-            <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl px-6 py-5">
-              <div className="flex items-center justify-between mb-6">
-                <div>
-                  <h4 className="text-lg font-black uppercase tracking-widest text-slate-700">Meeting History</h4>
-                  <p className="text-[9px] font-black uppercase tracking-[0.3em] text-slate-400 mt-2">Last 8 sessions</p>
-                </div>
-                <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">{pastMeetings.length} entries</span>
-              </div>
-              {pastMeetings.length === 0 ? (
-                <div className="text-slate-400 text-sm font-bold">No past meetings yet.</div>
-              ) : (
-                <div className="grid grid-cols-2 gap-4">
-                  {pastMeetings.map(meeting => (
-                    <div key={meeting.id} className="p-4 rounded-2xl border border-slate-100 bg-slate-50/60 flex flex-col gap-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-400">
-                          {new Date(meeting.startTime).toLocaleDateString()}
-                        </span>
-                        <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">
-                          {meeting.status}
-                        </span>
-                      </div>
-                      <div className="text-sm font-black text-slate-800 uppercase italic line-clamp-1">{meeting.title}</div>
-                      <div className="text-[10px] text-slate-500">
-                        {Math.round(meeting.duration)} min ? {meeting.attendees.length} attendees
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-      {/* CAMPAIGN MODAL */}
-      {showCampaignModal && (
-        <div className="fixed inset-0 z-[110] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-           <div className="bg-white rounded-[2.5rem] shadow-3xl w-full max-w-xl p-10 border border-white/20 relative overflow-hidden">
-              <h3 className="text-3xl font-black italic tracking-tighter uppercase text-slate-800 mb-6 text-center">Create Campaign</h3>
-              <div className="space-y-8">
-                 <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-2">Campaign Name</label>
-                       <input className="w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-sm focus:border-brand-500 outline-none transition-all" placeholder="e.g. Q4 Growth Core" value={newCampaign.name} onChange={e => setNewCampaign({...newCampaign, name: e.target.value})}/>
-                 </div>
-                 <div className="grid grid-cols-2 gap-8">
-                    <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-2">Type</label>
-                       <select
-                         className="w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-black uppercase text-xs focus:border-brand-500 outline-none"
-                         value={newCampaign.type}
-                         onChange={e => {
-                           const nextType = e.target.value as any;
-                           const journeyType = resolveJourneyType(nextType);
-                           const nextJourney = (newCampaign.journey?.length ? newCampaign.journey : [
-                             { id: `step_${Date.now()}_1`, type: journeyType, label: 'First touch' },
-                             { id: `step_${Date.now()}_2`, type: 'wait', label: 'Wait 48h', delayHours: 48 }
-                           ]).map((step, idx) => idx === 0 ? {
-                             ...step,
-                             type: journeyType,
-                             label: nextType === 'call' ? 'Call outreach' : 'First touch'
-                           } : step);
-                           setNewCampaign({
-                             ...newCampaign,
-                             type: nextType,
-                             channels: nextType === 'call' ? { email: false, sms: false, whatsapp: false } : resolveChannelsForType(nextType),
-                             journey: nextJourney
-                           });
-                         }}
-                       >
-                          <option value="call">Calls</option>
-                          <option value="email">Email</option>
-                          <option value="sms">SMS</option>
-                          <option value="whatsapp">WhatsApp</option>
-                       </select>
-                    </div>
-                    <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-2">Target Count</label>
-                       <input type="number" className="w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-black text-center text-sm focus:border-brand-500 outline-none" value={newCampaign.target} onChange={e => setNewCampaign({...newCampaign, target: parseInt(e.target.value)})}/>
-                    </div>
-                 </div>
-                 <div className="space-y-3">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-2">Message Style</label>
-                    <div className="grid grid-cols-2 gap-4">
-                       {['Professional Concierge', 'Friendly Assistant', 'Technical Handoff', 'Closing Logic'].map(p => (
-                          <button key={p} onClick={() => setNewCampaign({...newCampaign, persona: p})} className={`p-4 rounded-2xl border-2 transition-all text-[10px] font-black uppercase tracking-widest ${newCampaign.persona === p ? 'bg-brand-900 border-brand-900 text-white shadow-xl' : 'bg-slate-50 border-slate-100 text-slate-500 hover:bg-slate-100'}`}>{p}</button>
-                       ))}
-                    </div>
-                 </div>
-                 <div className="space-y-4">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Audience</label>
-                    <div className="grid grid-cols-2 gap-4">
-                       <input
-                         className="w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-xs focus:border-brand-500 outline-none"
-                         placeholder="Industry"
-                         value={newCampaign.audience.industry}
-                         onChange={e => setNewCampaign({ ...newCampaign, audience: { ...newCampaign.audience, industry: e.target.value } })}
-                       />
-                       <select
-                         className="w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-black uppercase text-[10px] focus:border-brand-500 outline-none"
-                         value={newCampaign.audience.lifecycleStage}
-                         onChange={e => setNewCampaign({ ...newCampaign, audience: { ...newCampaign.audience, lifecycleStage: e.target.value } })}
-                       >
-                         <option value="Lead">Lead</option>
-                         <option value="MQL">MQL</option>
-                         <option value="SQL">SQL</option>
-                         <option value="Customer">Customer</option>
-                       </select>
-                       <select
-                         className="w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-black uppercase text-[10px] focus:border-brand-500 outline-none"
-                         value={newCampaign.audience.region}
-                         onChange={e => setNewCampaign({ ...newCampaign, audience: { ...newCampaign.audience, region: e.target.value } })}
-                       >
-                         <option value="UK">UK</option>
-                         <option value="NG">Nigeria</option>
-                         <option value="EU">EU</option>
-                         <option value="Global">Global</option>
-                       </select>
-                       <input
-                         type="number"
-                         className="w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-black text-center text-xs focus:border-brand-500 outline-none"
-                         placeholder="Min engagement"
-                         value={newCampaign.audience.minEngagement}
-                         onChange={e => setNewCampaign({ ...newCampaign, audience: { ...newCampaign.audience, minEngagement: Number(e.target.value || 0) } })}
-                       />
-                    </div>
-                    <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 px-2">
-                      Consent Required
-                      <input
-                        type="checkbox"
-                        checked={Boolean(newCampaign.audience.consentRequired)}
-                        onChange={e => setNewCampaign({ ...newCampaign, audience: { ...newCampaign.audience, consentRequired: e.target.checked } })}
-                        className="h-4 w-4 rounded border-slate-300"
-                      />
-                    </label>
-                 </div>
-                 <div className="space-y-4">
-                   <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Channels</label>
-                   <div className="grid grid-cols-3 gap-3">
-                     {(['email', 'sms', 'whatsapp'] as const).map((channel) => (
-                       <label key={channel} className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 border-2 border-slate-100 rounded-2xl px-4 py-3">
-                         {channel}
-                         <input
-                           type="checkbox"
-                           checked={Boolean(newCampaign.channels[channel])}
-                           onChange={e => setNewCampaign({ ...newCampaign, channels: { ...newCampaign.channels, [channel]: e.target.checked } })}
-                           className="h-4 w-4 rounded border-slate-300"
-                         />
-                       </label>
-                     ))}
-                   </div>
-                 </div>
-                 <div className="space-y-4">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Journey</label>
-                    <div className="space-y-3">
-                      {newCampaign.journey.map(step => (
-                        <div key={step.id} className="p-4 rounded-2xl border border-slate-200 bg-slate-50/70 space-y-3">
-                          <div className="flex items-center gap-3">
-                            <select
-                              className="flex-1 bg-white p-3 rounded-xl border border-slate-200 text-[10px] font-black uppercase"
-                              value={step.type}
-                              onChange={e => setNewCampaign({
-                                ...newCampaign,
-                                journey: newCampaign.journey.map(s => s.id === step.id ? { ...s, type: e.target.value as any } : s)
-                              })}
-                            >
-                              <option value="send_email">Send Email</option>
-                              <option value="send_sms">Send SMS</option>
-                              <option value="send_whatsapp">Send WhatsApp</option>
-                              <option value="wait">Wait</option>
-                              <option value="notify_sales">Notify Sales</option>
-                              <option value="update_field">Update Field</option>
-                            </select>
-                            <button
-                              onClick={() => setNewCampaign({ ...newCampaign, journey: newCampaign.journey.filter(s => s.id !== step.id) })}
-                              className="p-2 rounded-xl border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200"
-                            >
-                              <Trash2 size={14}/>
-                            </button>
-                          </div>
-                          <input
-                            className="w-full bg-white p-3 rounded-xl border border-slate-200 text-xs font-bold"
-                            value={step.label}
-                            onChange={e => setNewCampaign({
-                              ...newCampaign,
-                              journey: newCampaign.journey.map(s => s.id === step.id ? { ...s, label: e.target.value } : s)
-                            })}
-                            placeholder="Step label"
-                          />
-                          {step.type === 'wait' && (
-                            <input
-                              type="number"
-                              className="w-full bg-white p-3 rounded-xl border border-slate-200 text-xs font-black text-center"
-                              value={step.delayHours || 0}
-                              onChange={e => setNewCampaign({
-                                ...newCampaign,
-                                journey: newCampaign.journey.map(s => s.id === step.id ? { ...s, delayHours: Number(e.target.value || 0) } : s)
-                              })}
-                              placeholder="Delay hours"
-                            />
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                    <button
-                      onClick={() => setNewCampaign({
-                        ...newCampaign,
-                        journey: [...newCampaign.journey, { id: `step_${Date.now()}`, type: 'send_email', label: 'New step' }]
-                      })}
-                      className="w-full py-3 border-2 border-dashed border-slate-200 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-500 hover:border-brand-500 hover:text-brand-600"
-                    >
-                      Add Step
-                    </button>
-                 </div>
-                 <button onClick={provisionCampaign} className="w-full py-4 bg-brand-600 text-white rounded-2xl font-black uppercase tracking-[0.3em] shadow-xl hover:bg-brand-700 transition-all active:scale-95 text-xs">Create Campaign</button>
-                 <button onClick={() => setShowCampaignModal(false)} className="w-full text-slate-400 font-bold uppercase tracking-widest text-[10px] hover:text-slate-600 transition-all">Cancel</button>
-              </div>
-           </div>
-        </div>
-      )}
-
-      {campaignDetail && (
-        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-xl p-10 border border-white/20 relative overflow-hidden">
-            <button onClick={() => setCampaignDetail(null)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600"><X size={18}/></button>
-            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Campaign Insights</h3>
-            <div className="space-y-4">
-              <div className="flex justify-between text-sm font-bold text-slate-600"><span>Target</span><span>{campaignDetail.targetCount}</span></div>
-              <div className="flex justify-between text-sm font-bold text-slate-600"><span>Processed</span><span>{campaignDetail.processedCount}</span></div>
-              <div className="flex justify-between text-sm font-bold text-slate-600"><span>Success</span><span>{campaignDetail.successCount}</span></div>
-              <div className="flex justify-between text-sm font-bold text-slate-600"><span>Status</span><span>{campaignDetail.status}</span></div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {campaignConfig && (
-        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-xl p-10 border border-white/20 relative overflow-hidden">
-            <button onClick={() => setCampaignConfig(null)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600"><X size={18}/></button>
-            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Campaign Settings</h3>
-            <div className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Name</label>
-                <input
-                  value={campaignConfig.name}
-                  onChange={(e) => setCampaignConfig({ ...campaignConfig, name: e.target.value })}
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-sm"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Target Count</label>
-                <input
-                  type="number"
-                  value={campaignConfig.targetCount}
-                  onChange={(e) => setCampaignConfig({ ...campaignConfig, targetCount: Number(e.target.value || 0) })}
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-sm"
-                />
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Status</label>
-                <select
-                  value={campaignConfig.status}
-                  onChange={(e) => setCampaignConfig({ ...campaignConfig, status: e.target.value as any })}
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-sm uppercase"
-                >
-                  <option value="draft">Draft</option>
-                  <option value="running">Running</option>
-                  <option value="paused">Paused</option>
-                  <option value="completed">Completed</option>
-                </select>
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Audience</label>
-                <div className="grid grid-cols-2 gap-2">
-                  <input
-                    className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-xs"
-                    placeholder="Industry"
-                    value={campaignConfig.audience?.industry || ''}
-                    onChange={(e) => setCampaignConfig({ ...campaignConfig, audience: { ...(campaignConfig.audience || {}), industry: e.target.value } })}
-                  />
-                  <select
-                    className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-black text-[10px] uppercase"
-                    value={campaignConfig.audience?.lifecycleStage || 'Lead'}
-                    onChange={(e) => setCampaignConfig({ ...campaignConfig, audience: { ...(campaignConfig.audience || {}), lifecycleStage: e.target.value } })}
-                  >
-                    <option value="Lead">Lead</option>
-                    <option value="MQL">MQL</option>
-                    <option value="SQL">SQL</option>
-                    <option value="Customer">Customer</option>
-                  </select>
-                  <select
-                    className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-black text-[10px] uppercase"
-                    value={campaignConfig.audience?.region || 'UK'}
-                    onChange={(e) => setCampaignConfig({ ...campaignConfig, audience: { ...(campaignConfig.audience || {}), region: e.target.value } })}
-                  >
-                    <option value="UK">UK</option>
-                    <option value="NG">Nigeria</option>
-                    <option value="EU">EU</option>
-                    <option value="Global">Global</option>
-                  </select>
-                  <input
-                    type="number"
-                    className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-black text-center text-xs"
-                    value={campaignConfig.audience?.minEngagement || 0}
-                    onChange={(e) => setCampaignConfig({ ...campaignConfig, audience: { ...(campaignConfig.audience || {}), minEngagement: Number(e.target.value || 0) } })}
-                  />
-                </div>
-                <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
-                  Consent Required
-                  <input
-                    type="checkbox"
-                    checked={Boolean(campaignConfig.audience?.consentRequired)}
-                    onChange={(e) => setCampaignConfig({ ...campaignConfig, audience: { ...(campaignConfig.audience || {}), consentRequired: e.target.checked } })}
-                    className="h-4 w-4 rounded border-slate-300"
-                  />
-                </label>
-              </div>
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Channels</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {(['email', 'sms', 'whatsapp'] as const).map((channel) => (
-                    <label key={channel} className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2">
-                      {channel}
-                      <input
-                        type="checkbox"
-                        checked={Boolean(campaignConfig.channels?.[channel])}
-                        onChange={(e) => setCampaignConfig({
-                          ...campaignConfig,
-                          channels: { ...(campaignConfig.channels || { email: false, sms: false, whatsapp: false }), [channel]: e.target.checked }
-                        })}
-                        className="h-4 w-4 rounded border-slate-300"
-                      />
-                    </label>
-                  ))}
-                </div>
-              </div>
-              {(campaignConfig.channels?.email || campaignConfig.type === 'email') && (
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Email Content</label>
-                  <div className="flex flex-wrap gap-2">
-                    {CAMPAIGN_TEMPLATES.map((tpl) => (
-                      <button
-                        key={tpl.id}
-                        onClick={() => setCampaignConfig({
-                          ...campaignConfig,
-                          content: {
-                            ...(campaignConfig.content || {}),
-                            emailSubject: tpl.subject,
-                            emailBody: tpl.email,
-                            smsBody: tpl.sms,
-                          },
-                        })}
-                        className="px-3 py-2 rounded-xl border border-slate-200 bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:border-brand-500 hover:text-brand-600"
-                      >
-                        {tpl.label}
-                      </button>
-                    ))}
-                  </div>
-                  <input
-                    className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-xs"
-                    placeholder="Email subject"
-                    value={campaignConfig.content?.emailSubject || ''}
-                    onChange={(e) => setCampaignConfig({
-                      ...campaignConfig,
-                      content: { ...(campaignConfig.content || {}), emailSubject: e.target.value }
-                    })}
-                  />
-                  <textarea
-                    className="w-full min-h-[120px] bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-xs"
-                    placeholder="Email body"
-                    value={campaignConfig.content?.emailBody || ''}
-                    onChange={(e) => setCampaignConfig({
-                      ...campaignConfig,
-                      content: { ...(campaignConfig.content || {}), emailBody: e.target.value }
-                    })}
-                  />
-                  <button
-                    onClick={handleCampaignDraft}
-                    disabled={isCampaignDrafting}
-                    className="w-full py-2 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-60"
-                  >
-                    {isCampaignDrafting ? 'Drafting...' : 'AI Draft Email'}
-                  </button>
-                </div>
-              )}
-              {campaignConfig.channels?.sms && (
-                <div className="space-y-2">
-                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">SMS Content</label>
-                  <textarea
-                    className="w-full min-h-[90px] bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-xs"
-                    placeholder="SMS body"
-                    value={campaignConfig.content?.smsBody || ''}
-                    onChange={(e) => setCampaignConfig({
-                      ...campaignConfig,
-                      content: { ...(campaignConfig.content || {}), smsBody: e.target.value }
-                    })}
-                  />
-                </div>
-              )}
-              <div className="space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Journey</label>
-                <div className="space-y-2">
-                  {(campaignConfig.journey || []).map(step => (
-                    <div key={step.id} className="p-3 rounded-xl border border-slate-200 bg-slate-50 space-y-2">
-                      <div className="flex items-center gap-2">
-                        <select
-                          className="flex-1 bg-white p-2 rounded-lg border border-slate-200 text-[10px] font-black uppercase"
-                          value={step.type}
-                          onChange={(e) => setCampaignConfig({
-                            ...campaignConfig,
-                            journey: (campaignConfig.journey || []).map(s => s.id === step.id ? { ...s, type: e.target.value as any } : s)
-                          })}
-                        >
-                          <option value="send_email">Send Email</option>
-                          <option value="send_sms">Send SMS</option>
-                          <option value="send_whatsapp">Send WhatsApp</option>
-                          <option value="wait">Wait</option>
-                          <option value="notify_sales">Notify Sales</option>
-                          <option value="update_field">Update Field</option>
-                        </select>
-                        <button
-                          onClick={() => setCampaignConfig({
-                            ...campaignConfig,
-                            journey: (campaignConfig.journey || []).filter(s => s.id !== step.id)
-                          })}
-                          className="p-2 rounded-lg border border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-200"
-                        >
-                          <Trash2 size={12}/>
-                        </button>
-                      </div>
-                      <input
-                        className="w-full bg-white p-2 rounded-lg border border-slate-200 text-xs font-bold"
-                        value={step.label}
-                        onChange={(e) => setCampaignConfig({
-                          ...campaignConfig,
-                          journey: (campaignConfig.journey || []).map(s => s.id === step.id ? { ...s, label: e.target.value } : s)
-                        })}
-                        placeholder="Step label"
-                      />
-                      {step.type === 'wait' && (
-                        <input
-                          type="number"
-                          className="w-full bg-white p-2 rounded-lg border border-slate-200 text-xs font-black text-center"
-                          value={step.delayHours || 0}
-                          onChange={(e) => setCampaignConfig({
-                            ...campaignConfig,
-                            journey: (campaignConfig.journey || []).map(s => s.id === step.id ? { ...s, delayHours: Number(e.target.value || 0) } : s)
-                          })}
-                          placeholder="Delay hours"
-                        />
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <button
-                  onClick={() => setCampaignConfig({
-                    ...campaignConfig,
-                    journey: [...(campaignConfig.journey || []), { id: `step_${Date.now()}`, type: 'send_email', label: 'New step' }]
-                  })}
-                  className="w-full py-2 border border-dashed border-slate-200 rounded-xl text-[10px] font-black uppercase tracking-widest text-slate-500 hover:border-brand-500 hover:text-brand-600"
-                >
-                  Add Step
-                </button>
-              </div>
-              <button
-                onClick={() => {
-                  onUpdateCampaign?.(campaignConfig);
-                  addNotification('success', 'Campaign updated.');
-                  setCampaignConfig(null);
-                }}
-                className="w-full py-3 bg-brand-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
-              >
-                Save Changes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showContactModal && activeConversation && (
-        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg p-8 border border-white/20 relative overflow-hidden">
-            <button onClick={() => setShowContactModal(false)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600"><X size={18}/></button>
-            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Contact Profile</h3>
-            <div className="space-y-4 text-sm">
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Name</span>
-                <span className="font-bold text-slate-700">{activeConversation.contactName}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Phone</span>
-                <span className="font-bold text-slate-700">{activeConversation.contactPhone}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Channel</span>
-                <span className="font-bold text-slate-700 uppercase">{activeConversation.channel}</span>
-              </div>
-            </div>
-            <div className="mt-8 grid grid-cols-3 gap-3">
-              <button onClick={() => onOutboundCall?.(activeConversation.contactPhone)} className="px-4 py-3 rounded-xl bg-slate-900 text-white text-[9px] font-black uppercase tracking-widest">Call</button>
-              <button onClick={() => window.open(`mailto:${activeConversation.contactPhone}@customer.local`, '_blank')} className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 text-[9px] font-black uppercase tracking-widest">Email</button>
-              <button onClick={handleCreateCrmContact} className="px-4 py-3 rounded-xl bg-brand-600 text-white text-[9px] font-black uppercase tracking-widest">Sync CRM</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showThreadSettings && activeConversation && (
-        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg p-8 border border-white/20 relative overflow-hidden">
-            <button onClick={() => setShowThreadSettings(false)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600"><X size={18}/></button>
-            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Thread Settings</h3>
-            <div className="space-y-5">
-              <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
-                Mute Notifications
-                <input
-                  type="checkbox"
-                  checked={Boolean(conversationPrefs[activeConversation.id]?.muted)}
-                  onChange={() => toggleConversationPref(activeConversation.id, 'muted')}
-                  className="h-4 w-4 rounded border-slate-300"
-                />
-              </label>
-              <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
-                Mark Priority
-                <input
-                  type="checkbox"
-                  checked={Boolean(conversationPrefs[activeConversation.id]?.priority)}
-                  onChange={() => toggleConversationPref(activeConversation.id, 'priority')}
-                  className="h-4 w-4 rounded border-slate-300"
-                />
-              </label>
-              <button
-                onClick={() => updateConversation(activeConversation.id, { status: activeConversation.status === 'open' ? 'closed' : 'open' })}
-                className="w-full py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
-              >
-                {activeConversation.status === 'open' ? 'Close Thread' : 'Reopen Thread'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showTerminateConfirm && activeConversation && (
-        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-md p-8 border border-white/20 relative overflow-hidden text-center">
-            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-4">Terminate Thread</h3>
-            <p className="text-sm text-slate-500 mb-6">This will close the conversation and hide it from active inbox.</p>
-            <div className="flex gap-3 justify-center">
-              <button onClick={() => setShowTerminateConfirm(false)} className="px-4 py-3 rounded-xl bg-slate-100 text-slate-700 text-[10px] font-black uppercase tracking-widest">Cancel</button>
-              <button onClick={terminateConversation} className="px-4 py-3 rounded-xl bg-red-600 text-white text-[10px] font-black uppercase tracking-widest">Terminate</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showLeadModal && (
-        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-lg p-8 border border-white/20 relative overflow-hidden">
-            <button onClick={() => setShowLeadModal(false)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600"><X size={18}/></button>
-            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Add Lead</h3>
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
-                <input
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-sm"
-                  placeholder="Name"
-                  value={newLead.name}
-                  onChange={e => setNewLead({ ...newLead, name: e.target.value })}
-                />
-                <input
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-sm"
-                  placeholder="Company"
-                  value={newLead.company}
-                  onChange={e => setNewLead({ ...newLead, company: e.target.value })}
-                />
-                <input
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-sm"
-                  placeholder="Phone"
-                  value={newLead.phone}
-                  onChange={e => setNewLead({ ...newLead, phone: e.target.value })}
-                />
-                <input
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-sm"
-                  placeholder="Email"
-                  value={newLead.email}
-                  onChange={e => setNewLead({ ...newLead, email: e.target.value })}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <select
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-black uppercase text-xs"
-                  value={newLead.status}
-                  onChange={e => setNewLead({ ...newLead, status: e.target.value })}
-                >
-                  <option value="Lead">Lead</option>
-                  <option value="MQL">MQL</option>
-                  <option value="SQL">SQL</option>
-                  <option value="Customer">Customer</option>
-                </select>
-                <input
-                  className="w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-sm"
-                  placeholder="Notes"
-                  value={newLead.notes}
-                  onChange={e => setNewLead({ ...newLead, notes: e.target.value })}
-                />
-              </div>
-              <button onClick={handleCreateLead} disabled={!canManage} className="w-full py-3 bg-brand-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest disabled:opacity-60">
-                Save Lead
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* SCHEDULE SYNC MODAL */}
-      {showScheduleModal && (
-        <div className="fixed inset-0 z-[110] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-           <div className="bg-white rounded-[4rem] shadow-4xl w-full max-w-lg p-16 border border-white/20 relative overflow-hidden">
-              <h3 className="text-4xl font-black italic tracking-tighter uppercase text-slate-800 mb-10 text-center">Schedule Meeting</h3>
-              <div className="space-y-8">
-                 <div className="space-y-3">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Meeting Title</label>
-                    <input className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-bold focus:border-brand-500 outline-none transition-all" placeholder="e.g. Behavioral Flux Review" value={newMeeting.title} onChange={e => setNewMeeting({...newMeeting, title: e.target.value})}/>
-                 </div>
-                 <div className="space-y-3">
-                    <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Attendee</label>
-                    <select className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black uppercase text-xs focus:border-brand-500 outline-none" value={newMeeting.attendeeId} onChange={e => setNewMeeting({...newMeeting, attendeeId: e.target.value})}>
-                       <option value="">Select Cluster Node</option>
-                       {settings.team.filter(t => t.id !== user.id).map(t => (
-                          <option key={t.id} value={t.id}>{t.name} (EXT {t.extension})</option>
-                       ))}
-                    </select>
-                 </div>
-                 <div className="grid grid-cols-2 gap-8">
-                    <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Date</label>
-                       <input type="date" className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black text-center text-xs focus:border-brand-500 outline-none" value={newMeeting.date} onChange={e => setNewMeeting({...newMeeting, date: e.target.value})}/>
-                    </div>
-                    <div className="space-y-3">
-                       <label className="text-[10px] font-black uppercase text-slate-400 tracking-widest ml-4">Time</label>
-                       <input type="time" className="w-full bg-slate-50 p-6 rounded-[2rem] border-2 border-slate-100 font-black text-center text-xs focus:border-brand-500 outline-none" value={newMeeting.time} onChange={e => setNewMeeting({...newMeeting, time: e.target.value})}/>
-                    </div>
-                 </div>
-                 <button 
-                 onClick={() => {
-                    const startTime = new Date(`${newMeeting.date}T${newMeeting.time}`).getTime();
-                    const roomId = `room_${Date.now()}`;
-                    const meeting: Meeting = { 
-                      id: `m_${Date.now()}`, 
-                      roomId,
-                      title: newMeeting.title || 'Meeting', 
-                      startTime, 
-                      duration: 30, 
-                      organizerId: user.id, 
-                      attendees: [
-                        { userId: user.id, status: 'accepted' },
-                        { userId: newMeeting.attendeeId, status: 'pending' }
-                      ].filter(a => a.userId),
-                      description: 'Invite sent.',
-                      status: 'upcoming', 
-                      isRecording: false,
-                      isRecurring: newMeeting.isRecurring, 
-                      recurrencePattern: newMeeting.isRecurring ? newMeeting.pattern : undefined 
-                    };
-                    onUpdateMeetings([meeting, ...meetings]);
-                    setShowScheduleModal(false);
-                    addNotification('success', 'Meeting invite sent.');
-                  }}
-                  className="w-full py-7 bg-brand-600 text-white rounded-[2.5rem] font-black uppercase tracking-[0.3em] shadow-3xl hover:bg-brand-700 transition-all active:scale-95 text-xs"
-                 >
-                    Schedule
+              <div className="p-6 md:p-8 border-t border-slate-100 bg-slate-50 shrink-0 flex justify-end gap-4">
+                 <button onClick={() => setShowCampaignModal(false)} className="px-8 py-4 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-800">Cancel</button>
+                 <button onClick={provisionCampaign} className="px-10 py-4 bg-brand-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl hover:bg-brand-800 transition-all flex items-center gap-2">
+                    <Zap size={14} className="fill-current"/> Launch Wave
                  </button>
-                 <button onClick={() => setShowScheduleModal(false)} className="w-full text-slate-400 font-bold uppercase tracking-widest text-[10px] hover:text-slate-600 transition-all text-center">Cancel</button>
+              </div>
+           </div>
+        </div>
+      )}
+      
+      {/* Lead Creation Modal */}
+      {showLeadModal && (
+        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in">
+           <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-lg overflow-hidden p-8">
+              <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Add New Node</h3>
+              <div className="space-y-4">
+                 <input className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-bold outline-none focus:border-brand-500" placeholder="Full Name" value={newLead.name} onChange={e => setNewLead({...newLead, name: e.target.value})} />
+                 <input className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-bold outline-none focus:border-brand-500" placeholder="Company" value={newLead.company} onChange={e => setNewLead({...newLead, company: e.target.value})} />
+                 <div className="grid grid-cols-2 gap-4">
+                    <input className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-bold outline-none focus:border-brand-500" placeholder="Phone" value={newLead.phone} onChange={e => setNewLead({...newLead, phone: e.target.value})} />
+                    <input className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-bold outline-none focus:border-brand-500" placeholder="Email" value={newLead.email} onChange={e => setNewLead({...newLead, email: e.target.value})} />
+                 </div>
+                 <textarea className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-bold outline-none focus:border-brand-500 h-24 resize-none" placeholder="Notes..." value={newLead.notes} onChange={e => setNewLead({...newLead, notes: e.target.value})} />
+                 <div className="flex gap-3 pt-2">
+                    <button onClick={() => setShowLeadModal(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-200">Cancel</button>
+                    <button onClick={handleCreateLead} className="flex-1 py-4 bg-brand-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-xl hover:bg-brand-800">Add Lead</button>
+                 </div>
+              </div>
+           </div>
+        </div>
+      )}
+
+      {/* Schedule Meeting Modal */}
+      {showScheduleModal && (
+        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in">
+           <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-lg p-8">
+              <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Schedule Session</h3>
+              <div className="space-y-4">
+                 <input className="w-full bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-bold outline-none" placeholder="Meeting Title" value={newMeeting.title} onChange={e => setNewMeeting({...newMeeting, title: e.target.value})} />
+                 <div className="grid grid-cols-2 gap-4">
+                    <input type="date" className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-bold outline-none" value={newMeeting.date} onChange={e => setNewMeeting({...newMeeting, date: e.target.value})} />
+                    <input type="time" className="bg-slate-50 border border-slate-200 rounded-xl p-4 text-xs font-bold outline-none" value={newMeeting.time} onChange={e => setNewMeeting({...newMeeting, time: e.target.value})} />
+                 </div>
+                 <div className="flex items-center gap-3 p-4 border border-slate-100 rounded-xl">
+                    <input type="checkbox" checked={newMeeting.isRecurring} onChange={e => setNewMeeting({...newMeeting, isRecurring: e.target.checked})} className="w-4 h-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500" />
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Recurring?</span>
+                    {newMeeting.isRecurring && (
+                       <select className="ml-auto bg-slate-50 text-[10px] font-bold outline-none p-1 rounded" value={newMeeting.pattern} onChange={e => setNewMeeting({...newMeeting, pattern: e.target.value as any})}>
+                          <option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+                       </select>
+                    )}
+                 </div>
+                 <div className="flex gap-3 pt-4">
+                    <button onClick={() => setShowScheduleModal(false)} className="flex-1 py-4 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-black uppercase tracking-widest">Cancel</button>
+                    <button onClick={() => {
+                       const start = new Date(`${newMeeting.date}T${newMeeting.time}`).getTime();
+                       const meeting: Meeting = {
+                          id: `mtg_${Date.now()}`,
+                          title: newMeeting.title,
+                          startTime: start,
+                          duration: 30,
+                          organizerId: user.id,
+                          attendees: [{ userId: user.id, status: 'accepted' }],
+                          description: 'Scheduled via Console',
+                          status: 'upcoming',
+                          isRecurring: newMeeting.isRecurring,
+                          recurrencePattern: newMeeting.isRecurring ? newMeeting.pattern : undefined
+                       };
+                       onUpdateMeetings([...meetings, meeting]);
+                       setShowScheduleModal(false);
+                       addNotification('success', 'Meeting scheduled.');
+                    }} className="flex-1 py-4 bg-brand-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest shadow-xl">Confirm</button>
+                 </div>
               </div>
            </div>
         </div>
@@ -2501,5 +1325,3 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     </div>
   );
 };
-
-
