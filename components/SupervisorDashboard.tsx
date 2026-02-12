@@ -1,4 +1,4 @@
-﻿
+
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Activity, Sparkles, Zap, Shield, FileText, AlertTriangle, Eye, Volume2, History, 
@@ -237,12 +237,12 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
   };
 
   return (
-    <div className="h-full flex flex-col bg-[#0b0e14] p-4 md:p-8 overflow-hidden rounded-[2.5rem] shadow-2xl m-3 md:m-4 border border-white/5 relative">
+    <div className="h-full flex flex-col bg-[#0b0e14] p-4 overflow-hidden rounded-[2rem] shadow-2xl m-2 border border-white/5 relative">
       <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-brand-500/5 blur-[120px] -mr-64 -mt-64 pointer-events-none"></div>
 
       {/* Tabs Header */}
-      <div className="flex justify-between items-center mb-12 shrink-0 relative z-10">
-         <div className="flex space-x-12">
+      <div className="flex justify-between items-center mb-6 shrink-0 relative z-10">
+         <div className="flex space-x-8">
            {[
              { id: 'floor', label: 'LIVE FLOOR' },
              { id: 'performance', label: 'NEURAL ANALYTICS' },
@@ -252,22 +252,22 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
              <button 
                key={tab.id}
                onClick={() => setActiveTab(tab.id as any)} 
-               className={`pb-5 text-[11px] font-black tracking-[0.2em] transition-all border-b-4 relative ${activeTab === tab.id ? 'border-brand-500 text-white' : 'text-slate-500 border-transparent hover:text-slate-300'}`}
+               className={`pb-3 text-[10px] font-black tracking-[0.15em] transition-all border-b-2 relative ${activeTab === tab.id ? 'border-brand-500 text-white' : 'text-slate-500 border-transparent hover:text-slate-300'}`}
              >
                {tab.label}
-               {tab.id === 'alerts' && Object.keys(detectedRisks).length > 0 && <span className="absolute -top-1 -right-4 w-4 h-4 bg-red-600 rounded-full animate-pulse border-2 border-[#0b0e14]"></span>}
+               {tab.id === 'alerts' && Object.keys(detectedRisks).length > 0 && <span className="absolute -top-1 -right-3 w-3 h-3 bg-red-600 rounded-full animate-pulse border-2 border-[#0b0e14]"></span>}
              </button>
            ))}
          </div>
          
-         <div className="flex items-center gap-6">
-            <div className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl border border-white/5">
+         <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-white/5 rounded-lg border border-white/5">
                 <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></div>
-                <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">{globalActiveCalls.length} Peer Link{globalActiveCalls.length !== 1 ? 's' : ''} Active</span>
+                <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest">{globalActiveCalls.length} Peer Link{globalActiveCalls.length !== 1 ? 's' : ''} Active</span>
             </div>
-            <div className="flex bg-white/5 p-1 rounded-2xl border border-white/10">
+            <div className="flex bg-white/5 p-1 rounded-xl border border-white/10">
                 {['ALL', 'NATIVE', 'MIGRATED'].map(src => (
-                   <button key={src} onClick={() => setFilterSource(src.toLowerCase() as any)} className={`px-8 py-2.5 text-[10px] font-black tracking-widest rounded-xl transition-all ${filterSource === src.toLowerCase() ? 'bg-brand-500 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>{src}</button>
+                   <button key={src} onClick={() => setFilterSource(src.toLowerCase() as any)} className={`px-4 py-1.5 text-[8px] font-black tracking-widest rounded-lg transition-all ${filterSource === src.toLowerCase() ? 'bg-brand-500 text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'}`}>{src}</button>
                 ))}
             </div>
          </div>
@@ -276,23 +276,23 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       <div className="flex-1 overflow-y-auto pr-4 scrollbar-hide relative z-10">
         {/* LIVE FLOOR */}
         {activeTab === 'floor' && (
-           <div className="space-y-10 animate-in fade-in duration-500 pb-12 md:pb-20">
-              <div className="bg-[#12161f] rounded-[3rem] border border-white/5 p-6 md:p-10">
+           <div className="space-y-6 animate-in fade-in duration-500 pb-8 md:pb-12">
+              <div className="bg-[#12161f] rounded-[2rem] border border-white/5 p-6">
                 <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
                   <div>
-                    <p className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-500">Live Floor</p>
-                    <h3 className="text-3xl font-black text-white italic tracking-tighter mt-3">Active Calls: {liveCallList.length}</h3>
-                    <p className="text-[10px] font-black uppercase tracking-[0.3em] text-brand-400 mt-2">Select a call to monitor</p>
+                    <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Live Floor</p>
+                    <h3 className="text-2xl font-black text-white italic tracking-tighter mt-2">Active Calls: {liveCallList.length}</h3>
+                    <p className="text-[10px] font-black uppercase tracking-[0.1em] text-brand-400 mt-1">Select a call to monitor</p>
                   </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 w-full lg:w-[520px]">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full lg:w-[480px]">
                     {liveCallList.length === 0 && (
-                      <div className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-600">No active calls</div>
+                      <div className="text-[10px] font-black uppercase tracking-[0.1em] text-slate-600">No active calls</div>
                     )}
                     {liveCallList.slice(0, 4).map(call => (
-                      <div key={call.id} className="p-4 rounded-2xl border border-white/10 bg-white/5 flex items-center justify-between">
+                      <div key={call.id} className="p-3 rounded-xl border border-white/10 bg-white/5 flex items-center justify-between">
                         <div>
-                          <p className="text-xs font-black text-white uppercase">{call.agentName || call.customerName}</p>
-                          <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{call.queue} • {Math.floor(call.duration / 60)}m {call.duration % 60}s</p>
+                          <p className="text-xs font-bold text-white uppercase">{call.agentName || call.customerName}</p>
+                          <p className="text-[9px] font-bold uppercase tracking-wide text-slate-400">{call.queue} • {Math.floor(call.duration / 60)}m {call.duration % 60}s</p>
                         </div>
                         <button
                           onClick={() => {
@@ -317,7 +317,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                               .finally(() => setMonitoringBusy(false));
                           }}
                           disabled={monitoringBusy}
-                          className={`px-3 py-2 rounded-xl text-[9px] font-black uppercase tracking-widest ${monitoredCallId === call.id ? 'bg-brand-500 text-white' : 'bg-white/10 text-slate-300 hover:bg-white/20'}`}
+                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wide ${monitoredCallId === call.id ? 'bg-brand-500 text-white' : 'bg-white/10 text-slate-300 hover:bg-white/20'}`}
                         >
                           {monitoredCallId === call.id ? 'Stop' : 'Listen'}
                         </button>
@@ -326,7 +326,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                   </div>
                 </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 md:gap-10">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               {team?.filter(u => u.role === 'AGENT').map(agent => {
                 const liveCall = agentActivityMap[agent.id];
                 const isLive = !!liveCall;
@@ -335,44 +335,43 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                 const isPeer = isLive && liveCall.id !== activeCall?.id;
 
                 return (
-                   <div key={agent.id} className={`bg-[#12161f] rounded-[3.5rem] p-6 md:p-10 transition-all duration-700 overflow-hidden relative border-2 ${isLive ? 'border-brand-500/40 bg-brand-500/[0.04] shadow-2xl' : 'border-white/5 opacity-50'}`}>
+                   <div key={agent.id} className={`bg-[#12161f] rounded-[2rem] p-6 transition-all duration-500 overflow-hidden relative border ${isLive ? 'border-brand-500/40 bg-brand-500/[0.04] shadow-lg' : 'border-white/5 opacity-60'}`}>
                       {isLive && (
                         <div className="absolute inset-0 z-0 opacity-10">
-                           <div className="absolute inset-0 bg-brand-500/20 animate-pulse rounded-[3.5rem]"></div>
-                           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-full h-full border-2 border-brand-500 rounded-full animate-ping"></div>
+                           <div className="absolute inset-0 bg-brand-500/20 animate-pulse rounded-[2rem]"></div>
                         </div>
                       )}
-                      {risk && <div className="absolute top-0 left-0 w-full bg-red-600/90 py-2.5 text-center text-[9px] font-black uppercase text-white animate-pulse z-20 tracking-[0.3em]">Intervention Required</div>}
-                      <div className="flex items-center gap-6 mb-12 relative z-10">
-                         <img src={agent.avatarUrl} className={`w-24 h-24 rounded-[2.5rem] shadow-2xl transition-all ${isLive ? 'ring-4 ring-brand-500/50' : 'grayscale'}`}/>
+                      {risk && <div className="absolute top-0 left-0 w-full bg-red-600/90 py-1.5 text-center text-[8px] font-black uppercase text-white animate-pulse z-20 tracking-widest">Intervention Required</div>}
+                      <div className="flex items-center gap-4 mb-6 relative z-10">
+                         <img src={agent.avatarUrl} className={`w-16 h-16 rounded-2xl shadow-lg transition-all ${isLive ? 'ring-2 ring-brand-500/50' : 'grayscale'}`}/>
                          <div className="flex-1">
-                            <p className="font-black text-white italic tracking-tighter uppercase text-3xl leading-tight">{agent.name}</p>
+                            <p className="font-bold text-white uppercase text-lg leading-tight">{agent.name}</p>
                             <div className="flex items-center gap-2 mt-1">
-                               <div className={`w-2 h-2 rounded-full ${isLive ? 'bg-green-500 animate-pulse' : 'bg-slate-700'}`}></div>
-                               <p className={`text-[10px] font-black uppercase tracking-[0.3em] ${isLive ? 'text-brand-400' : 'text-slate-600'}`}>{isLive ? (isPeer ? 'Peer Core Active' : 'Local Workspace') : 'Standby'}</p>
+                               <div className={`w-1.5 h-1.5 rounded-full ${isLive ? 'bg-green-500 animate-pulse' : 'bg-slate-700'}`}></div>
+                               <p className={`text-[9px] font-bold uppercase tracking-wider ${isLive ? 'text-brand-400' : 'text-slate-600'}`}>{isLive ? (isPeer ? 'Peer Active' : 'Local') : 'Standby'}</p>
                             </div>
                          </div>
                       </div>
                       {isLive ? (
-                         <div className="space-y-8 relative z-10">
-                            <div className="h-24 bg-black/40 rounded-[2rem] flex items-center justify-center gap-1.5 overflow-hidden relative border border-white/5 px-8">
-                               {[...Array(24)].map((_, i) => (
+                         <div className="space-y-6 relative z-10">
+                            <div className="h-16 bg-black/40 rounded-xl flex items-center justify-center gap-1 overflow-hidden relative border border-white/5 px-4">
+                               {[...Array(16)].map((_, i) => (
                                  <div 
                                   key={i} 
                                   className="w-1 bg-brand-500/50 rounded-full transition-all duration-200 animate-pulse" 
                                   style={{ height: `${20 + Math.random() * 80}%`, animationDelay: `${i * 0.04}s` }}
                                  ></div>
                                ))}
-                               <div className="absolute bottom-2 left-6 text-[8px] font-black text-brand-500/40 uppercase tracking-[0.2em]">{isPeer ? 'Remote Telemetry' : 'Local Link'}</div>
+                               <div className="absolute bottom-1 left-3 text-[7px] font-black text-brand-500/40 uppercase tracking-wider">{isPeer ? 'Remote' : 'Local'}</div>
                             </div>
-                            <div className="flex gap-4">
-                               <button onClick={() => handleMonitor(agent.id, 'listening')} disabled={monitoringBusy} className={`flex-1 py-5 rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all border flex items-center justify-center gap-2 ${monitoredCallId === liveCall.id ? 'bg-brand-500 text-white border-brand-500 shadow-xl' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${monitoringBusy ? 'opacity-60 cursor-not-allowed' : ''}`}><Headset size={14}/> {monitoredCallId === liveCall.id ? 'Monitoring' : 'Monitor'}</button>
-                               <button onClick={() => handleMonitor(agent.id, 'whispering')} disabled={monitoringBusy} className={`flex-1 py-5 rounded-2xl text-[10px] font-black uppercase tracking-[0.2em] transition-all border ${mode === 'whispering' ? 'bg-brand-600 text-white border-brand-600 shadow-xl' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${monitoringBusy ? 'opacity-60 cursor-not-allowed' : ''}`}>Whisper</button>
+                            <div className="flex gap-3">
+                               <button onClick={() => handleMonitor(agent.id, 'listening')} disabled={monitoringBusy} className={`flex-1 py-3 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all border flex items-center justify-center gap-2 ${monitoredCallId === liveCall.id ? 'bg-brand-500 text-white border-brand-500 shadow-md' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${monitoringBusy ? 'opacity-60 cursor-not-allowed' : ''}`}><Headset size={12}/> {monitoredCallId === liveCall.id ? 'Monitoring' : 'Monitor'}</button>
+                               <button onClick={() => handleMonitor(agent.id, 'whispering')} disabled={monitoringBusy} className={`flex-1 py-3 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all border ${mode === 'whispering' ? 'bg-brand-600 text-white border-brand-600 shadow-md' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${monitoringBusy ? 'opacity-60 cursor-not-allowed' : ''}`}>Whisper</button>
                             </div>
                          </div>
                       ) : (
-                        <div className="py-10 border-t border-white/5 flex flex-col items-center justify-center gap-2 text-slate-700 italic text-xs font-black uppercase tracking-[0.4em]">
-                           <Clock size={16} className="opacity-20"/>
+                        <div className="py-6 border-t border-white/5 flex flex-col items-center justify-center gap-2 text-slate-700 italic text-[10px] font-bold uppercase tracking-widest">
+                           <Clock size={14} className="opacity-20"/>
                            Waiting...
                         </div>
                       )}
@@ -385,31 +384,31 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
         {/* NEURAL ANALYTICS */}
         {activeTab === 'performance' && (
-           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 md:gap-10 animate-in fade-in duration-700 pb-12 md:pb-20">
-              <div className="lg:col-span-4 bg-[#12161f] border border-white/5 rounded-[3rem] p-12 relative overflow-hidden">
-                 <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.4em] mb-12">QUEUE ADMISSIONS</h4>
-                 <div className="h-72">
+           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-in fade-in duration-700 pb-12">
+              <div className="lg:col-span-4 bg-[#12161f] border border-white/5 rounded-[2.5rem] p-8 relative overflow-hidden">
+                 <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-8">QUEUE ADMISSIONS</h4>
+                 <div className="h-56">
                     <ResponsiveContainer width="100%" height="100%">
                        <PieChart>
-                          <Pie data={chartData.pie} innerRadius={85} outerRadius={115} paddingAngle={8} dataKey="value" stroke="none">
+                          <Pie data={chartData.pie} innerRadius={60} outerRadius={85} paddingAngle={6} dataKey="value" stroke="none">
                              {chartData.pie.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
                           </Pie>
                           <Tooltip contentStyle={{ backgroundColor: '#0b0e14', border: '1px solid #ffffff10', borderRadius: '12px' }} />
                        </PieChart>
                     </ResponsiveContainer>
                  </div>
-                 <div className="mt-12 space-y-4">
+                 <div className="mt-8 space-y-3">
                     {chartData.pie.map((entry, i) => (
-                      <div key={entry.name} className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest">
-                         <div className="flex items-center gap-3"><div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }}></div> <span className="text-slate-400">{entry.name}</span></div>
+                      <div key={entry.name} className="flex justify-between items-center text-[9px] font-bold uppercase tracking-wider">
+                         <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full" style={{ backgroundColor: COLORS[i % COLORS.length] }}></div> <span className="text-slate-400">{entry.name}</span></div>
                          <span className="text-white">{entry.value} NODES</span>
                       </div>
                     ))}
                  </div>
               </div>
-              <div className="lg:col-span-8 bg-[#12161f] border border-white/5 rounded-[3rem] p-12 relative overflow-hidden">
-                 <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.4em] mb-12">SENTIMENT FLUX EKG</h4>
-                 <div className="h-[400px]">
+              <div className="lg:col-span-8 bg-[#12161f] border border-white/5 rounded-[2.5rem] p-8 relative overflow-hidden">
+                 <h4 className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] mb-8">SENTIMENT FLUX EKG</h4>
+                 <div className="h-[300px]">
                     <ResponsiveContainer width="100%" height="100%">
                        <AreaChart data={chartData.trend}>
                           <defs>
@@ -421,7 +420,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                           <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#475569', fontSize: 10 }} />
                           <YAxis hide domain={[0, 100]} />
                           <Tooltip contentStyle={{ backgroundColor: '#0b0e14', border: '1px solid #ffffff10', borderRadius: '12px' }} />
-                          <Area type="monotone" dataKey="value" stroke="#6366f1" strokeWidth={5} fillOpacity={1} fill="url(#ekgGlow)" dot={{ fill: '#6366f1', stroke: '#0b0e14', r: 6 }} />
+                          <Area type="monotone" dataKey="value" stroke="#6366f1" strokeWidth={4} fillOpacity={1} fill="url(#ekgGlow)" dot={{ fill: '#6366f1', stroke: '#0b0e14', r: 4 }} />
                        </AreaChart>
                     </ResponsiveContainer>
                  </div>
@@ -431,58 +430,58 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
         {/* LEGACY HUB */}
         {activeTab === 'history' && (
-           <div className="space-y-12 animate-in slide-in-from-right duration-500 pb-20">
+           <div className="space-y-6 animate-in slide-in-from-right duration-500 pb-12">
               <div className="flex justify-between items-end">
                  <div>
-                    <h3 className="text-5xl font-black text-white uppercase italic tracking-tighter flex items-center gap-6"><Infinity size={48} className="text-brand-500 animate-spin-slow"/> LEGACY HUB</h3>
-                    <p className="text-[11px] font-black uppercase text-slate-500 tracking-[0.4em] mt-3 flex items-center gap-2">
-                       <RefreshCw size={14} className="animate-spin"/> Loading team data
+                    <h3 className="text-2xl font-black text-white uppercase italic tracking-tighter flex items-center gap-3"><Infinity size={24} className="text-brand-500 animate-spin-slow"/> LEGACY HUB</h3>
+                    <p className="text-[9px] font-black uppercase text-slate-500 tracking-[0.1em] mt-1 flex items-center gap-2">
+                       <RefreshCw size={10} className="animate-spin"/> Loading team data
                     </p>
                  </div>
-                 <div className="flex gap-6 items-center">
-                    <div className="bg-white/5 p-4 rounded-2xl border border-white/10 hidden lg:block min-w-[300px]">
-                       <p className="text-[8px] font-black text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-2"><Terminal size={10}/> ADMISSION LOGS</p>
-                       <div className="space-y-1">
-                          {ingestionLogs.map((log, i) => <p key={i} className="text-[9px] font-mono text-brand-400 opacity-60 animate-in slide-in-from-bottom-2">{log}</p>)}
+                 <div className="flex gap-4 items-center">
+                    <div className="bg-white/5 p-2.5 rounded-xl border border-white/10 hidden lg:block min-w-[200px]">
+                       <p className="text-[7px] font-black text-slate-500 uppercase tracking-widest mb-1.5 flex items-center gap-2"><Terminal size={8}/> ADMISSION LOGS</p>
+                       <div className="space-y-0.5">
+                          {ingestionLogs.map((log, i) => <p key={i} className="text-[8px] font-mono text-brand-400 opacity-60 animate-in slide-in-from-bottom-2 truncate">{log}</p>)}
                        </div>
                     </div>
-                    <div className="relative w-80">
-                       <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-slate-500" size={20}/>
-                       <input type="text" placeholder="Search neural archive..." className="w-full bg-white/5 border border-white/10 rounded-2xl py-5 pl-14 pr-6 text-white text-xs font-bold outline-none focus:border-brand-500 shadow-2xl transition-all" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
+                    <div className="relative w-56">
+                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={14}/>
+                       <input type="text" placeholder="Search archive..." className="w-full bg-white/5 border border-white/10 rounded-xl py-2.5 pl-9 pr-3 text-white text-[10px] font-bold outline-none focus:border-brand-500 shadow-xl transition-all" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} />
                     </div>
                  </div>
               </div>
 
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6 md:gap-8">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                  {filteredHistory.map(call => (
-                    <div key={call.id} className="p-6 md:p-10 bg-[#12161f] border border-white/5 rounded-[3rem] group hover:bg-[#1a1f2b] transition-all duration-500 animate-in zoom-in-95">
-                       <div className="flex justify-between items-start mb-8">
-                          <div className="flex items-center gap-6">
-                             <div className="w-16 h-16 rounded-2xl bg-brand-50/5 flex items-center justify-center text-brand-500 border border-brand-500/10"><Database size={32}/></div>
+                    <div key={call.id} className="p-5 bg-[#12161f] border border-white/5 rounded-[1.5rem] group hover:bg-[#1a1f2b] transition-all duration-500 animate-in zoom-in-95">
+                       <div className="flex justify-between items-start mb-4">
+                          <div className="flex items-center gap-3">
+                             <div className="w-10 h-10 rounded-xl bg-brand-50/5 flex items-center justify-center text-brand-500 border border-brand-500/10"><Database size={20}/></div>
                              <div>
-                                <h4 className="text-white font-black italic uppercase text-2xl tracking-tight mb-1">{call.customerName}</h4>
+                                <h4 className="text-white font-black italic uppercase text-sm tracking-tight mb-0.5">{call.customerName}</h4>
                                 <div className="flex gap-2">
-                                  <span className="text-[9px] px-3 py-1 rounded-lg bg-brand-500/10 text-brand-400 border border-brand-500/20 font-black uppercase tracking-widest">{call.isMigrated ? call.legacyProvider : 'NATIVE'} HUB</span>
-                                  {call.id.includes('peer') && <span className="text-[9px] px-3 py-1 rounded-lg bg-green-500/10 text-green-400 border border-green-500/20 font-black uppercase tracking-widest animate-pulse">PEER SYNC</span>}
+                                  <span className="text-[7px] px-2 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20 font-black uppercase tracking-widest">{call.isMigrated ? call.legacyProvider : 'NATIVE'} HUB</span>
+                                  {call.id.includes('peer') && <span className="text-[7px] px-2 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20 font-black uppercase tracking-widest animate-pulse">PEER SYNC</span>}
                                 </div>
                              </div>
                           </div>
                           <div className="text-right">
-                             <p className="text-[10px] font-black uppercase text-slate-600 mb-1">Sentiment</p>
-                             <p className="text-3xl font-black italic text-brand-400">{call.analysis?.sentimentScore || call.liveSentiment || 50}%</p>
+                             <p className="text-[8px] font-black uppercase text-slate-600 mb-0.5">Sentiment</p>
+                             <p className="text-xl font-black italic text-brand-400">{call.analysis?.sentimentScore || call.liveSentiment || 50}%</p>
                           </div>
                        </div>
-                       <div className="grid grid-cols-3 gap-6">
-                          <div className="p-5 bg-white/5 rounded-[1.5rem] border border-white/5"><p className="text-[9px] font-black uppercase text-slate-500 mb-1">Start time</p><p className="text-lg font-black italic text-slate-300">{new Date(call.startTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p></div>
-                          <div className="p-5 bg-white/5 rounded-[1.5rem] border border-white/5"><p className="text-[9px] font-black uppercase text-slate-500 mb-1">Duration</p><p className="text-lg font-black italic text-slate-300">{Math.floor(call.durationSeconds / 60)}m {Math.floor(call.durationSeconds % 60)}s</p></div>
-                          <div className="p-5 bg-white/5 rounded-[1.5rem] border border-white/5"><p className="text-[9px] font-black uppercase text-slate-500 mb-1">QA Match</p><p className="text-lg font-black italic text-slate-300">{call.analysis?.qaScore || '--'}</p></div>
+                       <div className="grid grid-cols-3 gap-3">
+                          <div className="p-3 bg-white/5 rounded-xl border border-white/5"><p className="text-[7px] font-black uppercase text-slate-500 mb-0.5">Start time</p><p className="text-xs font-bold text-slate-300">{new Date(call.startTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</p></div>
+                          <div className="p-3 bg-white/5 rounded-xl border border-white/5"><p className="text-[7px] font-black uppercase text-slate-500 mb-0.5">Duration</p><p className="text-xs font-bold text-slate-300">{Math.floor(call.durationSeconds / 60)}m {Math.floor(call.durationSeconds % 60)}s</p></div>
+                          <div className="p-3 bg-white/5 rounded-xl border border-white/5"><p className="text-[7px] font-black uppercase text-slate-500 mb-0.5">QA Match</p><p className="text-xs font-bold text-slate-300">{call.analysis?.qaScore || '--'}</p></div>
                        </div>
                     </div>
                  ))}
                  {filteredHistory.length === 0 && (
-                   <div className="col-span-2 py-40 flex flex-col items-center justify-center opacity-10 italic">
-                      <SearchCode size={80} className="mb-6"/>
-                      <p className="text-2xl font-black uppercase tracking-[0.6em]">No Records Admitted</p>
+                   <div className="col-span-2 py-16 flex flex-col items-center justify-center opacity-10 italic">
+                      <SearchCode size={48} className="mb-3"/>
+                      <p className="text-lg font-black uppercase tracking-[0.3em]">No Records Admitted</p>
                    </div>
                  )}
               </div>
@@ -491,43 +490,43 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
         {/* RISK CONSOLE */}
         {activeTab === 'alerts' && (
-           <div className="space-y-12 animate-in slide-in-from-bottom duration-700 pb-20">
-              <div className="flex justify-between items-center mb-12">
+           <div className="space-y-6 animate-in slide-in-from-bottom duration-700 pb-12">
+              <div className="flex justify-between items-center mb-6">
                  <div>
-                    <h3 className="text-5xl font-black text-white uppercase italic tracking-tighter flex items-center gap-6"><ShieldAlert size={48} className="text-red-500"/> RISK CONSOLE</h3>
-                    <p className="text-[11px] font-black uppercase text-slate-500 tracking-[0.4em] mt-3 italic">NEURAL SAFEGUARD AUDIT CLUSTER</p>
+                    <h3 className="text-2xl font-black text-white uppercase italic tracking-tighter flex items-center gap-3"><ShieldAlert size={24} className="text-red-500"/> RISK CONSOLE</h3>
+                    <p className="text-[9px] font-black uppercase text-slate-500 tracking-[0.2em] mt-1 italic">NEURAL SAFEGUARD AUDIT CLUSTER</p>
                  </div>
-                 <button onClick={handleRunRiskAudit} disabled={isAuditing} className="px-12 py-6 bg-red-600 hover:bg-red-700 text-white rounded-[2rem] text-[11px] font-black uppercase tracking-[0.3em] shadow-2xl transition-all flex items-center gap-4 disabled:opacity-50">
-                    {isAuditing ? <RefreshCw size={20} className="animate-spin"/> : <SearchCode size={20}/>}
-                    {isAuditing ? 'AUDITING CORES...' : 'INITIATE GLOBAL RISK AUDIT'}
+                 <button onClick={handleRunRiskAudit} disabled={isAuditing} className="px-6 py-3 bg-red-600 hover:bg-red-700 text-white rounded-xl text-[9px] font-black uppercase tracking-[0.2em] shadow-lg transition-all flex items-center gap-2 disabled:opacity-50">
+                    {isAuditing ? <RefreshCw size={14} className="animate-spin"/> : <SearchCode size={14}/>}
+                    {isAuditing ? 'AUDITING...' : 'RUN AUDIT'}
                  </button>
               </div>
-              <div className="space-y-8">
+              <div className="space-y-3">
                  {Object.entries(detectedRisks).map(([id, msg]) => {
                     const agent = team?.find(t => t.id === id);
                     return (
-                      <div key={id} className="bg-red-950/10 border-2 border-red-500/30 rounded-[3.5rem] p-12 flex justify-between items-center animate-in slide-in-from-left duration-300">
-                         <div className="flex items-center gap-12">
-                            <div className="w-28 h-28 bg-red-600 rounded-[2.5rem] flex items-center justify-center text-white shadow-2xl relative z-10 animate-pulse"><AlertTriangle size={56}/></div>
+                      <div key={id} className="bg-red-950/10 border border-red-500/30 rounded-[2rem] p-6 flex justify-between items-center animate-in slide-in-from-left duration-300">
+                         <div className="flex items-center gap-6">
+                            <div className="w-16 h-16 bg-red-600 rounded-2xl flex items-center justify-center text-white shadow-xl relative z-10 animate-pulse"><AlertTriangle size={28}/></div>
                             <div>
-                               <h3 className="text-4xl font-black text-white italic tracking-tighter uppercase mb-3 leading-tight">THREAT DETECTED</h3>
-                               <p className="text-red-400 font-black uppercase tracking-widest text-base mb-3 italic">ADMITTED SOURCE: {agent?.name || 'EXTERNAL NODE'}</p>
-                               <div className="bg-white/5 p-6 rounded-[2rem] border border-white/5">
-                                 <p className="text-white font-medium italic text-lg leading-relaxed max-w-2xl">"{msg}"</p>
+                               <h3 className="text-xl font-black text-white italic tracking-tighter uppercase mb-1 leading-tight">THREAT DETECTED</h3>
+                               <p className="text-red-400 font-bold uppercase tracking-wider text-[9px] mb-2 italic">SOURCE: {agent?.name || 'EXTERNAL NODE'}</p>
+                               <div className="bg-white/5 p-3 rounded-xl border border-white/5">
+                                 <p className="text-white font-medium italic text-xs leading-relaxed max-w-lg">"{msg}"</p>
                                </div>
                             </div>
                          </div>
-                         <div className="flex flex-col gap-4 min-w-[280px]">
-                            <button onClick={() => handleMonitor(id, 'whispering')} className="w-full py-6 bg-white text-slate-900 rounded-3xl text-[11px] font-black uppercase tracking-widest hover:bg-slate-100 transition-all shadow-xl">NEURAL BARGE-IN</button>
-                            <button onClick={() => { setDetectedRisks(prev => { const n = {...prev}; delete n[id]; return n; }); addNotification?.('success', 'Marked as resolved.'); }} className="w-full py-6 bg-white/5 text-white border border-white/10 rounded-3xl text-[11px] font-black uppercase tracking-widest hover:bg-white/10 transition-all">MARK RESOLVED</button>
+                         <div className="flex flex-col gap-2 min-w-[160px]">
+                            <button onClick={() => handleMonitor(id, 'whispering')} className="w-full py-2.5 bg-white text-slate-900 rounded-xl text-[8px] font-black uppercase tracking-widest hover:bg-slate-100 transition-all shadow-md">NEURAL BARGE-IN</button>
+                            <button onClick={() => { setDetectedRisks(prev => { const n = {...prev}; delete n[id]; return n; }); addNotification?.('success', 'Marked as resolved.'); }} className="w-full py-2.5 bg-white/5 text-white border border-white/10 rounded-xl text-[8px] font-black uppercase tracking-widest hover:bg-white/10 transition-all">MARK RESOLVED</button>
                          </div>
                       </div>
                     );
                  })}
                  {Object.keys(detectedRisks).length === 0 && !isAuditing && (
-                    <div className="text-center py-64 opacity-10 flex flex-col items-center">
-                       <ShieldCheck size={160} className="text-brand-500 mb-10"/>
-                       <p className="text-white font-black uppercase tracking-[1em] text-2xl">GLOBAL SAFEGUARDS: SECURE</p>
+                    <div className="text-center py-24 opacity-10 flex flex-col items-center">
+                       <ShieldCheck size={80} className="text-brand-500 mb-4"/>
+                       <p className="text-white font-black uppercase tracking-[0.4em] text-lg">GLOBAL SAFEGUARDS: SECURE</p>
                     </div>
                  )}
               </div>
@@ -537,77 +536,73 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
       {/* Real-time Monitor Drawer */}
       {monitoredCallId && monitoredCall && (
-        <div className="fixed top-0 right-0 w-full md:w-[450px] h-full bg-[#0b0e14] border-l border-white/10 shadow-[-20px_0_50px_rgba(0,0,0,0.5)] z-[100] flex flex-col animate-in slide-in-from-right duration-500">
-           <div className="p-6 md:p-10 bg-brand-600 text-white flex justify-between items-center relative overflow-hidden">
+        <div className="fixed top-0 right-0 w-full md:w-[400px] h-full bg-[#0b0e14] border-l border-white/10 shadow-[-20px_0_50px_rgba(0,0,0,0.5)] z-[100] flex flex-col animate-in slide-in-from-right duration-500">
+           <div className="p-6 bg-brand-600 text-white flex justify-between items-center relative overflow-hidden">
               <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 blur-2xl -mr-16 -mt-16"></div>
                  <div className="relative z-10">
-                 <p className="text-[10px] font-black uppercase tracking-[0.4em] text-brand-200 mb-1">Monitoring Remote Peer</p>
-                 <h3 className="text-3xl font-black italic uppercase tracking-tighter">{monitoredCall.agentName || monitoredCall.customerName}</h3>
-                 <div className="mt-2 text-[10px] font-black uppercase tracking-[0.3em] text-brand-200/80">
+                 <p className="text-[9px] font-black uppercase tracking-[0.2em] text-brand-200 mb-1">Monitoring Peer</p>
+                 <h3 className="text-2xl font-black italic uppercase tracking-tighter">{monitoredCall.agentName || monitoredCall.customerName}</h3>
+                 <div className="mt-1 text-[9px] font-bold uppercase tracking-wider text-brand-200/80">
                    Customer: {monitoredCall.customerName}
                  </div>
               </div>
-              <button onClick={() => setMonitoredCallId(null)} className="relative z-10 p-3 bg-white/10 hover:bg-white/20 rounded-2xl transition-all"><X size={24}/></button>
+              <button onClick={() => setMonitoredCallId(null)} className="relative z-10 p-2 bg-white/10 hover:bg-white/20 rounded-xl transition-all"><X size={18}/></button>
            </div>
            
-           <div className="p-6 md:p-10 border-b border-white/5 bg-white/[0.02]">
-              <div className="flex justify-between items-center mb-6">
+           <div className="p-6 border-b border-white/5 bg-white/[0.02]">
+              <div className="flex justify-between items-center mb-4">
                  <div>
-                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target agent</p>
-                 <p className="text-xl font-black text-white italic tracking-tight">{monitoredCall.agentName || 'Unknown agent'}</p>
+                 <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Target agent</p>
+                 <p className="text-lg font-black text-white italic tracking-tight">{monitoredCall.agentName || 'Unknown agent'}</p>
               </div>
               <div className="text-right">
-                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Sentiment Flux</p>
-                 <p className="text-3xl font-black text-brand-400 italic">{monitoredCall.liveSentiment || monitoredCall.analysis?.sentimentScore || 50}%</p>
+                 <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">Sentiment</p>
+                 <p className="text-2xl font-black text-brand-400 italic">{monitoredCall.liveSentiment || monitoredCall.analysis?.sentimentScore || 50}%</p>
               </div>
            </div>
-           <div className="flex items-center gap-2 mt-4">
-             <div className={`w-2 h-2 rounded-full ${monitorStatus === 'active' ? 'bg-green-500 animate-pulse' : monitorStatus === 'error' ? 'bg-red-500' : 'bg-amber-400 animate-pulse'}`}></div>
-             <p className="text-[9px] font-black uppercase tracking-[0.3em] text-brand-300">{monitorStatus === 'active' ? 'Monitoring Active' : monitorStatus === 'error' ? 'Monitor Error' : 'Connecting'}</p>
+           <div className="flex items-center gap-2 mt-2">
+             <div className={`w-1.5 h-1.5 rounded-full ${monitorStatus === 'active' ? 'bg-green-500 animate-pulse' : monitorStatus === 'error' ? 'bg-red-500' : 'bg-amber-400 animate-pulse'}`}></div>
+             <p className="text-[8px] font-black uppercase tracking-[0.2em] text-brand-300">{monitorStatus === 'active' ? 'Monitoring Active' : monitorStatus === 'error' ? 'Monitor Error' : 'Connecting'}</p>
            </div>
-              <div className="flex items-center gap-2">
-                 <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-                 <p className="text-[9px] font-black uppercase tracking-[0.3em] text-brand-400">Subscribed to Live Packet Stream</p>
-              </div>
            </div>
 
-           <div className="flex-1 overflow-y-auto p-6 md:p-10 space-y-6 md:space-y-8 scrollbar-hide bg-black/40">
+           <div className="flex-1 overflow-y-auto p-6 space-y-4 scrollbar-hide bg-black/40">
               {monitoredCall.transcript.length > 0 ? monitoredCall.transcript.map((seg, idx) => (
                 <div key={idx} className={`flex ${seg.speaker === 'agent' ? 'justify-end' : 'justify-start'}`}>
-                   <div className={`max-w-[85%] p-6 rounded-[2rem] text-sm leading-relaxed border ${
+                   <div className={`max-w-[85%] p-4 rounded-2xl text-xs leading-relaxed border ${
                      seg.speaker === 'agent' ? 'bg-brand-600/10 border-brand-500/20 text-brand-100 rounded-br-none' : 'bg-white/5 border-white/10 text-slate-300 rounded-bl-none'
                    }`}>
-                      <p className="font-medium italic opacity-40 text-[9px] uppercase tracking-widest mb-1">{seg.speaker}</p>
+                      <p className="font-medium italic opacity-40 text-[8px] uppercase tracking-widest mb-1">{seg.speaker}</p>
                       <p className="font-bold">{seg.text}</p>
                    </div>
                 </div>
               )) : (
                 <div className="h-full flex flex-col items-center justify-center opacity-10 italic">
-                   <Terminal size={48} className="mb-4"/>
-                   <p className="text-xs font-black uppercase tracking-[0.5em]">Awaiting Remote Packet Emission</p>
+                   <Terminal size={32} className="mb-4"/>
+                   <p className="text-[10px] font-black uppercase tracking-[0.3em]">Awaiting Packets</p>
                 </div>
               )}
            </div>
            
-           <div className="p-6 md:p-8 bg-slate-900 border-t border-white/10 grid grid-cols-3 gap-4">
+           <div className="p-6 bg-slate-900 border-t border-white/10 grid grid-cols-3 gap-3">
               <button
                 onClick={() => monitoredCall?.agentId && handleMonitor(monitoredCall.agentId, 'listening')}
                 disabled={monitoringBusy}
-                className="py-4 bg-white text-slate-900 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl disabled:opacity-60"
+                className="py-3 bg-white text-slate-900 rounded-xl text-[9px] font-black uppercase tracking-widest shadow-md disabled:opacity-60"
               >
                 Join
               </button>
               <button
                 onClick={() => monitoredCall?.agentId && handleMonitor(monitoredCall.agentId, 'whispering')}
                 disabled={monitoringBusy}
-                className="py-4 bg-white/5 text-white border border-white/10 rounded-2xl text-[10px] font-black uppercase tracking-widest disabled:opacity-60"
+                className="py-3 bg-white/5 text-white border border-white/10 rounded-xl text-[9px] font-black uppercase tracking-widest disabled:opacity-60"
               >
                 Coach
               </button>
               <button
                 onClick={stopMonitoring}
                 disabled={monitoringBusy}
-                className="py-4 bg-red-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest disabled:opacity-60"
+                className="py-3 bg-red-600 text-white rounded-xl text-[9px] font-black uppercase tracking-widest disabled:opacity-60"
               >
                 Break
               </button>
@@ -617,4 +612,3 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     </div>
   );
 };
-
