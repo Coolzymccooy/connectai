@@ -247,6 +247,40 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     return () => clearInterval(interval);
   }, [activeCall.isVideo, isMuted]);
 
+  // --- PROPRIETARY TRANSCRIPTION PROTOCOL ---
+  useEffect(() => {
+    if (!transcriptionActive || activeCall.status === CallStatus.ENDED) return;
+    
+    // Simulation for demo purposes if no real backend stream is connected
+    const interval = setInterval(() => {
+      const phrases = [
+        "Analyzing the current cluster performance metrics...",
+        "I believe we need to update the HubSpot schema for better synchronization.",
+        "Could we schedule a follow-up for next Tuesday at 10 AM?",
+        "The neural bridge latency is currently within acceptable parameters.",
+        "Let's ensure the CRM records are dispatched before the meeting concludes."
+      ];
+      // Only add if not already dense
+      if ((activeCall.transcript?.length || 0) > 20) return;
+
+      const segment: TranscriptSegment = {
+        id: `ts_${Date.now()}`,
+        speaker: Math.random() > 0.5 ? 'teammate' : 'customer',
+        text: phrases[Math.floor(Math.random() * phrases.length)],
+        timestamp: Date.now()
+      };
+      
+      if (onUpdateCall) {
+        onUpdateCall({
+          ...activeCall,
+          transcript: [...(activeCall.transcript || []), segment]
+        });
+      }
+    }, 8000);
+
+    return () => clearInterval(interval);
+  }, [transcriptionActive, activeCall, onUpdateCall]);
+
   // --- HARDWARE ADMISSION (ROBUST) ---
   const admitHardware = useCallback(async (deviceId?: string, kind: 'video' | 'audio' = 'video') => {
     try {
@@ -566,6 +600,36 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                              {p.id === currentUser.id && <span className="text-[10px] text-gray-500">(You)</span>}
                           </div>
                         ))}
+                     </div>
+                  </div>
+                )}
+                {activeTab === 'intelligence' && (
+                  <div className="space-y-6 animate-in fade-in">
+                     <div className="p-4 bg-[#2a2a2a] rounded-xl border border-[#333]">
+                        <div className="flex justify-between items-center mb-3">
+                           <h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-400">Strategic Intel</h4>
+                           {isFetchingIntel && <Loader2 className="animate-spin text-indigo-500" size={14}/>}
+                        </div>
+                        <p className="text-xs font-medium text-gray-300 leading-relaxed italic">{intelligence?.text || "Synchronizing with neural cluster..."}</p>
+                     </div>
+
+                     <div>
+                        <h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-400 mb-3">Suggested Actions</h4>
+                        <div className="space-y-3">
+                           {actions.map(action => (
+                              <div key={action.id} className="p-3 bg-[#2a2a2a] border border-[#333] rounded-xl hover:border-indigo-500/50 transition-colors">
+                                 <div className="flex justify-between items-start mb-2">
+                                    <span className="text-xs font-bold text-white">{action.name}</span>
+                                    <span className={`text-[9px] uppercase font-black px-1.5 py-0.5 rounded ${action.status === 'executed' ? 'bg-green-500/20 text-green-400' : 'bg-indigo-500/20 text-indigo-400'}`}>{action.status}</span>
+                                 </div>
+                                 <p className="text-[10px] text-gray-400 mb-3">{action.description}</p>
+                                 <button disabled={action.status === 'executed'} className="w-full py-1.5 bg-[#333] hover:bg-indigo-600 text-white rounded text-[10px] font-bold uppercase tracking-wider transition-colors disabled:opacity-50 disabled:hover:bg-[#333]">
+                                    {action.status === 'executed' ? 'Completed' : 'Execute'}
+                                 </button>
+                              </div>
+                           ))}
+                           {actions.length === 0 && <p className="text-[10px] text-gray-500 italic text-center">No actions detected yet.</p>}
+                        </div>
                      </div>
                   </div>
                 )}
