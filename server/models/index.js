@@ -54,6 +54,7 @@ const CallSchema = new mongoose.Schema({
   transcriptionEnabled: Boolean,
   recordingUrl: String,
   recordingId: String,
+  twilioCallSid: { type: String, index: true },
   expiresAt: Number,
   piiRedacted: Boolean,
 }, baseOptions);

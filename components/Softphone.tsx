@@ -2,7 +2,7 @@
 import { Phone, PhoneOff, Mic, MicOff, Volume2, User, Delete, Minimize2, Maximize2, GripHorizontal, History } from 'lucide-react';
 import { createCall, updateCall, fetchCallLogs } from '../services/callLogService';
 import { Device, Call as TwilioCall } from '@twilio/voice-sdk';
-import { AgentStatus, Call as AppCall, CallDirection, CallStatus, Lead, User as TeamUser } from '../types';
+import { AgentStatus, Call as AppCall, CallStatus, DepartmentRoute, Lead, User as TeamUser } from '../types';
 
 interface SoftphoneProps {
   userExtension?: string;
@@ -23,6 +23,7 @@ interface SoftphoneProps {
   audioLevel?: number;
   onToggleMedia?: (type: 'video' | 'screen') => void;
   team?: TeamUser[];
+  departments?: DepartmentRoute[];
   onManualDial?: (target: Lead | string) => void;
   onTestTts?: () => void;
   onOpenFreeCall?: () => void;
@@ -31,7 +32,7 @@ interface SoftphoneProps {
   onCallEnded?: (call: AppCall) => void;
 }
 
-export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, agentName, agentEmail, allowedNumbers = [], restrictOutboundNumbers = false, floating = true, enableServerLogs = true, onCallEnded }) => {
+export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, agentName, agentEmail, allowedNumbers = [], restrictOutboundNumbers = false, team = [], departments = [], floating = true, enableServerLogs = true, onCallEnded }) => {
   const [number, setNumber] = useState('');
   const [status, setStatus] = useState<'idle' | 'dialing' | 'connected' | 'incoming'>('idle');
   const [isMuted, setIsMuted] = useState(false);
@@ -41,12 +42,15 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
   const timerRef = useRef<number | null>(null);
   const [clientStatus, setClientStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [clientError, setClientError] = useState<string | null>(null);
+  const [clientNotice, setClientNotice] = useState<string | null>(null);
   const deviceRef = useRef<Device | null>(null);
   const identity = userExtension || 'agent';
   const [isMinimized, setIsMinimized] = useState(false);
   const [position, setPosition] = useState({ x: 0, y: 120 });
   const dragRef = useRef<{ active: boolean; startX: number; startY: number; originX: number; originY: number } | null>(null);
-const [history, setHistory] = useState<AppCall[]>([]);
+  const [history, setHistory] = useState<AppCall[]>([]);
+  const [transferTargetId, setTransferTargetId] = useState('');
+  const [transferBusy, setTransferBusy] = useState(false);
   const tokenCooldownUntilRef = useRef<number>(0);
   const activeHistoryIdRef = useRef<string | null>(null);
   const activeHistoryStartRef = useRef<number | null>(null);
@@ -181,7 +185,8 @@ const [history, setHistory] = useState<AppCall[]>([]);
           setCall(incomingCall);
           setStatus('incoming');
           const incomingNumber = incomingCall?.parameters?.From || 'Unknown';
-          const callSid = incomingCall?.parameters?.CallSid || `in_${Date.now()}`;
+          const twilioCallSid = extractTwilioSid(incomingCall);
+          const callSid = twilioCallSid || `in_${Date.now()}`;
           activeHistoryIdRef.current = callSid;
 
           const newCallObs: AppCall = {
@@ -197,7 +202,8 @@ const [history, setHistory] = useState<AppCall[]>([]);
             agentId: agentId || userExtension,
             agentName,
             agentEmail,
-            extension: userExtension
+            extension: userExtension,
+            twilioCallSid: twilioCallSid || callSid,
           };
           activeHistoryRef.current = newCallObs;
           if (enableServerLogs) {
@@ -210,11 +216,13 @@ const [history, setHistory] = useState<AppCall[]>([]);
 
           incomingCall.on('accept', () => {
             setStatus('connected');
+            const resolvedTwilioSid = extractTwilioSid(incomingCall);
             if (activeHistoryIdRef.current) {
               if (enableServerLogs) {
                 updateCall(activeHistoryIdRef.current, {
                   status: CallStatus.ACTIVE,
                   startTime: Date.now(),
+                  twilioCallSid: resolvedTwilioSid,
                 }).then(refreshHistory).catch(() => {});
               }
             }
@@ -223,6 +231,7 @@ const [history, setHistory] = useState<AppCall[]>([]);
                 ...activeHistoryRef.current,
                 status: CallStatus.ACTIVE,
                 startTime: Date.now(),
+                twilioCallSid: resolvedTwilioSid || activeHistoryRef.current.twilioCallSid,
               };
             }
             if (timerRef.current) window.clearInterval(timerRef.current);
@@ -295,6 +304,21 @@ const [history, setHistory] = useState<AppCall[]>([]);
     const digits = trimmed.replace(/[^\d]/g, '');
     return keepPlus ? `+${digits}` : digits;
   };
+  const extractTwilioSid = (voiceCall?: TwilioCall | null) => {
+    const sid = voiceCall?.parameters?.CallSid;
+    if (typeof sid !== 'string') return undefined;
+    const trimmed = sid.trim();
+    return trimmed || undefined;
+  };
+
+  const getRequestHeaders = () => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const token = localStorage.getItem('connectai_auth_token');
+    const tenantId = localStorage.getItem('connectai_tenant_id');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (tenantId) headers['X-Tenant-Id'] = tenantId;
+    return headers;
+  };
 
   const handleDigit = (digit: string) => setNumber(prev => normalizeNumber(prev + digit));
   const handleDelete = () => setNumber(prev => prev.slice(0, -1));
@@ -308,6 +332,7 @@ const [history, setHistory] = useState<AppCall[]>([]);
   const handleCall = async () => {
     if (!number) return;
     setStatus('dialing');
+    setClientNotice(null);
 
     if (!device) {
       alert('Twilio Client is not connected. Check your server token endpoint.');
@@ -329,7 +354,8 @@ const [history, setHistory] = useState<AppCall[]>([]);
     try {
       const newCall = await device.connect({ params: { To: normalized } });
       setCall(newCall);
-      const callSid = newCall?.parameters?.CallSid || `out_${Date.now()}`;
+      const twilioCallSid = extractTwilioSid(newCall);
+      const callSid = twilioCallSid || `out_${Date.now()}`;
       activeHistoryIdRef.current = callSid;
       activeHistoryStartRef.current = Date.now();
 
@@ -346,7 +372,8 @@ const [history, setHistory] = useState<AppCall[]>([]);
         agentId: agentId || userExtension,
         agentName,
         agentEmail,
-        extension: userExtension
+        extension: userExtension,
+        twilioCallSid,
       };
       activeHistoryRef.current = newCallObs;
       if (enableServerLogs) {
@@ -359,14 +386,22 @@ const [history, setHistory] = useState<AppCall[]>([]);
 
       newCall.on('accept', () => {
         setStatus('connected');
+        const resolvedTwilioSid = extractTwilioSid(newCall);
         if (activeHistoryIdRef.current) {
-          if (enableServerLogs) updateCall(activeHistoryIdRef.current, { status: CallStatus.ACTIVE, startTime: Date.now() }).then(refreshHistory).catch(() => {});
+          if (enableServerLogs) {
+            updateCall(activeHistoryIdRef.current, {
+              status: CallStatus.ACTIVE,
+              startTime: Date.now(),
+              twilioCallSid: resolvedTwilioSid,
+            }).then(refreshHistory).catch(() => {});
+          }
         }
         if (activeHistoryRef.current) {
           activeHistoryRef.current = {
             ...activeHistoryRef.current,
             status: CallStatus.ACTIVE,
             startTime: Date.now(),
+            twilioCallSid: resolvedTwilioSid || activeHistoryRef.current.twilioCallSid,
           };
         }
         if (timerRef.current) window.clearInterval(timerRef.current);
@@ -382,6 +417,7 @@ const [history, setHistory] = useState<AppCall[]>([]);
           updateCall(activeHistoryIdRef.current, {
             status: CallStatus.ENDED,
             durationSeconds: 0,
+            twilioCallSid: extractTwilioSid(newCall),
           }).then(refreshHistory).catch(() => {});
         }
       }
@@ -393,6 +429,8 @@ const [history, setHistory] = useState<AppCall[]>([]);
     setStatus('idle');
     setNumber('');
     setDuration(0);
+    setClientNotice(null);
+    setTransferTargetId('');
     if (timerRef.current) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
@@ -406,10 +444,12 @@ const [history, setHistory] = useState<AppCall[]>([]);
       const endedAt = Date.now();
       const startedAt = activeHistoryStartRef.current || endedAt;
       const currentDuration = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+      const resolvedTwilioSid = extractTwilioSid(call) || activeHistoryRef.current?.twilioCallSid;
       if (enableServerLogs) {
         updateCall(activeHistoryIdRef.current, {
           status: CallStatus.ENDED,
           durationSeconds: currentDuration,
+          twilioCallSid: resolvedTwilioSid,
         }).then(refreshHistory).catch(() => {});
       }
 
@@ -418,6 +458,7 @@ const [history, setHistory] = useState<AppCall[]>([]);
           ...activeHistoryRef.current,
           status: CallStatus.ENDED,
           durationSeconds: currentDuration,
+          twilioCallSid: resolvedTwilioSid,
         };
         onCallEnded?.(finalCall);
       }
@@ -469,6 +510,63 @@ const [history, setHistory] = useState<AppCall[]>([]);
       </div>
     </div>
   );
+
+  const transferCandidates = team.filter((member) => {
+    if (!member?.id || member.id === agentId) return false;
+    if (member.status === 'disabled') return false;
+    return Boolean(member.extension || member.id);
+  });
+
+  const departmentCandidates = departments
+    .filter((d) => d?.id && d?.name)
+    .map((d) => ({
+      id: d.id,
+      name: d.name,
+      targetType: d.targetType,
+      target: d.target,
+    }));
+
+  const handleTransferCall = async () => {
+    if (!transferTargetId || transferBusy) return;
+    const activeCallSid = extractTwilioSid(call);
+    if (!activeCallSid) {
+      setClientError('Transfer unavailable: no active Twilio call sid.');
+      return;
+    }
+    const isDepartmentTransfer = transferTargetId.startsWith('dept:');
+    const targetMemberId = isDepartmentTransfer ? '' : transferTargetId.replace(/^member:/, '');
+    const targetDeptId = isDepartmentTransfer ? transferTargetId.replace(/^dept:/, '') : '';
+    const targetMember = transferCandidates.find((member) => member.id === targetMemberId);
+    const targetDept = departmentCandidates.find((dept) => dept.id === targetDeptId);
+    if (!targetMember && !targetDept) {
+      setClientError('Transfer target not found.');
+      return;
+    }
+
+    setTransferBusy(true);
+    setClientError(null);
+    setClientNotice(null);
+    try {
+      const payload = isDepartmentTransfer
+        ? { callSid: activeCallSid, targetDepartment: targetDept?.name }
+        : { callSid: activeCallSid, targetIdentity: targetMember?.extension || targetMember?.id };
+      const response = await fetch('/api/twilio/transfer', {
+        method: 'POST',
+        headers: getRequestHeaders(),
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const raw = await response.text();
+        throw new Error(raw || `Transfer failed (${response.status})`);
+      }
+      setTransferTargetId('');
+      setClientNotice(`Transfer initiated to ${targetDept?.name || targetMember?.name}.`);
+    } catch (err: any) {
+      setClientError(err?.message || 'Transfer failed');
+    } finally {
+      setTransferBusy(false);
+    }
+  };
 
   const handleDragStart = (event: React.PointerEvent<HTMLButtonElement | HTMLDivElement>) => {
     if (!floating) return;
@@ -548,6 +646,11 @@ const [history, setHistory] = useState<AppCall[]>([]);
             <p className="text-[9px] text-red-400">{clientError}</p>
           </div>
         )}
+        {clientNotice && (
+          <div className="mt-1 flex items-center justify-center gap-2">
+            <p className="text-[9px] text-emerald-400">{clientNotice}</p>
+          </div>
+        )}
       </div>
 
       {/* Keypad */}
@@ -612,6 +715,47 @@ const [history, setHistory] = useState<AppCall[]>([]);
           </button>
         )}
       </div>
+
+      {status === 'connected' && (transferCandidates.length > 0 || departmentCandidates.length > 0) && (
+        <div className="mt-3 w-full grid grid-cols-[1fr_auto] gap-2">
+          <select
+            value={transferTargetId}
+            onChange={(e) => setTransferTargetId(e.target.value)}
+            className="w-full bg-slate-800 border border-white/10 rounded-xl px-3 py-2 text-[11px] font-bold text-white outline-none focus:border-brand-500"
+          >
+            <option value="">Transfer call...</option>
+            {transferCandidates.length > 0 && (
+              <optgroup label="Teammates">
+                {transferCandidates.map((member) => (
+                  <option key={member.id} value={`member:${member.id}`}>
+                    {member.name} ({member.extension || member.id})
+                  </option>
+                ))}
+              </optgroup>
+            )}
+            {departmentCandidates.length > 0 && (
+              <optgroup label="Departments">
+                {departmentCandidates.map((dept) => (
+                  <option key={dept.id} value={`dept:${dept.id}`}>
+                    {dept.name} ({dept.targetType}: {dept.target})
+                  </option>
+                ))}
+              </optgroup>
+            )}
+          </select>
+          <button
+            onClick={handleTransferCall}
+            disabled={!transferTargetId || transferBusy}
+            className={`px-3 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest ${
+              !transferTargetId || transferBusy
+                ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                : 'bg-brand-600 text-white hover:bg-brand-500'
+            }`}
+          >
+            {transferBusy ? '...' : 'Transfer'}
+          </button>
+        </div>
+      )}
 
       {renderHistory()}
     </div>

@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   Activity, Sparkles, Zap, Shield, FileText, AlertTriangle, Eye, Volume2, History, 
   PieChart as PieIcon, TrendingUp, Radio, PlayCircle, PauseCircle, Clock, Infinity, 
@@ -38,8 +38,35 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
   const [monitoredCallId, setMonitoredCallId] = useState<string | null>(null);
   const [monitorSession, setMonitorSession] = useState<{ participantSid?: string; callId?: string } | null>(null);
   const [monitoringBusy, setMonitoringBusy] = useState(false);
+  const [monitorCapabilities, setMonitorCapabilities] = useState<{ canMonitor: boolean; configured: boolean; monitoringEnabled: boolean; missing: string[] } | null>(null);
+  const monitorNoticeShownRef = useRef(false);
 
   const simulationEnabled = Boolean(import.meta.env.VITE_DEV_SIMULATION);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadCapabilities = async () => {
+      try {
+        const res = await fetch('/api/twilio/capabilities');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) {
+          setMonitorCapabilities({
+            canMonitor: Boolean(data?.canMonitor),
+            configured: Boolean(data?.configured),
+            monitoringEnabled: Boolean(data?.monitoringEnabled),
+            missing: Array.isArray(data?.missing) ? data.missing : [],
+          });
+        }
+      } catch {
+        // non-blocking
+      }
+    };
+    loadCapabilities();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Simulation: Background Ingestion for Call Center
   useEffect(() => {
@@ -106,7 +133,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
   // Peer Monitoring Logic
   const globalActiveCalls = useMemo(() => {
-    return calls.filter(c => c.status === CallStatus.ACTIVE);
+    return calls.filter(c => c.status === CallStatus.DIALING || c.status === CallStatus.RINGING || c.status === CallStatus.ACTIVE);
   }, [calls]);
 
   const agentActivityMap = useMemo(() => {
@@ -123,7 +150,49 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
 
   const [monitorStatus, setMonitorStatus] = useState<'idle' | 'connecting' | 'active' | 'error'>('idle');
 
+  const notifyMonitorUnavailable = (reason?: string) => {
+    if (monitorNoticeShownRef.current) return;
+    monitorNoticeShownRef.current = true;
+    const suffix = reason ? ` (${reason})` : '';
+    addNotification?.('info', `Live listen/whisper requires Twilio monitor config${suffix}.`);
+  };
+
+  const startMonitoring = async (call: Call, mode: 'listening' | 'whispering') => {
+    if (!call) return;
+    if (monitorCapabilities && !monitorCapabilities.canMonitor) {
+      notifyMonitorUnavailable(monitorCapabilities.missing?.join(', '));
+      return;
+    }
+    setMonitoringBusy(true);
+    try {
+      const res = await fetch('/api/supervisor/monitor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callId: call.id, mode: mode === 'whispering' ? 'whisper' : 'listen' }),
+      });
+      const payload = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message = String(payload?.error || 'monitor failed');
+        if (message.toLowerCase().includes('twilio not configured') || message.toLowerCase().includes('monitoring not enabled')) {
+          setMonitorCapabilities(prev => ({ canMonitor: false, configured: prev?.configured ?? false, monitoringEnabled: prev?.monitoringEnabled ?? false, missing: prev?.missing || [] }));
+          notifyMonitorUnavailable(message);
+          return;
+        }
+        throw new Error(message);
+      }
+      setMonitoredCallId(call.id);
+      if (call.agentId) setMonitoringMode(prev => ({ ...prev, [call.agentId as string]: mode }));
+      setMonitorSession({ participantSid: payload.participantSid, callId: call.id });
+      addNotification?.('info', `Now monitoring ${call.agentName || call.customerName || 'call'}.`);
+    } catch (err: any) {
+      addNotification?.('error', err?.message || 'Monitor failed');
+    } finally {
+      setMonitoringBusy(false);
+    }
+  };
+
   useEffect(() => {
+    if (monitorCapabilities && !monitorCapabilities.canMonitor) return;
     if (!monitorSession?.callId) return;
     let cancelled = false;
     const poll = async () => {
@@ -149,7 +218,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [monitorSession?.callId, monitorSession?.participantSid]);
+  }, [monitorSession?.callId, monitorSession?.participantSid, monitorCapabilities?.canMonitor]);
 
   const filteredHistory = useMemo(() => {
     let list = [...calls, ...liveHistory];
@@ -179,25 +248,16 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       addNotification?.('error', 'Action failed: Agent is currently offline.');
       return;
     }
-    setMonitoringBusy(true);
-    fetch('/api/supervisor/monitor', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ callId: call.id, mode: mode === 'whispering' ? 'whisper' : 'listen' }),
-    })
-      .then(async (res) => {
-        if (!res.ok) throw new Error((await res.json()).error || 'monitor failed');
-        const data = await res.json();
-        setMonitoredCallId(call.id);
-        setMonitoringMode(prev => ({ ...prev, [agentId]: mode }));
-        setMonitorSession({ participantSid: data.participantSid, callId: call.id });
-        addNotification?.('info', `Now monitoring ${call.agentName}.`);
-      })
-      .catch((err) => addNotification?.('error', err?.message || 'Monitor failed'))
-      .finally(() => setMonitoringBusy(false));
+    startMonitoring(call, mode);
   };
 
   const stopMonitoring = async () => {
+    if (monitorCapabilities && !monitorCapabilities.canMonitor) {
+      setMonitoredCallId(null);
+      setMonitorSession(null);
+      setMonitorStatus('idle');
+      return;
+    }
     if (!monitorSession?.callId && !monitorSession?.participantSid) return;
     setMonitoringBusy(true);
     try {
@@ -283,6 +343,9 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                     <p className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">Live Floor</p>
                     <h3 className="text-2xl font-black text-white italic tracking-tighter mt-2">Active Calls: {liveCallList.length}</h3>
                     <p className="text-[10px] font-black uppercase tracking-[0.1em] text-brand-400 mt-1">Select a call to monitor</p>
+                    {monitorCapabilities && !monitorCapabilities.canMonitor && (
+                      <p className="text-[10px] font-black uppercase tracking-[0.1em] text-amber-400 mt-2">Listen/Whisper disabled: monitor config missing.</p>
+                    )}
                   </div>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 w-full lg:w-[480px]">
                     {liveCallList.length === 0 && (
@@ -300,26 +363,12 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                               stopMonitoring();
                               return;
                             }
-                            setMonitoringBusy(true);
-                            fetch('/api/supervisor/monitor', {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ callId: call.id, mode: 'listen' }),
-                            })
-                              .then(async (res) => {
-                                if (!res.ok) throw new Error((await res.json()).error || 'monitor failed');
-                                const data = await res.json();
-                                setMonitoredCallId(call.id);
-                                setMonitorSession({ participantSid: data.participantSid, callId: call.id });
-                                addNotification?.('info', `Monitoring ${call.agentName || call.customerName}.`);
-                              })
-                              .catch((err) => addNotification?.('error', err?.message || 'Monitor failed'))
-                              .finally(() => setMonitoringBusy(false));
+                            startMonitoring(call, 'listening');
                           }}
-                          disabled={monitoringBusy}
-                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wide ${monitoredCallId === call.id ? 'bg-brand-500 text-white' : 'bg-white/10 text-slate-300 hover:bg-white/20'}`}
+                          disabled={monitoringBusy || Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)}
+                          className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-wide ${monitoredCallId === call.id ? 'bg-brand-500 text-white' : 'bg-white/10 text-slate-300 hover:bg-white/20'} ${(monitoringBusy || Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)) ? 'opacity-60 cursor-not-allowed' : ''}`}
                         >
-                          {monitoredCallId === call.id ? 'Stop' : 'Listen'}
+                          {monitorCapabilities && !monitorCapabilities.canMonitor ? 'Config Req.' : (monitoredCallId === call.id ? 'Stop' : 'Listen')}
                         </button>
                       </div>
                     ))}
@@ -365,8 +414,8 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                                <div className="absolute bottom-1 left-3 text-[7px] font-black text-brand-500/40 uppercase tracking-wider">{isPeer ? 'Remote' : 'Local'}</div>
                             </div>
                             <div className="flex gap-3">
-                               <button onClick={() => handleMonitor(agent.id, 'listening')} disabled={monitoringBusy} className={`flex-1 py-3 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all border flex items-center justify-center gap-2 ${monitoredCallId === liveCall.id ? 'bg-brand-500 text-white border-brand-500 shadow-md' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${monitoringBusy ? 'opacity-60 cursor-not-allowed' : ''}`}><Headset size={12}/> {monitoredCallId === liveCall.id ? 'Monitoring' : 'Monitor'}</button>
-                               <button onClick={() => handleMonitor(agent.id, 'whispering')} disabled={monitoringBusy} className={`flex-1 py-3 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all border ${mode === 'whispering' ? 'bg-brand-600 text-white border-brand-600 shadow-md' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${monitoringBusy ? 'opacity-60 cursor-not-allowed' : ''}`}>Whisper</button>
+                               <button onClick={() => handleMonitor(agent.id, 'listening')} disabled={monitoringBusy || Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)} className={`flex-1 py-3 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all border flex items-center justify-center gap-2 ${monitoredCallId === liveCall.id ? 'bg-brand-500 text-white border-brand-500 shadow-md' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${(monitoringBusy || Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)) ? 'opacity-60 cursor-not-allowed' : ''}`}><Headset size={12}/> {monitorCapabilities && !monitorCapabilities.canMonitor ? 'Config Req.' : (monitoredCallId === liveCall.id ? 'Monitoring' : 'Monitor')}</button>
+                               <button onClick={() => handleMonitor(agent.id, 'whispering')} disabled={monitoringBusy || Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)} className={`flex-1 py-3 rounded-xl text-[9px] font-bold uppercase tracking-wider transition-all border ${mode === 'whispering' ? 'bg-brand-600 text-white border-brand-600 shadow-md' : 'bg-white/5 text-slate-400 border-white/10 hover:bg-white/10'} ${(monitoringBusy || Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)) ? 'opacity-60 cursor-not-allowed' : ''}`}>Whisper</button>
                             </div>
                          </div>
                       ) : (
@@ -517,7 +566,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
                             </div>
                          </div>
                          <div className="flex flex-col gap-2 min-w-[160px]">
-                            <button onClick={() => handleMonitor(id, 'whispering')} className="w-full py-2.5 bg-white text-slate-900 rounded-xl text-[8px] font-black uppercase tracking-widest hover:bg-slate-100 transition-all shadow-md">NEURAL BARGE-IN</button>
+                            <button onClick={() => handleMonitor(id, 'whispering')} disabled={Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)} className={`w-full py-2.5 rounded-xl text-[8px] font-black uppercase tracking-widest transition-all shadow-md ${monitorCapabilities && !monitorCapabilities.canMonitor ? 'bg-white/20 text-slate-400 cursor-not-allowed' : 'bg-white text-slate-900 hover:bg-slate-100'}`}>NEURAL BARGE-IN</button>
                             <button onClick={() => { setDetectedRisks(prev => { const n = {...prev}; delete n[id]; return n; }); addNotification?.('success', 'Marked as resolved.'); }} className="w-full py-2.5 bg-white/5 text-white border border-white/10 rounded-xl text-[8px] font-black uppercase tracking-widest hover:bg-white/10 transition-all">MARK RESOLVED</button>
                          </div>
                       </div>
@@ -587,14 +636,14 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
            <div className="p-6 bg-slate-900 border-t border-white/10 grid grid-cols-3 gap-3">
               <button
                 onClick={() => monitoredCall?.agentId && handleMonitor(monitoredCall.agentId, 'listening')}
-                disabled={monitoringBusy}
+                disabled={monitoringBusy || Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)}
                 className="py-3 bg-white text-slate-900 rounded-xl text-[9px] font-black uppercase tracking-widest shadow-md disabled:opacity-60"
               >
                 Join
               </button>
               <button
                 onClick={() => monitoredCall?.agentId && handleMonitor(monitoredCall.agentId, 'whispering')}
-                disabled={monitoringBusy}
+                disabled={monitoringBusy || Boolean(monitorCapabilities && !monitorCapabilities.canMonitor)}
                 className="py-3 bg-white/5 text-white border border-white/10 rounded-xl text-[9px] font-black uppercase tracking-widest disabled:opacity-60"
               >
                 Coach

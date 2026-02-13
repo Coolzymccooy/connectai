@@ -7,6 +7,7 @@ import rateLimit from 'express-rate-limit';
 import mongoose from 'mongoose';
 import http from 'http';
 import https from 'https';
+import { readFileSync } from 'fs';
 import { GoogleGenAI, Type } from '@google/genai';
 import { promises as fs } from 'fs';
 import path from 'path';
@@ -26,6 +27,22 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env.local');
 dotenv.config({ path: envPath });
+const readEnvFileValue = (key) => {
+  try {
+    const content = readFileSync(envPath, 'utf8');
+    const pattern = new RegExp(`^\\s*(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(.*)$`, 'i');
+    const line = content.split(/\r?\n/).find((l) => pattern.test(l));
+    if (!line) return '';
+    const match = line.match(pattern);
+    const raw = (match?.[1] || '').trim();
+    if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+      return raw.slice(1, -1).trim();
+    }
+    return raw;
+  } catch {
+    return '';
+  }
+};
 if (process.env.TWILIO_ACCOUNT_SID) {
   const sid = process.env.TWILIO_ACCOUNT_SID;
   console.log(`[env] TWILIO_ACCOUNT_SID length=${sid.length} preview=${sid.slice(0, 6)}...${sid.slice(-4)}`);
@@ -162,10 +179,10 @@ const toPublic = (doc) => {
 };
 
 const CALL_TRANSITIONS = {
-  DIALING: ['RINGING', 'ENDED'],
-  RINGING: ['ACTIVE', 'ENDED'],
-  ACTIVE: ['HOLD', 'ENDED'],
-  HOLD: ['ACTIVE', 'ENDED'],
+  DIALING: ['RINGING', 'ACTIVE', 'ENDED'],
+  RINGING: ['DIALING', 'ACTIVE', 'ENDED'],
+  ACTIVE: ['DIALING', 'RINGING', 'HOLD', 'ENDED'],
+  HOLD: ['DIALING', 'RINGING', 'ACTIVE', 'ENDED'],
   ENDED: [],
 };
 
@@ -203,6 +220,113 @@ const saveIntegrationsStore = async () => {
   await saveStore('integrations', stores.integrationsByTenant);
 };
 
+const buildOauthCompletionHtml = (provider, ok = true, message = '') => {
+  const safeProvider = String(provider || 'provider');
+  const safeMessage = String(message || (ok ? `${safeProvider} connected.` : `${safeProvider} connection failed.`));
+  const status = ok ? 'success' : 'error';
+  return `<!doctype html><html><head><meta charset="utf-8"/><title>${safeProvider} OAuth</title></head><body style="font-family:Arial,sans-serif;background:#0b1220;color:#e2e8f0;padding:24px"><h2 style="margin:0 0 8px 0">${safeProvider} ${ok ? 'Connected' : 'Connection Failed'}</h2><p style="margin:0 0 16px 0">${safeMessage}</p><script>try{window.opener&&window.opener.postMessage({type:'connectai-oauth',provider:'${safeProvider}',status:'${status}'},'*');}catch(e){};setTimeout(function(){window.close();},900);</script></body></html>`;
+};
+
+const getHubSpotIntegration = (tenantId) => {
+  const store = getIntegrationsStore(tenantId);
+  const crm = store.data.crm || (store.data.crm = {});
+  const hubspot = crm.hubspot || {};
+  crm.hubspot = hubspot;
+  return { store, hubspot };
+};
+
+const appendHubSpotSyncHistory = (hubspot, entry) => {
+  const history = Array.isArray(hubspot?.syncHistory) ? hubspot.syncHistory : [];
+  const next = [
+    {
+      id: entry?.id || crypto.randomUUID(),
+      startedAt: entry?.startedAt || Date.now(),
+      finishedAt: entry?.finishedAt || Date.now(),
+      status: entry?.status || 'success',
+      contacts: Number(entry?.contacts || 0),
+      deals: Number(entry?.deals || 0),
+      error: entry?.error || '',
+    },
+    ...history,
+  ].slice(0, 20);
+  hubspot.syncHistory = next;
+  return next;
+};
+
+const toHubSpotExpiry = (expiresInSeconds) => Date.now() + Math.max(30, Number(expiresInSeconds || 0) - 30) * 1000;
+
+const saveHubSpotTokenForTenant = async (tenantId, token) => {
+  const { store, hubspot } = getHubSpotIntegration(tenantId);
+  hubspot.oauth = {
+    accessToken: token?.access_token || '',
+    refreshToken: token?.refresh_token || hubspot?.oauth?.refreshToken || '',
+    tokenType: token?.token_type || 'bearer',
+    expiresAt: toHubSpotExpiry(token?.expires_in),
+    scope: token?.scope || '',
+  };
+  hubspot.status = 'connected';
+  hubspot.connectedAt = Date.now();
+  hubspot.updatedAt = Date.now();
+  store.data.crm.hubspot = hubspot;
+  await saveIntegrationsStore();
+  return hubspot.oauth;
+};
+
+const refreshHubSpotAccessTokenIfNeeded = async (tenantId) => {
+  const { store, hubspot } = getHubSpotIntegration(tenantId);
+  const oauth = hubspot?.oauth || {};
+  if (!oauth.refreshToken && !oauth.accessToken) {
+    throw new Error('HubSpot OAuth not connected');
+  }
+  const stillValid = oauth.accessToken && oauth.expiresAt && Number(oauth.expiresAt) > Date.now();
+  if (stillValid) return oauth.accessToken;
+  if (!oauth.refreshToken) throw new Error('HubSpot refresh token missing');
+  if (!HUBSPOT_OAUTH.clientId || !HUBSPOT_OAUTH.clientSecret) {
+    throw new Error('HubSpot OAuth credentials not configured');
+  }
+  const tokenRes = await fetch('https://api.hubapi.com/oauth/v1/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'refresh_token',
+      client_id: HUBSPOT_OAUTH.clientId,
+      client_secret: HUBSPOT_OAUTH.clientSecret,
+      refresh_token: oauth.refreshToken,
+    }),
+  });
+  const nextToken = await tokenRes.json();
+  if (!tokenRes.ok) throw new Error(nextToken?.message || `HubSpot token refresh failed (${tokenRes.status})`);
+  const saved = await saveHubSpotTokenForTenant(tenantId, nextToken);
+  store.data.crm.hubspot = { ...hubspot, oauth: saved, status: 'connected', updatedAt: Date.now() };
+  await saveIntegrationsStore();
+  return saved.accessToken;
+};
+
+const fetchHubSpotObjects = async (accessToken, objectType, properties = [], limit = 100) => {
+  const base = `https://api.hubapi.com/crm/v3/objects/${encodeURIComponent(objectType)}`;
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (properties.length) params.set('properties', properties.join(','));
+  const out = [];
+  let after = '';
+  let pages = 0;
+  while (pages < 5) {
+    const pageParams = new URLSearchParams(params);
+    if (after) pageParams.set('after', after);
+    const res = await fetch(`${base}?${pageParams.toString()}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const payload = await res.json();
+    if (!res.ok) throw new Error(payload?.message || `HubSpot ${objectType} fetch failed (${res.status})`);
+    const rows = Array.isArray(payload?.results) ? payload.results : [];
+    out.push(...rows);
+    after = payload?.paging?.next?.after || '';
+    pages += 1;
+    if (!after) break;
+  }
+  return out;
+};
+
 const metricsByTenant = new Map();
 const getMetrics = (tenantId) => {
   if (!metricsByTenant.has(tenantId)) {
@@ -225,13 +349,48 @@ const jobStats = {
   pendingCount: 0,
 };
 
+const normalizeSettingsShape = (input = {}) => {
+  const fallbackIvr = {
+    phoneNumber: '',
+    welcomeMessage: 'Welcome to ConnectAI. For sales, press 1. For support, press 2.',
+    options: [
+      { key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' },
+      { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' },
+    ],
+    departments: [
+      { id: 'dept_sales', name: 'Sales', targetType: 'queue', target: 'Sales' },
+      { id: 'dept_support', name: 'Support', targetType: 'queue', target: 'Support' },
+      { id: 'dept_billing', name: 'Billing', targetType: 'queue', target: 'Billing' },
+    ],
+  };
+  const fallbackAuth = {
+    inviteOnly: false,
+    allowedDomains: [],
+    autoTenantByDomain: false,
+    domainTenantMap: [],
+  };
+  return {
+    ...input,
+    ivr: {
+      ...fallbackIvr,
+      ...(input?.ivr || {}),
+      options: Array.isArray(input?.ivr?.options) ? input.ivr.options : fallbackIvr.options,
+      departments: Array.isArray(input?.ivr?.departments) ? input.ivr.departments : fallbackIvr.departments,
+    },
+    auth: {
+      ...fallbackAuth,
+      ...(input?.auth || {}),
+    },
+  };
+};
+
 const getSettingsForTenant = async (tenantId) => {
   if (isMongoReady()) {
     const doc = await Setting.findOne({ tenantId }).lean();
-    return doc?.data || defaultSettings;
+    return normalizeSettingsShape(doc?.data || {});
   }
   const stored = stores.settingsByTenant.find(s => s.tenantId === tenantId);
-  return stored?.data || defaultSettings;
+  return normalizeSettingsShape(stored?.data || {});
 };
 
 const DEFAULT_AUTH_SETTINGS = {
@@ -274,6 +433,9 @@ const findInvite = (tenantId, email) => {
 };
 
 const callRouteState = new Map();
+const TWILIO_HOLD_MUSIC_URL = process.env.TWILIO_HOLD_MUSIC_URL || 'http://com.twilio.music.classical.s3.amazonaws.com/BusyStrings.mp3';
+const TWILIO_WAIT_SECONDS = Math.max(5, Math.min(Number(process.env.TWILIO_WAIT_SECONDS || 15), 60));
+const TWILIO_MAX_WAIT_CYCLES = Math.max(0, Math.min(Number(process.env.TWILIO_MAX_WAIT_CYCLES || 2), 10));
 const buildRouteTargets = (settings, fallbackIdentity = 'agent') => {
   const team = Array.isArray(settings?.team) ? settings.team : [];
   const available = team.filter(t => t.currentPresence === 'AVAILABLE' || t.status === 'active');
@@ -284,11 +446,91 @@ const buildRouteTargets = (settings, fallbackIdentity = 'agent') => {
   return targets;
 };
 
+const toE164 = (value = '') => {
+  const trimmed = String(value).trim();
+  if (!trimmed) return '';
+  const match = trimmed.match(/\+?\d{7,15}/);
+  if (!match) return '';
+  return match[0].startsWith('+') ? match[0] : `+${match[0]}`;
+};
+
+const normalizeKey = (value = '') => String(value).trim().toLowerCase();
+
+const getDepartmentRoutes = (settings) => {
+  const direct = Array.isArray(settings?.ivr?.departments) ? settings.ivr.departments : [];
+  const fromDirect = direct
+    .map((d, idx) => ({
+      id: d?.id || `dept_${idx + 1}`,
+      name: String(d?.name || '').trim(),
+      targetType: ['queue', 'client', 'phone'].includes(String(d?.targetType || '').toLowerCase())
+        ? String(d.targetType).toLowerCase()
+        : 'queue',
+      target: String(d?.target || '').trim(),
+    }))
+    .filter((d) => d.name && d.target);
+  if (fromDirect.length > 0) return fromDirect;
+
+  const options = Array.isArray(settings?.ivr?.options) ? settings.ivr.options : [];
+  const seeded = options
+    .filter((o) => o && (o.action === 'QUEUE' || o.action === 'TRANSFER'))
+    .map((o, idx) => ({
+      id: `dept_seed_${idx + 1}`,
+      name: String(o.label || o.target || `Department ${idx + 1}`),
+      targetType: o.action === 'TRANSFER' ? 'client' : 'queue',
+      target: String(o.target || o.label || ''),
+    }))
+    .filter((d) => d.name && d.target);
+  return seeded;
+};
+
+const resolveTransferTargetFromDepartment = (settings, departmentName) => {
+  const key = normalizeKey(departmentName);
+  if (!key) return null;
+  const routes = getDepartmentRoutes(settings);
+  const route = routes.find((d) => normalizeKey(d.name) === key || normalizeKey(d.id) === key);
+  if (!route) return null;
+  if (route.targetType === 'phone') {
+    const targetNumber = toE164(route.target);
+    return targetNumber ? { targetNumber } : null;
+  }
+  return { targetIdentity: route.target };
+};
+
 const buildDialTwiml = (identity, actionUrl, recordingCallbackUrl) => `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Dial action="${actionUrl}" method="POST" timeout="20" record="record-from-answer" recordingStatusCallback="${recordingCallbackUrl}" recordingStatusCallbackMethod="POST" recordingStatusCallbackEvent="completed">
     <Client>${identity}</Client>
   </Dial>
+</Response>`;
+
+const escapeXml = (value = '') => String(value)
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&apos;');
+
+const buildTransferTwiml = ({ targetIdentity, targetNumber }) => {
+  if (targetIdentity) {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial timeout="20">
+    <Client>${escapeXml(targetIdentity)}</Client>
+  </Dial>
+</Response>`;
+  }
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Dial timeout="20">${escapeXml(targetNumber || '')}</Dial>
+</Response>`;
+};
+
+const buildWaitTwiml = (actionUrl, holdMusicUrl, waitSeconds = 15) => `<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Say>All agents are currently busy. Please stay on the line while we connect you.</Say>
+  <Play loop="1">${holdMusicUrl}</Play>
+  <Pause length="${waitSeconds}"/>
+  <Redirect method="POST">${actionUrl}</Redirect>
 </Response>`;
 
 const buildConferenceTwiml = (conferenceName, { muted = false, startOnEnter = true, endOnExit = true } = {}) => `<?xml version="1.0" encoding="UTF-8"?>
@@ -308,20 +550,22 @@ const getBaseUrl = (req) => process.env.PUBLIC_URL || `${req.protocol}://${req.g
 const getConferenceName = (callSid) => `conf_${callSid}`;
 
 const findConferenceSid = async (conferenceName) => {
-  if (!twilioClient) return null;
-  const list = await twilioClient.conferences.list({ friendlyName: conferenceName, status: 'in-progress', limit: 1 });
+  const client = getTwilioClient();
+  if (!client) return null;
+  const list = await client.conferences.list({ friendlyName: conferenceName, status: 'in-progress', limit: 1 });
   return list?.[0]?.sid || null;
 };
 
 const addConferenceParticipant = async (conferenceName, participant) => {
-  if (!twilioClient) throw new Error('Twilio client not configured');
+  const client = getTwilioClient();
+  if (!client) throw new Error('Twilio client not configured');
   let conferenceSid = await findConferenceSid(conferenceName);
   if (!conferenceSid) {
     await new Promise(r => setTimeout(r, 500));
     conferenceSid = await findConferenceSid(conferenceName);
   }
   if (!conferenceSid) throw new Error('Conference not active');
-  return twilioClient.conferences(conferenceSid).participants.create(participant);
+  return client.conferences(conferenceSid).participants.create(participant);
 };
 
 const enqueueJob = async (tenantId, type, payload = {}) => {
@@ -407,12 +651,12 @@ const cleanupRetention = async () => {
 
 const getCallForJob = async (tenantId, callId) => {
   if (isMongoReady()) {
-    const byExternal = await Call.findOne({ tenantId, externalId: callId }).lean();
+    const byExternal = await Call.findOne({ tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }] }).lean();
     if (byExternal) return byExternal;
     const byId = await Call.findById(callId).lean();
     return byId;
   }
-  return stores.calls.find(c => c.tenantId === tenantId && c.id === callId);
+  return stores.calls.find(c => c.tenantId === tenantId && (c.id === callId || c.twilioCallSid === callId));
 };
 
 const fetchLeadsForCampaign = async () => {
@@ -509,12 +753,24 @@ const processJobs = async () => {
       if (job.type === 'summary') {
         const call = await getCallForJob(job.tenantId, job.payload?.callId);
         if (!call) throw new Error('Call not found');
-        if (!GEMINI_API_KEY) throw new Error('Gemini not configured');
-        const ai = getClient();
         const text = (call.transcript || []).map((t) => `${t.speaker}: ${t.text}`).join('\n');
-        const prompt = `Provide a concise call summary and action items.\nTranscript:\n${text}`;
-        const response = await ai.models.generateContent({ model: TEXT_MODEL, contents: prompt });
-        const summary = response.text || 'Summary unavailable.';
+        const duration = Number(call.durationSeconds || 0);
+        const customer = call.customerName || call.phoneNumber || 'Customer';
+        const fallbackSummary = text.trim().length > 0
+          ? 'Call completed. Transcript captured and ready for review.'
+          : `Call with ${customer} ended after ${Math.max(0, duration)}s. Transcript unavailable; verify recording and disposition manually.`;
+        let summary = fallbackSummary;
+        if (GEMINI_API_KEY) {
+          try {
+            const ai = getClient();
+            const prompt = `Provide a concise call summary and action items.\nTranscript:\n${text}`;
+            const response = await ai.models.generateContent({ model: TEXT_MODEL, contents: prompt });
+            summary = response.text || fallbackSummary;
+          } catch (err) {
+            console.warn('Summary generation fallback:', err?.message || err);
+            summary = fallbackSummary;
+          }
+        }
         if (isMongoReady()) {
           await Call.findOneAndUpdate(
             { tenantId: job.tenantId, externalId: call.externalId || call.id },
@@ -899,6 +1155,7 @@ const stores = {
   recordings: normalizeTenantArray(await loadStore('recordings', [])),
   calendarEvents: normalizeTenantArray(await loadStore('calendarEvents', [])),
   crmContacts: normalizeTenantArray(await loadStore('crmContacts', [])),
+  crmDeals: normalizeTenantArray(await loadStore('crmDeals', [])),
   crmTasks: normalizeTenantArray(await loadStore('crmTasks', [])),
   marketingCampaigns: normalizeTenantArray(await loadStore('marketingCampaigns', [])),
   integrationsByTenant: normalizeSettingsStore(await loadStore('integrations', null)),
@@ -923,6 +1180,11 @@ const defaultSettings = {
     options: [
       { key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' },
       { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' },
+    ],
+    departments: [
+      { id: 'dept_sales', name: 'Sales', targetType: 'queue', target: 'Sales' },
+      { id: 'dept_support', name: 'Support', targetType: 'queue', target: 'Support' },
+      { id: 'dept_billing', name: 'Billing', targetType: 'queue', target: 'Billing' },
     ],
   },
   auth: {
@@ -960,22 +1222,48 @@ const MS_OAUTH = {
   ],
 };
 
+const HUBSPOT_OAUTH = {
+  clientId: process.env.HUBSPOT_CLIENT_ID || '',
+  clientSecret: process.env.HUBSPOT_CLIENT_SECRET || '',
+  redirectUri: process.env.HUBSPOT_OAUTH_REDIRECT_URI || '',
+  scopes: [
+    'oauth',
+    'crm.objects.contacts.read',
+    'crm.objects.contacts.write',
+    'crm.objects.deals.read',
+    'crm.objects.deals.write',
+  ],
+};
+
 const AccessToken = twilio.jwt.AccessToken;
 const { VoiceGrant } = AccessToken;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || '';
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || '';
-const twilioClient = (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN)
-  ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+const getTwilioAuthToken = () => process.env.TWILIO_AUTH_TOKEN || readEnvFileValue('TWILIO_AUTH_TOKEN') || '';
+const getTwilioAccountSid = () => process.env.TWILIO_ACCOUNT_SID || readEnvFileValue('TWILIO_ACCOUNT_SID') || '';
+const getTwilioApiKey = () => process.env.TWILIO_API_KEY || readEnvFileValue('TWILIO_API_KEY') || '';
+const getTwilioApiSecret = () => process.env.TWILIO_API_SECRET || readEnvFileValue('TWILIO_API_SECRET') || '';
+const getTwilioTwimlAppSid = () => process.env.TWILIO_TWIML_APP_SID || readEnvFileValue('TWILIO_TWIML_APP_SID') || '';
+let twilioClient = (getTwilioAccountSid() && getTwilioAuthToken())
+  ? twilio(getTwilioAccountSid(), getTwilioAuthToken())
   : null;
-const TWILIO_MONITORING_ENABLED = process.env.TWILIO_MONITORING_ENABLED === 'true';
+const isTwilioMonitoringEnabled = () => String(process.env.TWILIO_MONITORING_ENABLED || '').toLowerCase() === 'true';
+
+const getTwilioClient = () => {
+  if (twilioClient) return twilioClient;
+  const sid = getTwilioAccountSid();
+  const token = getTwilioAuthToken();
+  if (!sid || !token) return null;
+  twilioClient = twilio(sid, token);
+  return twilioClient;
+};
 
 const verifyTwilioSignature = (req, res, next) => {
-  if (!TWILIO_AUTH_TOKEN) return next();
+  const authToken = getTwilioAuthToken();
+  if (!authToken) return next();
   const signature = req.headers['x-twilio-signature'];
   if (!signature) return res.status(403).send('missing signature');
   const url = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
   const valid = twilio.validateRequest(
-    TWILIO_AUTH_TOKEN,
+    authToken,
     signature,
     url,
     req.body || {}
@@ -1031,11 +1319,13 @@ const createSilenceWav = (durationSeconds = 1, sampleRate = 8000) => {
 
 const downloadTwilioRecording = async (recordingUrl) => {
   if (!recordingUrl) throw new Error('missing recording url');
-  if (!process.env.TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+  const accountSid = getTwilioAccountSid();
+  const authToken = getTwilioAuthToken();
+  if (!accountSid || !authToken) {
     throw new Error('twilio auth not configured');
   }
   const targetUrl = recordingUrl.endsWith('.wav') ? recordingUrl : `${recordingUrl}.wav`;
-  const auth = Buffer.from(`${process.env.TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  const auth = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
   const response = await fetch(targetUrl, {
     headers: { Authorization: `Basic ${auth}` },
   });
@@ -1048,9 +1338,10 @@ const downloadTwilioRecording = async (recordingUrl) => {
 
 const requestTwilioTranscription = async (recordingSid, callbackUrl) => {
   if (!recordingSid) return null;
-  if (!twilioClient) throw new Error('twilio client not configured');
+  const client = getTwilioClient();
+  if (!client) throw new Error('twilio client not configured');
   try {
-    const transcription = await twilioClient.recordings(recordingSid).transcriptions.create({
+    const transcription = await client.recordings(recordingSid).transcriptions.create({
       transcriptionCallback: callbackUrl,
     });
     return transcription;
@@ -1073,6 +1364,11 @@ const ensureRecordingForCall = async (req, call) => {
   const tenantId = call.tenantId || req.tenantId || DEFAULT_TENANT_ID;
   const callId = call.externalId || call.id;
   if (!callId) return;
+  const callDuration = Number(call.durationSeconds);
+  const derivedDuration = Number(call.endTime) > Number(call.startTime)
+    ? Math.ceil((Number(call.endTime) - Number(call.startTime)) / 1000)
+    : 0;
+  const fallbackDurationSeconds = Math.max(1, Math.ceil(Number.isFinite(callDuration) && callDuration > 0 ? callDuration : derivedDuration));
 
   const existing = isMongoReady()
     ? await Recording.findOne({ tenantId, callId }).lean()
@@ -1087,7 +1383,7 @@ const ensureRecordingForCall = async (req, call) => {
   let size = 0;
   let storageProvider = 'local';
   let storagePath = filePath;
-  const wavBuffer = createSilenceWav(1);
+  const wavBuffer = createSilenceWav(fallbackDurationSeconds);
   if (useStorage) {
     const stored = await uploadRecordingBuffer(objectPath, wavBuffer, 'audio/wav');
     size = stored?.size || 0;
@@ -1129,14 +1425,14 @@ const ensureRecordingForCall = async (req, call) => {
         { upsert: true, new: true }
       );
       await Call.findOneAndUpdate(
-        { tenantId, externalId: callId },
+        { tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }] },
         { recordingUrl, recordingId: externalId }
       );
     } else {
       const stored = { id: externalId, ...recording };
       stores.recordings = upsertById(stores.recordings, stored);
       await saveStore('recordings', stores.recordings);
-      stores.calls = stores.calls.map(c => (c.id === callId && c.tenantId === tenantId) ? { ...c, recordingUrl, recordingId: externalId } : c);
+      stores.calls = stores.calls.map(c => ((c.id === callId || c.twilioCallSid === callId) && c.tenantId === tenantId) ? { ...c, recordingUrl, recordingId: externalId } : c);
       await saveStore('calls', stores.calls);
     }
   };
@@ -1329,7 +1625,11 @@ app.post('/api/jobs/process', async (req, res) => {
 });
 
 app.use('/api', (req, res, next) => {
-  if (req.path === '/health' || req.path === '/recordings/download') return next();
+  if (
+    req.path === '/health' ||
+    req.path === '/recordings/download' ||
+    /^\/oauth\/[^/]+\/callback$/.test(req.path)
+  ) return next();
   return authenticate(req, res, next);
 });
 
@@ -1578,11 +1878,11 @@ app.get('/api/settings', (req, res) => {
   const tenantId = req.tenantId;
   if (isMongoReady()) {
     return Setting.findOne({ tenantId })
-      .then((doc) => res.json(doc?.data || defaultSettings))
-      .catch(() => res.json(defaultSettings));
+      .then((doc) => res.json(normalizeSettingsShape(doc?.data || {})))
+      .catch(() => res.json(normalizeSettingsShape({})));
   }
   const stored = stores.settingsByTenant.find(s => s.tenantId === tenantId);
-  const settings = stored?.data || defaultSettings;
+  const settings = normalizeSettingsShape(stored?.data || {});
   res.json(settings);
 });
 
@@ -1591,7 +1891,7 @@ app.put('/api/settings', async (req, res) => {
   const tenantId = req.tenantId;
   if (isMongoReady()) {
     const existing = await Setting.findOne({ tenantId });
-    const data = { ...(existing?.data || defaultSettings), ...incoming };
+    const data = normalizeSettingsShape({ ...(existing?.data || {}), ...incoming });
     await Setting.findOneAndUpdate(
       { tenantId },
       { tenantId, data, updatedAt: Date.now() },
@@ -1602,7 +1902,7 @@ app.put('/api/settings', async (req, res) => {
     return;
   }
   const idx = stores.settingsByTenant.findIndex(s => s.tenantId === tenantId);
-  const merged = { ...((stores.settingsByTenant[idx]?.data) || defaultSettings), ...incoming };
+  const merged = normalizeSettingsShape({ ...((stores.settingsByTenant[idx]?.data) || {}), ...incoming });
   if (idx >= 0) stores.settingsByTenant[idx] = { tenantId, data: merged };
   else stores.settingsByTenant.push({ tenantId, data: merged });
   await saveStore('settings', stores.settingsByTenant);
@@ -1709,10 +2009,10 @@ app.delete('/api/admin/users/:id', authorize([UserRole.ADMIN]), async (req, res)
 // --- TWILIO TOKEN (Client SDK) ---
 app.get('/api/twilio/token', (req, res) => {
   const identity = (req.query?.identity || 'agent').toString();
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const apiKey = process.env.TWILIO_API_KEY;
-  const apiSecret = process.env.TWILIO_API_SECRET;
-  const appSid = process.env.TWILIO_TWIML_APP_SID;
+  const accountSid = getTwilioAccountSid();
+  const apiKey = getTwilioApiKey();
+  const apiSecret = getTwilioApiSecret();
+  const appSid = getTwilioTwimlAppSid();
 
   if (!accountSid || !apiKey || !apiSecret || !appSid) {
     const missing = [
@@ -1731,6 +2031,38 @@ app.get('/api/twilio/token', (req, res) => {
   });
   accessToken.addGrant(voiceGrant);
   res.json({ token: accessToken.toJwt(), identity });
+});
+
+app.post('/api/twilio/transfer', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR, UserRole.AGENT]), async (req, res) => {
+  const client = getTwilioClient();
+  if (!client) return res.status(500).json({ error: 'Twilio not configured' });
+  const { callSid, targetIdentity, targetNumber, targetDepartment } = req.body || {};
+  const resolvedCallSid = String(callSid || '').trim();
+  let resolvedTargetIdentity = String(targetIdentity || '').trim();
+  let resolvedTargetNumber = String(targetNumber || '').trim();
+  const resolvedDepartment = String(targetDepartment || '').trim();
+
+  if (!resolvedCallSid) return res.status(400).json({ error: 'callSid is required' });
+  if (!resolvedTargetIdentity && !resolvedTargetNumber && resolvedDepartment) {
+    const settings = await getSettingsForTenant(req.tenantId || DEFAULT_TENANT_ID);
+    const resolved = resolveTransferTargetFromDepartment(settings, resolvedDepartment);
+    if (resolved?.targetIdentity) resolvedTargetIdentity = resolved.targetIdentity;
+    if (resolved?.targetNumber) resolvedTargetNumber = resolved.targetNumber;
+  }
+  if (!resolvedTargetIdentity && !resolvedTargetNumber) {
+    return res.status(400).json({ error: 'targetIdentity, targetNumber, or targetDepartment is required' });
+  }
+
+  try {
+    const twiml = buildTransferTwiml({
+      targetIdentity: resolvedTargetIdentity || undefined,
+      targetNumber: resolvedTargetNumber || undefined,
+    });
+    await client.calls(resolvedCallSid).update({ twiml });
+    return res.json({ ok: true });
+  } catch (err) {
+    return res.status(500).json({ error: err?.message || 'transfer failed' });
+  }
 });
 
 // --- CAMPAIGNS ---
@@ -2166,7 +2498,7 @@ app.get('/api/oauth/google/start', (req, res) => {
     return res.status(500).json({ error: 'Google OAuth not configured' });
   }
   const state = createState();
-  oauthStates.set(state, { provider: 'google', createdAt: now() });
+  oauthStates.set(state, { provider: 'google', tenantId: req.tenantId, createdAt: now() });
   const params = new URLSearchParams({
     client_id: GOOGLE_OAUTH.clientId,
     redirect_uri: GOOGLE_OAUTH.redirectUri,
@@ -2198,13 +2530,35 @@ app.get('/api/oauth/google/callback', async (req, res) => {
       }),
     });
     const token = await tokenRes.json();
-    const store = getIntegrationsStore(req.tenantId);
+    const tenantId = st?.tenantId || DEFAULT_TENANT_ID;
+    const store = getIntegrationsStore(tenantId);
     store.data.calendar.google = { token, updatedAt: now() };
     await saveIntegrationsStore();
-    res.json({ ok: true });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(buildOauthCompletionHtml('Google', true));
   } catch {
-    res.status(500).json({ error: 'Google OAuth failed' });
+    res.status(500).send(buildOauthCompletionHtml('Google', false, 'Google OAuth failed'));
   }
+});
+
+app.get('/api/twilio/capabilities', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
+  const hasAccount = Boolean(getTwilioAccountSid() && getTwilioAuthToken());
+  const hasClientVoice = Boolean(getTwilioApiKey() && getTwilioApiSecret() && getTwilioTwimlAppSid());
+  const configured = hasAccount && hasClientVoice;
+  const monitoringEnabled = String(process.env.TWILIO_MONITORING_ENABLED || '').toLowerCase() === 'true';
+  const missing = [];
+  if (!getTwilioAccountSid()) missing.push('TWILIO_ACCOUNT_SID');
+  if (!getTwilioAuthToken()) missing.push('TWILIO_AUTH_TOKEN');
+  if (!getTwilioApiKey()) missing.push('TWILIO_API_KEY');
+  if (!getTwilioApiSecret()) missing.push('TWILIO_API_SECRET');
+  if (!getTwilioTwimlAppSid()) missing.push('TWILIO_TWIML_APP_SID');
+  if (!monitoringEnabled) missing.push('TWILIO_MONITORING_ENABLED=true');
+  return res.json({
+    configured,
+    monitoringEnabled,
+    canMonitor: hasAccount && monitoringEnabled,
+    missing,
+  });
 });
 
 app.get('/api/oauth/microsoft/start', (req, res) => {
@@ -2212,7 +2566,7 @@ app.get('/api/oauth/microsoft/start', (req, res) => {
     return res.status(500).json({ error: 'Microsoft OAuth not configured' });
   }
   const state = createState();
-  oauthStates.set(state, { provider: 'microsoft', createdAt: now() });
+  oauthStates.set(state, { provider: 'microsoft', tenantId: req.tenantId, createdAt: now() });
   const params = new URLSearchParams({
     client_id: MS_OAUTH.clientId,
     response_type: 'code',
@@ -2244,12 +2598,61 @@ app.get('/api/oauth/microsoft/callback', async (req, res) => {
       }),
     });
     const token = await tokenRes.json();
-    const store = getIntegrationsStore(req.tenantId);
+    const tenantId = st?.tenantId || DEFAULT_TENANT_ID;
+    const store = getIntegrationsStore(tenantId);
     store.data.calendar.microsoft = { token, updatedAt: now() };
     await saveIntegrationsStore();
-    res.json({ ok: true });
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(buildOauthCompletionHtml('Microsoft', true));
   } catch {
-    res.status(500).json({ error: 'Microsoft OAuth failed' });
+    res.status(500).send(buildOauthCompletionHtml('Microsoft', false, 'Microsoft OAuth failed'));
+  }
+});
+
+app.get('/api/oauth/hubspot/start', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
+  if (!HUBSPOT_OAUTH.clientId || !HUBSPOT_OAUTH.redirectUri) {
+    return res.status(500).json({ error: 'HubSpot OAuth not configured' });
+  }
+  const state = createState();
+  oauthStates.set(state, { provider: 'hubspot', tenantId: req.tenantId, createdAt: now() });
+  const params = new URLSearchParams({
+    client_id: HUBSPOT_OAUTH.clientId,
+    redirect_uri: HUBSPOT_OAUTH.redirectUri,
+    scope: HUBSPOT_OAUTH.scopes.join(' '),
+    state,
+  });
+  res.json({ url: `https://app.hubspot.com/oauth/authorize?${params.toString()}` });
+});
+
+app.get('/api/oauth/hubspot/callback', async (req, res) => {
+  const { code, state } = req.query || {};
+  const st = oauthStates.get(state);
+  if (!st || st.provider !== 'hubspot') return res.status(400).send(buildOauthCompletionHtml('HubSpot', false, 'Invalid OAuth state'));
+  oauthStates.delete(state);
+  if (!code) return res.status(400).send(buildOauthCompletionHtml('HubSpot', false, 'Missing authorization code'));
+  if (!HUBSPOT_OAUTH.clientId || !HUBSPOT_OAUTH.clientSecret || !HUBSPOT_OAUTH.redirectUri) {
+    return res.status(500).send(buildOauthCompletionHtml('HubSpot', false, 'HubSpot OAuth env is incomplete'));
+  }
+  try {
+    const tokenRes = await fetch('https://api.hubapi.com/oauth/v1/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        client_id: HUBSPOT_OAUTH.clientId,
+        client_secret: HUBSPOT_OAUTH.clientSecret,
+        redirect_uri: HUBSPOT_OAUTH.redirectUri,
+        code: String(code),
+      }),
+    });
+    const token = await tokenRes.json();
+    if (!tokenRes.ok) throw new Error(token?.message || `HubSpot OAuth failed (${tokenRes.status})`);
+    const tenantId = st?.tenantId || DEFAULT_TENANT_ID;
+    await saveHubSpotTokenForTenant(tenantId, token);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(buildOauthCompletionHtml('HubSpot', true));
+  } catch (err) {
+    res.status(500).send(buildOauthCompletionHtml('HubSpot', false, err?.message || 'HubSpot OAuth failed'));
   }
 });
 
@@ -2315,6 +2718,11 @@ app.get('/api/crm/tasks', (req, res) => {
   res.json(stores.crmTasks.filter(t => t.tenantId === tenantId));
 });
 
+app.get('/api/crm/deals', (req, res) => {
+  const tenantId = req.tenantId;
+  res.json((stores.crmDeals || []).filter((d) => d.tenantId === tenantId));
+});
+
 app.post('/api/crm/tasks', async (req, res) => {
   const tenantId = req.tenantId;
   const payload = req.body || {};
@@ -2336,10 +2744,42 @@ app.post('/api/crm/webhook', (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/api/crm/hubspot/status', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
+  const { hubspot } = getHubSpotIntegration(req.tenantId);
+  const oauth = hubspot?.oauth || {};
+  const expiresAt = Number(oauth.expiresAt || 0);
+  const isConnected = Boolean(oauth.accessToken || oauth.refreshToken);
+  res.json({
+    connected: isConnected,
+    status: hubspot?.status || (isConnected ? 'connected' : 'disconnected'),
+    expiresAt: expiresAt || null,
+    expired: expiresAt ? expiresAt <= Date.now() : false,
+    lastSyncAt: hubspot?.lastSyncAt || null,
+    counts: hubspot?.counts || { contacts: 0, deals: 0 },
+    syncHistory: Array.isArray(hubspot?.syncHistory) ? hubspot.syncHistory : [],
+  });
+});
+
 app.post('/api/crm/:provider/connect', async (req, res) => {
   const { provider } = req.params;
   const credentials = req.body || {};
   const store = getIntegrationsStore(req.tenantId);
+  if (provider === 'hubspot') {
+    const existing = store.data.crm?.hubspot || {};
+    const connected = Boolean(existing?.oauth?.accessToken || existing?.oauth?.refreshToken);
+    store.data.crm.hubspot = {
+      ...existing,
+      status: connected ? 'connected' : 'requires_oauth',
+      connectedAt: existing.connectedAt || null,
+      updatedAt: Date.now(),
+    };
+    await saveIntegrationsStore();
+    return res.json({
+      ok: connected,
+      requiresOAuth: !connected,
+      message: connected ? 'HubSpot already connected via OAuth' : 'Use /api/oauth/hubspot/start to connect',
+    });
+  }
   store.data.crm[provider] = { provider, credentials, status: 'connected', updatedAt: Date.now() };
   await saveIntegrationsStore();
   res.json({ ok: true });
@@ -2348,6 +2788,99 @@ app.post('/api/crm/:provider/connect', async (req, res) => {
 app.post('/api/crm/:provider/sync', async (req, res) => {
   const { provider } = req.params;
   const store = getIntegrationsStore(req.tenantId);
+  if (provider === 'hubspot') {
+    const startedAt = Date.now();
+    try {
+      store.data.crm.hubspot = { ...(store.data.crm.hubspot || {}), status: 'syncing', updatedAt: Date.now() };
+      await saveIntegrationsStore();
+      const accessToken = await refreshHubSpotAccessTokenIfNeeded(req.tenantId);
+      const [hubspotContacts, hubspotDeals] = await Promise.all([
+        fetchHubSpotObjects(accessToken, 'contacts', ['firstname', 'lastname', 'email', 'phone', 'company', 'jobtitle', 'createdate', 'lastmodifieddate']),
+        fetchHubSpotObjects(accessToken, 'deals', ['dealname', 'dealstage', 'pipeline', 'amount', 'closedate', 'createdate', 'hs_lastmodifieddate']),
+      ]);
+
+      const nowTs = Date.now();
+      const contactRecords = hubspotContacts.map((c) => {
+        const p = c?.properties || {};
+        const first = String(p.firstname || '').trim();
+        const last = String(p.lastname || '').trim();
+        const displayName = `${first} ${last}`.trim() || p.email || p.phone || `Contact ${c.id}`;
+        return {
+          id: `hubspot_contact_${req.tenantId}_${c.id}`,
+          tenantId: req.tenantId,
+          platform: 'HubSpot',
+          externalId: c.id,
+          name: displayName,
+          phone: p.phone || '',
+          email: p.email || '',
+          company: p.company || '',
+          title: p.jobtitle || '',
+          raw: c,
+          updatedAt: nowTs,
+        };
+      });
+
+      const dealRecords = hubspotDeals.map((d) => {
+        const p = d?.properties || {};
+        return {
+          id: `hubspot_deal_${req.tenantId}_${d.id}`,
+          tenantId: req.tenantId,
+          platform: 'HubSpot',
+          externalId: d.id,
+          name: p.dealname || `Deal ${d.id}`,
+          amount: p.amount || '',
+          stage: p.dealstage || '',
+          pipeline: p.pipeline || '',
+          closeDate: p.closedate || '',
+          raw: d,
+          updatedAt: nowTs,
+        };
+      });
+
+      const existingContacts = stores.crmContacts.filter((c) => !(c.tenantId === req.tenantId && c.platform === 'HubSpot'));
+      stores.crmContacts = [...existingContacts, ...contactRecords];
+      await saveStore('crmContacts', stores.crmContacts);
+
+      const existingDeals = (stores.crmDeals || []).filter((d) => !(d.tenantId === req.tenantId && d.platform === 'HubSpot'));
+      stores.crmDeals = [...existingDeals, ...dealRecords];
+      await saveStore('crmDeals', stores.crmDeals);
+
+      store.data.crm.hubspot = {
+        ...(store.data.crm.hubspot || {}),
+        status: 'connected',
+        lastSyncAt: nowTs,
+        counts: { contacts: contactRecords.length, deals: dealRecords.length },
+        syncHistory: appendHubSpotSyncHistory((store.data.crm.hubspot || {}), {
+          startedAt,
+          finishedAt: nowTs,
+          status: 'success',
+          contacts: contactRecords.length,
+          deals: dealRecords.length,
+          error: '',
+        }),
+        updatedAt: nowTs,
+      };
+      await saveIntegrationsStore();
+      return res.json({ ok: true, contacts: contactRecords.length, deals: dealRecords.length });
+    } catch (err) {
+      store.data.crm.hubspot = {
+        ...(store.data.crm.hubspot || {}),
+        status: 'error',
+        error: err?.message || 'sync failed',
+        syncHistory: appendHubSpotSyncHistory((store.data.crm.hubspot || {}), {
+          startedAt,
+          finishedAt: Date.now(),
+          status: 'error',
+          contacts: 0,
+          deals: 0,
+          error: err?.message || 'sync failed',
+        }),
+        updatedAt: Date.now(),
+      };
+      await saveIntegrationsStore();
+      return res.status(500).json({ error: err?.message || 'HubSpot sync failed' });
+    }
+  }
   store.data.crm[provider] = { ...(store.data.crm[provider] || {}), status: 'syncing', updatedAt: Date.now() };
   await saveIntegrationsStore();
   res.json({ ok: true });
@@ -2445,7 +2978,12 @@ app.post('/api/termii/webhook', async (req, res) => {
 
     const conversationId = `termii_${from.replace(/\W/g, '')}`;
     const now = Date.now();
-    const consentText = 'By continuing this conversation, you consent to processing of your data in line with Nigeria\'s Data Protection Act (NDPA). Reply STOP to opt out.';
+    const jurisdiction = String(settings?.compliance?.jurisdiction || 'NG').toUpperCase();
+    const consentText = jurisdiction === 'EU' || jurisdiction === 'UK'
+      ? 'By continuing this conversation, you consent to processing of your data in line with GDPR. Reply STOP to opt out.'
+      : jurisdiction === 'US'
+        ? 'By continuing this conversation, you consent to processing of your data in line with applicable US privacy regulations. Reply STOP to opt out.'
+        : 'By continuing this conversation, you consent to processing of your data in line with Nigeria\'s Data Protection Act (NDPA). Reply STOP to opt out.';
     const convRef = db.collection('conversations').doc(conversationId);
     const existingSnap = await convRef.get();
     const existing = existingSnap.exists ? existingSnap.data() : null;
@@ -2550,8 +3088,8 @@ app.get('/api/metrics/summary', authorize([UserRole.ADMIN, UserRole.SUPERVISOR])
 app.post('/api/supervisor/monitor', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
   const { callId, mode = 'listen', identity } = req.body || {};
   if (!callId) return res.status(400).json({ error: 'callId required' });
-  if (!twilioClient) return res.status(500).json({ error: 'Twilio not configured' });
-  if (!TWILIO_MONITORING_ENABLED) return res.status(400).json({ error: 'Monitoring not enabled' });
+  if (!getTwilioClient()) return res.status(500).json({ error: 'Twilio not configured' });
+  if (!isTwilioMonitoringEnabled()) return res.status(400).json({ error: 'Monitoring not enabled' });
 
   const conferenceName = getConferenceName(callId);
   const supervisorIdentity = identity || req.user?.uid || req.user?.email || 'supervisor';
@@ -2577,18 +3115,19 @@ app.post('/api/supervisor/monitor', authenticate, authorize([UserRole.ADMIN, Use
 
 app.post('/api/supervisor/monitor/stop', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
   const { participantSid, callId } = req.body || {};
-  if (!twilioClient) return res.status(500).json({ error: 'Twilio not configured' });
+  const client = getTwilioClient();
+  if (!client) return res.status(500).json({ error: 'Twilio not configured' });
   try {
     if (participantSid) {
-      await twilioClient.participants(participantSid).update({ hold: true });
+      await client.participants(participantSid).update({ hold: true });
       return res.json({ ok: true });
     }
     if (callId) {
       const conferenceName = getConferenceName(callId);
       const conferenceSid = await findConferenceSid(conferenceName);
       if (!conferenceSid) return res.status(404).json({ error: 'Conference not active' });
-      const parts = await twilioClient.conferences(conferenceSid).participants.list({ limit: 20 });
-      await Promise.all(parts.map(p => twilioClient.conferences(conferenceSid).participants(p.sid).remove().catch(() => {})));
+      const parts = await client.conferences(conferenceSid).participants.list({ limit: 20 });
+      await Promise.all(parts.map(p => client.conferences(conferenceSid).participants(p.sid).remove().catch(() => {})));
       return res.json({ ok: true });
     }
     res.status(400).json({ error: 'participantSid or callId required' });
@@ -2599,17 +3138,18 @@ app.post('/api/supervisor/monitor/stop', authenticate, authorize([UserRole.ADMIN
 
 app.post('/api/supervisor/monitor/status', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (req, res) => {
   const { participantSid, callId } = req.body || {};
-  if (!twilioClient) return res.status(500).json({ error: 'Twilio not configured' });
+  const client = getTwilioClient();
+  if (!client) return res.status(500).json({ error: 'Twilio not configured' });
   try {
     if (participantSid) {
-      const participant = await twilioClient.participants(participantSid).fetch();
+      const participant = await client.participants(participantSid).fetch();
       return res.json({ active: participant?.status === 'in-progress', status: participant?.status });
     }
     if (callId) {
       const conferenceName = getConferenceName(callId);
       const conferenceSid = await findConferenceSid(conferenceName);
       if (!conferenceSid) return res.json({ active: false });
-      const parts = await twilioClient.conferences(conferenceSid).participants.list({ limit: 20 });
+      const parts = await client.conferences(conferenceSid).participants.list({ limit: 20 });
       return res.json({ active: parts.length > 0 });
     }
     res.status(400).json({ error: 'participantSid or callId required' });
@@ -2645,7 +3185,7 @@ app.post('/twilio/voice', verifyTwilioSignature, async (req, res) => {
     const callSid = req.body?.CallSid || crypto.randomUUID();
     const conferenceName = getConferenceName(callSid);
 
-    if (TWILIO_MONITORING_ENABLED) {
+    if (isTwilioMonitoringEnabled()) {
       const metrics = getMetrics(tenantId);
       metrics.outboundTotal += 1;
       metrics.routed += 1;
@@ -2736,9 +3276,10 @@ app.post('/twilio/recording/status', verifyTwilioSignature, async (req, res) => 
 
   try {
     const callRecord = isMongoReady()
-      ? await Call.findOne({ externalId: callSid }).lean()
-      : (stores.calls || []).find(c => c.id === callSid);
+      ? await Call.findOne({ $or: [{ externalId: callSid }, { twilioCallSid: callSid }] }).lean()
+      : (stores.calls || []).find(c => c.id === callSid || c.twilioCallSid === callSid);
     const tenantId = callRecord?.tenantId || req.tenantId || DEFAULT_TENANT_ID;
+    const resolvedCallId = callRecord?.externalId || callRecord?.id || callSid;
     const externalId = `rec_${callSid}`;
     await ensureRecordingsDir();
     const data = await downloadTwilioRecording(recordingUrl);
@@ -2761,7 +3302,7 @@ app.post('/twilio/recording/status', verifyTwilioSignature, async (req, res) => 
     const recording = {
       tenantId,
       externalId,
-      callId: callSid,
+      callId: resolvedCallId,
       filename: `${externalId}.wav`,
       mimeType: 'audio/wav',
       size: data.length,
@@ -2780,14 +3321,14 @@ app.post('/twilio/recording/status', verifyTwilioSignature, async (req, res) => 
         { upsert: true, new: true }
       );
       await Call.findOneAndUpdate(
-        { tenantId, externalId: callSid },
+        { tenantId, $or: [{ externalId: callSid }, { twilioCallSid: callSid }] },
         { recordingUrl: signedUrl, recordingId: externalId }
       );
     } else {
       const stored = { id: externalId, ...recording };
       stores.recordings = upsertById(stores.recordings, stored);
       await saveStore('recordings', stores.recordings);
-      stores.calls = stores.calls.map(c => (c.id === callSid && c.tenantId === tenantId) ? { ...c, recordingUrl: signedUrl, recordingId: externalId } : c);
+      stores.calls = stores.calls.map(c => ((c.id === callSid || c.twilioCallSid === callSid) && c.tenantId === tenantId) ? { ...c, recordingUrl: signedUrl, recordingId: externalId } : c);
       await saveStore('calls', stores.calls);
     }
 
@@ -2820,23 +3361,25 @@ app.post('/twilio/transcription/status', verifyTwilioSignature, async (req, res)
     };
     if (isMongoReady()) {
       const call = await Call.findOneAndUpdate(
-        { externalId: callSid },
+        { $or: [{ externalId: callSid }, { twilioCallSid: callSid }] },
         { $push: { transcript: segment }, transcriptionEnabled: true },
         { new: true }
       ).lean();
       if (call?.tenantId) {
-        await enqueueJob(call.tenantId, 'summary', { callId: callSid });
-        await enqueueJob(call.tenantId, 'report', { callId: callSid });
+        const resolvedCallId = call.externalId || call.id || callSid;
+        await enqueueJob(call.tenantId, 'summary', { callId: resolvedCallId });
+        await enqueueJob(call.tenantId, 'report', { callId: resolvedCallId });
       }
     } else {
-      const idx = (stores.calls || []).findIndex(c => c.id === callSid);
+      const idx = (stores.calls || []).findIndex(c => c.id === callSid || c.twilioCallSid === callSid);
       if (idx >= 0) {
         const existing = stores.calls[idx];
         const transcript = Array.isArray(existing.transcript) ? [...existing.transcript, segment] : [segment];
         stores.calls[idx] = { ...existing, transcript, transcriptionEnabled: true };
         await saveStore('calls', stores.calls);
-        await enqueueJob(existing.tenantId || DEFAULT_TENANT_ID, 'summary', { callId: callSid });
-        await enqueueJob(existing.tenantId || DEFAULT_TENANT_ID, 'report', { callId: callSid });
+        const resolvedCallId = existing.id || callSid;
+        await enqueueJob(existing.tenantId || DEFAULT_TENANT_ID, 'summary', { callId: resolvedCallId });
+        await enqueueJob(existing.tenantId || DEFAULT_TENANT_ID, 'report', { callId: resolvedCallId });
       }
     }
     res.json({ ok: true });
@@ -2853,7 +3396,7 @@ app.post('/twilio/voice/incoming', verifyTwilioSignature, async (req, res) => {
   const targets = identityOverride ? [identityOverride] : buildRouteTargets(settings, 'agent');
   const callSid = req.body?.CallSid || crypto.randomUUID();
   const conferenceName = getConferenceName(callSid);
-  callRouteState.set(callSid, { targets, index: 0, tenantId, conferenceName });
+  callRouteState.set(callSid, { targets, index: 0, tenantId, conferenceName, waitLoops: 0 });
 
   const metrics = getMetrics(tenantId);
   metrics.inboundTotal += 1;
@@ -2892,7 +3435,7 @@ app.post('/twilio/voice/incoming', verifyTwilioSignature, async (req, res) => {
 
   const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
   const recordingCallbackUrl = `${getBaseUrl(req)}/twilio/recording/status`;
-  if (TWILIO_MONITORING_ENABLED) {
+  if (isTwilioMonitoringEnabled()) {
     res.type('text/xml').send(buildConferenceTwiml(conferenceName, { muted: false, startOnEnter: true, endOnExit: true }));
     const firstTarget = targets[0];
     if (firstTarget) {
@@ -2916,11 +3459,11 @@ app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => 
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
     return;
   }
-  if (TWILIO_MONITORING_ENABLED) {
+  if (isTwilioMonitoringEnabled()) {
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
     return;
   }
-  const { targets, index, tenantId } = state;
+  const { targets, index, tenantId, waitLoops = 0 } = state;
   if (dialStatus === 'completed') {
     callRouteState.delete(callSid);
     if (isMongoReady()) {
@@ -2941,6 +3484,14 @@ app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => 
   }
   const nextIndex = index + 1;
   if (nextIndex >= targets.length) {
+    const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
+    if (waitLoops < TWILIO_MAX_WAIT_CYCLES) {
+      const metrics = getMetrics(tenantId);
+      metrics.retries += 1;
+      callRouteState.set(callSid, { ...state, index: 0, waitLoops: waitLoops + 1 });
+      res.type('text/xml').send(buildWaitTwiml(actionUrl, TWILIO_HOLD_MUSIC_URL, TWILIO_WAIT_SECONDS));
+      return;
+    }
     const metrics = getMetrics(tenantId);
     metrics.failed += 1;
     callRouteState.delete(callSid);
@@ -2951,7 +3502,7 @@ app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => 
   }
   const metrics = getMetrics(tenantId);
   metrics.retries += 1;
-  callRouteState.set(callSid, { targets, index: nextIndex, tenantId });
+  callRouteState.set(callSid, { ...state, index: nextIndex });
   const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
   const recordingCallbackUrl = `${getBaseUrl(req)}/twilio/recording/status`;
   res.type('text/xml').send(buildDialTwiml(targets[nextIndex], actionUrl, recordingCallbackUrl));
@@ -2990,7 +3541,7 @@ app.post('/twilio/voice/handle', verifyTwilioSignature, async (req, res) => {
   const callSid = req.body?.CallSid || crypto.randomUUID();
   const targets = buildRouteTargets(settings, 'agent');
   const conferenceName = getConferenceName(callSid);
-  callRouteState.set(callSid, { targets, index: 0, tenantId, conferenceName });
+  callRouteState.set(callSid, { targets, index: 0, tenantId, conferenceName, waitLoops: 0 });
 
   if (isMongoReady()) {
     await Call.findOneAndUpdate(
@@ -3028,7 +3579,7 @@ app.post('/twilio/voice/handle', verifyTwilioSignature, async (req, res) => {
 
   const actionUrl = `${getBaseUrl(req)}/twilio/voice/route-next`;
   const recordingCallbackUrl = `${getBaseUrl(req)}/twilio/recording/status`;
-  if (TWILIO_MONITORING_ENABLED) {
+  if (isTwilioMonitoringEnabled()) {
     res.type('text/xml').send(buildConferenceTwiml(conferenceName, { muted: false, startOnEnter: true, endOnExit: true }));
     const firstTarget = targets[0];
     if (firstTarget) {

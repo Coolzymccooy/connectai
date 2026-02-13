@@ -11,6 +11,7 @@ import {
 import { Call, CallStatus, TranscriptSegment, AppSettings, Notification, Lead, User, AiSuggestion, AgentStatus, Message, CallAnalysis, CrmContact, Campaign, Conversation, Meeting, ToolAction, Attachment, Role } from '../types';
 import { generateLeadBriefing, generateAiDraft, analyzeCallTranscript, extractToolActions, generateCampaignDraft, enrichLead, generateHelpAnswer } from '../services/geminiService';
 import { upsertCrmContact } from '../services/crmService';
+import { updateCall as updateCallLog } from '../services/callLogService';
 import * as dbService from '../services/dbService';
 import { buildInternalConversationId } from '../utils/chat';
 
@@ -39,7 +40,20 @@ interface AgentConsoleProps {
 
 const HOURS = Array.from({ length: 14 }, (_, i) => i + 8); 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
-const NDPR_CONSENT_TEXT = 'By continuing this conversation, you consent to processing of your data in line with Nigeria\'s Data Protection Act (NDPA). Reply STOP to opt out.';
+const getConsentFramework = (jurisdiction: AppSettings['compliance']['jurisdiction']) => {
+  if (jurisdiction === 'EU' || jurisdiction === 'UK') return 'GDPR';
+  if (jurisdiction === 'US') return 'US Privacy';
+  return 'NDPA';
+};
+const getConsentText = (jurisdiction: AppSettings['compliance']['jurisdiction']) => {
+  if (jurisdiction === 'EU' || jurisdiction === 'UK') {
+    return 'By continuing this conversation, you consent to processing of your data in line with GDPR. Reply STOP to opt out.';
+  }
+  if (jurisdiction === 'US') {
+    return 'By continuing this conversation, you consent to processing of your data in line with applicable US privacy regulations. Reply STOP to opt out.';
+  }
+  return 'By continuing this conversation, you consent to processing of your data in line with Nigeria\'s Data Protection Act (NDPA). Reply STOP to opt out.';
+};
 const CAMPAIGN_TEMPLATES = [
   {
     id: 'welcome',
@@ -174,6 +188,8 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     { id: 'h1', sender: 'bot', text: 'Welcome to the Help Corner. Ask anything about ConnectAI or pick a preset question.' }
   ]);
   const canManage = user.role === Role.ADMIN || user.role === Role.SUPERVISOR;
+  const consentFramework = getConsentFramework(settings.compliance.jurisdiction);
+  const consentText = getConsentText(settings.compliance.jurisdiction);
   const teamDirectory = useMemo(() => {
     const seen = new Set<string>();
     return (settings.team || []).filter((member) => {
@@ -282,10 +298,48 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   // Wrap-up trigger logic
   useEffect(() => {
     if (agentStatus === AgentStatus.WRAP_UP && history.length > 0 && !isAnalyzing) {
-      const lastCall = history[0];
+      const lastCall = history.find((c) => c.status === CallStatus.ENDED) || history[0];
+      if (!lastCall) return;
       setLastEndedCall(lastCall);
       const transcriptLen = lastCall.transcript?.length || 0;
-      if (transcriptLen === 0) return;
+      if (lastCall.analysis?.summary) {
+        setWrapUpAnalysis({
+          summary: lastCall.analysis.summary,
+          sentimentScore: lastCall.analysis.sentimentScore ?? 50,
+          sentimentLabel: lastCall.analysis.sentimentLabel ?? 'Neutral',
+          topics: lastCall.analysis.topics?.length ? lastCall.analysis.topics : ['Call Review'],
+          qaScore: lastCall.analysis.qaScore ?? 75,
+          dispositionSuggestion: lastCall.analysis.dispositionSuggestion || 'Follow-up Needed',
+        });
+        setWrapUpActions({
+          qaApproved: false,
+          dispositionApplied: false,
+          crmSynced: false,
+          followUpScheduled: false,
+        });
+        analyzedRef.current = { id: lastCall.id, len: transcriptLen };
+        return;
+      }
+      if (transcriptLen === 0) {
+        const fallback: CallAnalysis = {
+          summary: `Call with ${lastCall.customerName || lastCall.phoneNumber || 'customer'} ended after ${Math.max(0, Math.floor(lastCall.durationSeconds || 0))}s. Transcript unavailable; review recording and disposition.`,
+          sentimentScore: 50,
+          sentimentLabel: 'Neutral',
+          topics: ['Wrap-Up'],
+          qaScore: 72,
+          dispositionSuggestion: 'Follow-up Needed',
+        };
+        setWrapUpAnalysis(fallback);
+        setLastEndedCall(prev => prev ? { ...prev, analysis: fallback } : prev);
+        setWrapUpActions({
+          qaApproved: false,
+          dispositionApplied: false,
+          crmSynced: false,
+          followUpScheduled: false,
+        });
+        analyzedRef.current = { id: lastCall.id, len: transcriptLen };
+        return;
+      }
       if (analyzedRef.current.id === lastCall.id && analyzedRef.current.len === transcriptLen) return;
       setIsAnalyzing(true);
       analyzeCallTranscript(lastCall.transcript)
@@ -671,21 +725,33 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
   const handleMessageTeammate = async (member: User) => {
     const convId = buildInternalConversationId(user.id, member.id);
+    const bootMessage: Message = {
+      id: `m_boot_${Date.now()}`,
+      channel: 'chat',
+      sender: 'teammate',
+      text: `Hi ${user.name}, direct secure thread with ${member.name} is active.`,
+      timestamp: Date.now(),
+    };
+    const seededConversation: Conversation = {
+      id: convId,
+      contactName: member.name,
+      contactPhone: `EXT ${member.extension}`,
+      channel: 'chat',
+      lastMessage: 'Connection Established',
+      lastMessageTime: Date.now(),
+      unreadCount: 0,
+      status: 'open',
+      teammateId: member.id,
+      participantIds: [user.id, member.id],
+      messages: [bootMessage],
+    };
     if (isFirebaseConfigured) {
-      const conv: Conversation = {
-        id: convId,
-        contactName: member.name,
-        contactPhone: `EXT ${member.extension}`,
-        channel: 'chat',
-        lastMessage: 'Connection Established',
-        lastMessageTime: Date.now(),
-        unreadCount: 0,
-        status: 'open',
-        teammateId: member.id,
-        participantIds: [user.id, member.id],
-        messages: [],
-      };
-      await dbService.upsertConversation(conv);
+      await dbService.upsertConversation(seededConversation);
+      setConversations(prev => {
+        const rest = prev.filter(c => c.id !== convId);
+        return [seededConversation, ...rest];
+      });
+      setMessageMap(prev => ({ ...prev, [convId]: prev[convId]?.length ? prev[convId] : [bootMessage] }));
       setSelectedConvId(convId);
       setActiveTab('omnichannel');
       return;
@@ -693,19 +759,15 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
     let conv = conversations.find(c => c.teammateId === member.id);
     if (!conv) {
-      conv = { 
-        id: `int_chat_${Date.now()}`, 
-        contactName: member.name, 
-        contactPhone: `EXT ${member.extension}`, 
-        channel: 'chat', 
-        lastMessage: 'Connection Established', 
-        lastMessageTime: Date.now(), 
-        unreadCount: 0, 
-        status: 'open', 
-        teammateId: member.id, 
-        messages: [{ id: 'm0', channel: 'chat', sender: 'teammate', text: `Hi ${user.name}, protocol link initialized.`, timestamp: Date.now() }] 
-      };
-      setConversations(prev => [conv!, ...prev]);
+      conv = seededConversation;
+      setConversations(prev => [conv!, ...prev.filter(c => c.id !== conv!.id)]);
+      setMessageMap(prev => ({ ...prev, [convId]: [bootMessage] }));
+    } else {
+      setConversations(prev => {
+        const focus = prev.find(c => c.id === conv!.id) || conv!;
+        const rest = prev.filter(c => c.id !== conv!.id);
+        return [focus, ...rest];
+      });
     }
     setSelectedConvId(conv.id);
     setActiveTab('omnichannel');
@@ -820,7 +882,9 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     setLastEndedCall(updated);
     if (isFirebaseConfigured) {
       await dbService.saveCall(updated);
+      return;
     }
+    await updateCallLog(updated.id, updated).catch(() => {});
   };
 
   const handleApproveQa = async () => {
@@ -899,8 +963,13 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     onJoinMeeting?.(updated);
   };
 
-  const completeWrapUp = () => {
-    if (lastEndedCall) onCompleteWrapUp(lastEndedCall);
+  const completeWrapUp = async () => {
+    if (!lastEndedCall) return;
+    const committedCall: Call = wrapUpAnalysis
+      ? { ...lastEndedCall, analysis: { ...(lastEndedCall.analysis || {}), ...wrapUpAnalysis } }
+      : lastEndedCall;
+    await persistWrapUpCall(committedCall);
+    onCompleteWrapUp(committedCall);
   };
 
   const pastMeetings = useMemo(() => {
@@ -1550,6 +1619,10 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                             <div>
                                <h4 className="font-black italic uppercase text-xl tracking-tighter">{activeConversation.contactName}</h4>
                                <p className="text-[10px] font-black text-brand-400 uppercase tracking-[0.3em]">{activeConversation.channel} HUB PORT</p>
+                               <div className="mt-1 inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-white/10 bg-white/5">
+                                 <ShieldCheck size={10} className="text-emerald-300" />
+                                 <span className="text-[8px] font-black uppercase tracking-widest text-emerald-300">{consentFramework}</span>
+                               </div>
                             </div>
                          </div>
                          <div className="flex gap-4 items-center">
@@ -1569,11 +1642,11 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                       {activeConversation.channel === 'whatsapp' && activeConversation.consentStatus !== 'granted' && (
                         <div className="px-6 py-4 bg-amber-50 border-b border-amber-100 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                           <div>
-                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">NDPR Consent Required</p>
-                            <p className="text-xs text-amber-700 mt-1">{NDPR_CONSENT_TEXT}</p>
+                          <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">{consentFramework} Consent Required</p>
+                            <p className="text-xs text-amber-700 mt-1">{consentText}</p>
                           </div>
                           <div className="flex gap-2">
-                            <button onClick={() => handleSendMessage(NDPR_CONSENT_TEXT)} className="px-3 py-2 rounded-lg bg-amber-600 text-white text-[9px] font-black uppercase tracking-widest">Send Consent</button>
+                            <button onClick={() => handleSendMessage(consentText)} className="px-3 py-2 rounded-lg bg-amber-600 text-white text-[9px] font-black uppercase tracking-widest">Send Consent</button>
                             <button onClick={markConsentGranted} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase tracking-widest">Mark Consent</button>
                             <button onClick={markConsentOptOut} className="px-3 py-2 rounded-lg bg-white border border-amber-200 text-amber-700 text-[9px] font-black uppercase tracking-widest">Opt Out</button>
                           </div>

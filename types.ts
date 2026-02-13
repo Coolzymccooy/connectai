@@ -84,6 +84,7 @@ export interface Call {
   piiRedacted?: boolean;
   recordingUrl?: string;
   recordingId?: string;
+  twilioCallSid?: string;
   conferenceName?: string;
 }
 
@@ -195,6 +196,7 @@ export interface User {
   avatarUrl: string;
   extension?: string;
   email?: string;
+  department?: string;
   status: 'active' | 'invited' | 'disabled';
   currentPresence?: AgentStatus;
   allowedNumbers?: string[];
@@ -317,10 +319,18 @@ export interface IvrOption {
   label: string;
 }
 
+export interface DepartmentRoute {
+  id: string;
+  name: string;
+  targetType: 'queue' | 'client' | 'phone';
+  target: string;
+}
+
 export interface IvrConfig {
   phoneNumber: string;
   welcomeMessage: string;
   options: IvrOption[];
+  departments?: DepartmentRoute[];
 }
 
 export interface BotConfig {

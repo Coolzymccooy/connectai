@@ -31,7 +31,19 @@ const DEFAULT_SETTINGS: AppSettings = {
     usage: { aiTokens: 450000, aiTokenLimit: 1000000, voiceMinutes: 1250, voiceMinuteLimit: 5000 },
     paymentMethod: 'Mastercard •••• 9921'
   },
-  ivr: { phoneNumber: '+1 (555) 012-3456', welcomeMessage: 'Welcome to ConnectAI. For sales, press 1. For support, press 2.', options: [{ key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' }, { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' }] },
+  ivr: {
+    phoneNumber: '+1 (555) 012-3456',
+    welcomeMessage: 'Welcome to ConnectAI. For sales, press 1. For support, press 2.',
+    options: [
+      { key: '1', action: 'QUEUE', target: 'Sales', label: 'Sales' },
+      { key: '2', action: 'QUEUE', target: 'Support', label: 'Support' }
+    ],
+    departments: [
+      { id: 'dept_sales', name: 'Sales', targetType: 'queue', target: 'Sales' },
+      { id: 'dept_support', name: 'Support', targetType: 'queue', target: 'Support' },
+      { id: 'dept_billing', name: 'Billing', targetType: 'queue', target: 'Billing' }
+    ],
+  },
   voice: { allowedNumbers: [] },
   bot: { enabled: true, name: 'ConnectBot', persona: 'You are a helpful customer service assistant for ConnectAI.', deflectionGoal: 35 },
   auth: { inviteOnly: false, allowedDomains: [], autoTenantByDomain: false, domainTenantMap: [] },
@@ -96,6 +108,12 @@ const buildMergedSettings = (saved: Partial<AppSettings> | null | undefined): Ap
   const merged = {
     ...DEFAULT_SETTINGS,
     ...source,
+    ivr: {
+      ...DEFAULT_SETTINGS.ivr,
+      ...((source as any).ivr || {}),
+      options: Array.isArray((source as any).ivr?.options) ? (source as any).ivr.options : DEFAULT_SETTINGS.ivr.options,
+      departments: Array.isArray((source as any).ivr?.departments) ? (source as any).ivr.departments : (DEFAULT_SETTINGS.ivr as any).departments,
+    },
     voice: { ...DEFAULT_SETTINGS.voice, ...((source as any).voice || {}) },
     auth: { ...DEFAULT_SETTINGS.auth, ...((source as any).auth || {}) },
   };
@@ -192,6 +210,8 @@ const App: React.FC = () => {
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
   const internalPollCooldownRef = useRef(0);
   const activeCallPollCooldownRef = useRef(0);
+  const callFeedPollCooldownRef = useRef(0);
+  const settingsSaveCooldownRef = useRef(0);
 
   const [route, setRoute] = useState(() => ({
     pathname: typeof window !== 'undefined' ? window.location.pathname : '/',
@@ -299,18 +319,26 @@ const App: React.FC = () => {
   const finishLogin = async (user: any) => {
     try {
       const storedRole = (localStorage.getItem(`connectai_role_${user.uid}`) as Role) || Role.AGENT;
-      const roleTemplate = DEFAULT_SETTINGS.team.find(u => u.role === storedRole);
+      const normalizedEmail = normalizeEmail(user.email || '');
+      const knownMember = normalizedEmail
+        ? appSettings.team.find((m) => normalizeEmail(m.email) === normalizedEmail)
+        : null;
+      const effectiveRole = knownMember?.role || storedRole;
+      const roleTemplate = DEFAULT_SETTINGS.team.find(u => u.role === effectiveRole);
       const profile: User = {
         id: user.uid,
         name: user.displayName || user.email || roleTemplate?.name || 'User',
-        role: storedRole,
+        role: effectiveRole,
         avatarUrl: roleTemplate?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.uid}`,
         extension: roleTemplate?.extension,
         email: user.email || undefined,
         status: 'active',
         currentPresence: roleTemplate?.currentPresence || AgentStatus.AVAILABLE,
-        canAccessRecordings: roleTemplate?.canAccessRecordings ?? (storedRole === Role.ADMIN)
+        canAccessRecordings: roleTemplate?.canAccessRecordings ?? (effectiveRole === Role.ADMIN)
       };
+      if (effectiveRole !== storedRole) {
+        localStorage.setItem(`connectai_role_${user.uid}`, effectiveRole);
+      }
       const token = await user.getIdToken();
       localStorage.setItem('connectai_auth_token', token);
       setCurrentUser(profile);
@@ -319,7 +347,7 @@ const App: React.FC = () => {
         if (hasHydratedSettings) saveSettingsSafely(next).catch(() => {});
         return next;
       });
-      setView(storedRole === Role.SUPERVISOR ? 'supervisor' : storedRole === Role.ADMIN ? 'admin' : 'agent');
+      setView(effectiveRole === Role.SUPERVISOR ? 'supervisor' : effectiveRole === Role.ADMIN ? 'admin' : 'agent');
       setAgentStatus(profile.currentPresence || AgentStatus.AVAILABLE);
       if (isFirebaseConfigured) await dbService.saveUser(profile);
     } catch (error) {
@@ -436,6 +464,41 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!currentUser || isFirebaseConfigured) return;
     let cancelled = false;
+    const syncCallFeed = async () => {
+      if (Date.now() < callFeedPollCooldownRef.current) return;
+      try {
+        const calls = await fetchCallLogs({ limit: 300 });
+        if (cancelled) return;
+        setCallHistory((prev) => {
+          const map = new Map<string, Call>();
+          for (const item of prev) map.set(item.id, item);
+          for (const item of calls) {
+            const existing = map.get(item.id);
+            map.set(item.id, existing ? { ...existing, ...item } : item);
+          }
+          if (activeCall && !map.has(activeCall.id)) {
+            map.set(activeCall.id, activeCall);
+          }
+          return Array.from(map.values()).sort((a, b) => (b.startTime || 0) - (a.startTime || 0));
+        });
+      } catch (err: any) {
+        const msg = String(err?.message || '').toLowerCase();
+        if (msg.includes('429') || msg.includes('too many requests')) {
+          callFeedPollCooldownRef.current = Date.now() + 45000;
+        }
+      }
+    };
+    syncCallFeed();
+    const interval = setInterval(syncCallFeed, 8000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [currentUser, isFirebaseConfigured, activeCall?.id, activeCall?.status]);
+
+  useEffect(() => {
+    if (!currentUser || isFirebaseConfigured) return;
+    let cancelled = false;
     const pullInternalSignals = async () => {
       if (activeCall && activeCall.status !== CallStatus.ENDED) return;
       if (Date.now() < internalPollCooldownRef.current) return;
@@ -502,6 +565,7 @@ const App: React.FC = () => {
   }, [appSettings.team, currentUser]);
 
   const saveSettingsSafely = useCallback(async (next: AppSettings) => {
+    if (Date.now() < settingsSaveCooldownRef.current) return;
     try {
       const latest = await fetchSettingsApi();
       const base = buildMergedSettings(latest);
@@ -511,8 +575,13 @@ const App: React.FC = () => {
         team: dedupeTeamMembers(mergeTeamWithDirectory(base.team || [], next.team || [])),
       };
       await saveSettingsApi(mergedPayload);
-    } catch {
-      await saveSettingsApi(next);
+    } catch (err: any) {
+      const msg = String(err?.message || '').toLowerCase();
+      if (msg.includes('429') || msg.includes('too many requests')) {
+        settingsSaveCooldownRef.current = Date.now() + 30000;
+      }
+      // Guardrail: skip fallback write when sync is degraded to avoid clobbering shared team state.
+      console.warn('saveSettingsSafely skipped remote write:', err?.message || err);
     }
   }, []);
 
@@ -637,13 +706,29 @@ const App: React.FC = () => {
     addNotification('success', `Admitted ${user.name} to neural session.`);
   };
 
-  const handleTransfer = (targetId: string) => {
+  const handleTransfer = async (targetId: string) => {
     const target = appSettings.team.find(u => u.id === targetId);
     if (!target || !activeCall) return;
-    addNotification('info', `Dispatching Transfer Handshake to ${target.name}...`);
-    const transferredCall = { ...activeCall, targetAgentId: targetId, agentId: targetId };
-    updateCall(transferredCall);
-    handleHangup();
+    if (currentUser?.id === targetId) {
+      addNotification('info', 'Transfer skipped: target is current agent.');
+      return;
+    }
+    addNotification('info', `Dispatching transfer to ${target.name}...`);
+    const transferredCall: Call = {
+      ...activeCall,
+      status: CallStatus.DIALING,
+      targetAgentId: targetId,
+      agentId: target.id,
+      agentName: target.name,
+      agentEmail: target.email,
+      agentExtension: target.extension,
+      participants: Array.from(new Set([...(activeCall.participants || []), target.id])),
+    };
+    await updateCall(transferredCall);
+    setIncomingCallBanner(null);
+    setActiveCall(null);
+    setAgentStatus(AgentStatus.WRAP_UP);
+    addNotification('success', `Call transferred to ${target.name}.`);
   };
 
   const startExternalCall = async (target: Lead | string) => {
@@ -782,21 +867,24 @@ const App: React.FC = () => {
       await dbService.saveCall(endedCall);
     }
     if (!isFirebaseConfigured) {
-      const pollTranscript = async (callId: string, attempts = 8) => {
+      const pollEnrichment = async (callId: string, attempts = 12) => {
         if (!mountedRef.current || attempts <= 0) return;
         try {
           const latest = await fetchCallById(callId);
-          if (latest?.transcript?.length) {
+          if (latest) {
             if (!mountedRef.current) return;
             setCallHistory(prev => prev.map(c => c.id === callId ? { ...c, ...latest } : c));
-            return;
+            const hasTranscript = Boolean(latest?.transcript?.length);
+            const hasSummary = Boolean(latest?.analysis?.summary);
+            const hasRecording = Boolean(latest?.recordingUrl);
+            if (hasTranscript || hasSummary || hasRecording) return;
           }
         } catch {
           // ignore
         }
-        setTimeout(() => pollTranscript(callId, attempts - 1), 5000);
+        setTimeout(() => pollEnrichment(callId, attempts - 1), 5000);
       };
-      pollTranscript(endedCall.id);
+      pollEnrichment(endedCall.id);
     }
   };
 
@@ -866,23 +954,29 @@ const App: React.FC = () => {
   };
 
   const handleLogin = async (role: Role, profile?: { uid: string; email?: string | null; displayName?: string | null }) => {
-    const base = appSettings.team.find(u => u.role === role);
-    const fallbackId = base?.id || `u_${role.toLowerCase()}`;
+    const normalizedEmail = normalizeEmail(profile?.email || '');
+    const knownMember = normalizedEmail ? appSettings.team.find((m) => normalizeEmail(m.email) === normalizedEmail) : null;
+    const effectiveRole = knownMember?.role || role;
+    if (knownMember && knownMember.role !== role) {
+      addNotification('info', `Role adjusted to ${knownMember.role} for this account.`);
+    }
+    const base = appSettings.team.find(u => u.role === effectiveRole);
+    const fallbackId = base?.id || `u_${effectiveRole.toLowerCase()}`;
     const userId = profile?.uid || fallbackId;
-    const displayName = profile?.displayName || profile?.email || base?.name || `${role.charAt(0) + role.slice(1).toLowerCase()} User`;
+    const displayName = profile?.displayName || profile?.email || base?.name || `${effectiveRole.charAt(0) + effectiveRole.slice(1).toLowerCase()} User`;
     const user: User = {
       id: userId,
       name: displayName,
-      role,
+      role: effectiveRole,
       avatarUrl: base?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(userId)}`,
       extension: base?.extension,
       email: profile?.email || base?.email,
       status: 'active',
       currentPresence: base?.currentPresence || AgentStatus.AVAILABLE,
-      canAccessRecordings: base?.canAccessRecordings ?? (role === Role.ADMIN)
+      canAccessRecordings: base?.canAccessRecordings ?? (effectiveRole === Role.ADMIN)
     };
     if (profile?.uid) {
-      localStorage.setItem(`connectai_role_${profile.uid}`, role);
+      localStorage.setItem(`connectai_role_${profile.uid}`, effectiveRole);
     }
     setCurrentUser(user);
     setAppSettings(prev => {
@@ -894,7 +988,7 @@ const App: React.FC = () => {
       return next;
     });
     setAuthNotice(null);
-    setView(role === Role.SUPERVISOR ? 'supervisor' : role === Role.ADMIN ? 'admin' : 'agent');
+    setView(effectiveRole === Role.SUPERVISOR ? 'supervisor' : effectiveRole === Role.ADMIN ? 'admin' : 'agent');
     setAgentStatus(user.currentPresence || AgentStatus.AVAILABLE);
     if (isFirebaseConfigured) await dbService.saveUser(user);
   };
@@ -1066,7 +1160,7 @@ const App: React.FC = () => {
               {view === 'logs' && <div className="h-full"><CallLogView currentUser={currentUser} /></div>}
               {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} onSyncTeamNow={syncTeamNow} />}
               {showSoftphone && (
-                <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} agentName={currentUser?.name} agentEmail={currentUser?.email} enableServerLogs onCallEnded={handleSoftphoneCallEnded} />
+                <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} departments={appSettings.ivr.departments || []} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} agentName={currentUser?.name} agentEmail={currentUser?.email} enableServerLogs onCallEnded={handleSoftphoneCallEnded} />
               )}
             </>
           )}

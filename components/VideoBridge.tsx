@@ -20,26 +20,35 @@ import * as dbService from '../services/dbService';
 const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean, effect?: 'none' | 'blur' | 'virtual', isLocal?: boolean, label?: string, isMuted?: boolean }> = ({ stream, mirrored, effect, isLocal, label, isMuted }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [status, setStatus] = useState<'standby' | 'admitted' | 'error'>('standby');
+  const [needsAudioTap, setNeedsAudioTap] = useState(false);
 
   useLayoutEffect(() => {
     let active = true;
     if (!videoRef.current || !stream) {
       setStatus('standby');
+      setNeedsAudioTap(false);
       return;
     }
 
     const bind = async () => {
       try {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          if (isLocal) {
-              videoRef.current.muted = true;
-          }
+        const videoEl = videoRef.current;
+        if (videoEl) {
+          videoEl.srcObject = stream;
+          videoEl.muted = Boolean(isLocal);
+          setNeedsAudioTap(false);
           try {
-            await videoRef.current.play();
+            await videoEl.play();
           } catch {
-            videoRef.current.muted = true;
-            await videoRef.current.play();
+            if (!isLocal) {
+              // Browsers can block autoplay-with-audio. Keep rendering, then request user tap to unmute.
+              videoEl.muted = true;
+              await videoEl.play();
+              if (active) setNeedsAudioTap(true);
+            } else {
+              videoEl.muted = true;
+              await videoEl.play();
+            }
           }
           if (active) setStatus('admitted');
         }
@@ -53,6 +62,19 @@ const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean
     return () => { active = false; };
   }, [stream, isLocal]);
 
+  const handleEnableAudio = async () => {
+    const videoEl = videoRef.current;
+    if (!videoEl) return;
+    try {
+      videoEl.muted = false;
+      await videoEl.play();
+      setNeedsAudioTap(false);
+    } catch (err) {
+      console.warn('Unable to enable remote audio:', err);
+      setNeedsAudioTap(true);
+    }
+  };
+
   return (
     <div className="relative w-full h-full overflow-hidden bg-[#111] flex items-center justify-center group">
       {status !== 'admitted' && (
@@ -60,6 +82,14 @@ const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean
            <div className="w-16 h-16 rounded-full bg-slate-800 animate-pulse mb-4"></div>
            <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">Connecting...</p>
         </div>
+      )}
+      {needsAudioTap && !isLocal && status === 'admitted' && (
+        <button
+          onClick={handleEnableAudio}
+          className="absolute top-4 left-4 z-30 rounded-full border border-white/20 bg-black/70 px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-white hover:bg-black/80"
+        >
+          Tap To Enable Audio
+        </button>
       )}
       <video 
         ref={videoRef} 
@@ -135,6 +165,8 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [activeVideoStream, setActiveVideoStream] = useState<MediaStream | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteAudioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const [needsRemoteAudioUnlock, setNeedsRemoteAudioUnlock] = useState(false);
   
   // PeerJS
   const peerRef = useRef<Peer | null>(null);
@@ -185,6 +217,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
           stream.getTracks().forEach((track) => track.stop());
           return;
         }
+        stream.getAudioTracks().forEach((track) => {
+          track.enabled = !isMuted;
+        });
         setLocalStream(stream);
       })
       .catch((err) => {
@@ -193,11 +228,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [activeCall.id, isVideoEnabled, localStream]);
+  }, [activeCall.id, isVideoEnabled, localStream, isMuted]);
 
   const registerConnection = useCallback((call: MediaConnection, remoteUserId: string) => {
     connectionsRef.current.set(remoteUserId, call);
     call.on('stream', (remoteStream) => {
+      remoteStream.getAudioTracks().forEach((track) => {
+        track.enabled = true;
+      });
       setRemoteStreams(prev => new Map(prev).set(remoteUserId, remoteStream));
     });
     call.on('close', () => {
@@ -236,6 +274,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         const stream = existing ?? await navigator.mediaDevices.getUserMedia(
           isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
         );
+        stream.getAudioTracks().forEach((track) => {
+          track.enabled = !isMuted;
+        });
         if (!existing) setLocalStream(stream);
         call.answer(stream);
         registerConnection(call, call.peer.replace('connectai-user-', ''));
@@ -251,7 +292,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       connectionsRef.current.clear();
       peer.destroy();
     };
-  }, [currentUser.id, registerConnection, isVideoEnabled]);
+  }, [currentUser.id, registerConnection, isVideoEnabled, isMuted]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -463,11 +504,74 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     const stream = localStream ?? await navigator.mediaDevices.getUserMedia(
       isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
     );
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = !isMuted;
+    });
     if (!localStream) setLocalStream(stream);
     const targetPeerId = `connectai-user-${targetUserId}`;
     const call = peerRef.current.call(targetPeerId, stream);
     registerConnection(call, targetUserId);
-  }, [localStream, registerConnection, isVideoEnabled]);
+  }, [localStream, registerConnection, isVideoEnabled, isMuted]);
+
+  const bindRemoteAudioEl = useCallback((userId: string, element: HTMLAudioElement | null) => {
+    if (!element) {
+      remoteAudioRefs.current.delete(userId);
+      return;
+    }
+    remoteAudioRefs.current.set(userId, element);
+    const stream = remoteStreams.get(userId);
+    if (!stream) return;
+    if (element.srcObject !== stream) {
+      element.srcObject = stream;
+    }
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = true;
+    });
+    element.muted = false;
+    element.volume = 1;
+    element.play().catch(() => {
+      setNeedsRemoteAudioUnlock(true);
+    });
+  }, [remoteStreams]);
+
+  useEffect(() => {
+    const attachAndPlay = async () => {
+      let blocked = false;
+      for (const [userId, stream] of remoteStreams.entries()) {
+        const audioEl = remoteAudioRefs.current.get(userId);
+        if (!audioEl) continue;
+        if (audioEl.srcObject !== stream) {
+          audioEl.srcObject = stream;
+        }
+        stream.getAudioTracks().forEach((track) => {
+          track.enabled = true;
+        });
+        audioEl.muted = false;
+        audioEl.volume = 1;
+        try {
+          await audioEl.play();
+        } catch {
+          blocked = true;
+        }
+      }
+      setNeedsRemoteAudioUnlock(blocked);
+    };
+    attachAndPlay();
+  }, [remoteStreams]);
+
+  const unlockRemoteAudio = useCallback(async () => {
+    let blocked = false;
+    for (const audioEl of remoteAudioRefs.current.values()) {
+      try {
+        audioEl.muted = false;
+        audioEl.volume = 1;
+        await audioEl.play();
+      } catch {
+        blocked = true;
+      }
+    }
+    setNeedsRemoteAudioUnlock(blocked);
+  }, []);
 
   const handleTerminate = () => {
     stopScreenShare();
@@ -490,6 +594,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const participants = useMemo(() => 
     roster.filter(t => activeCall.participants?.includes(t.id) || t.id === currentUser.id),
   [roster, activeCall.participants, currentUser.id]);
+  const isMeetingSession = Boolean(activeCall.roomId || (activeCall.direction === 'internal' && activeCall.isVideo));
 
   useEffect(() => {
     if (!peerId) return;
@@ -519,6 +624,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
           <h2 className="text-sm font-semibold text-gray-100">{activeCall.customerName || 'Ad-Hoc Meeting'}</h2>
           <span className="text-xs text-gray-500 px-2">|</span>
           <span className="text-xs text-gray-400 tabular-nums">{formatTime(duration)}</span>
+          {needsRemoteAudioUnlock && (
+            <button onClick={unlockRemoteAudio} className="ml-3 px-3 py-1.5 rounded-md border border-amber-500/50 bg-amber-500/10 text-[10px] font-black uppercase tracking-wider text-amber-300 hover:bg-amber-500/20">
+              Enable Audio
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -715,8 +825,18 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
             <Hand size={20}/>
          </button>
          <div className="w-[1px] h-6 bg-white/10 mx-2"></div>
-         <button onClick={handleTerminate} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-all active:scale-95">Leave</button>
+         <button onClick={handleTerminate} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-all active:scale-95">{isMeetingSession ? 'End Meeting' : 'Leave'}</button>
       </div>
+
+      {Array.from(remoteStreams.entries()).map(([userId, stream]) => (
+        <audio
+          key={`remote-audio-${userId}-${stream.id}`}
+          ref={(el) => bindRemoteAudioEl(userId, el)}
+          autoPlay
+          playsInline
+          className="hidden"
+        />
+      ))}
 
       {/* Settings Modal */}
       {showSettings && (

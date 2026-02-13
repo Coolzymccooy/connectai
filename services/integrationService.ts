@@ -16,6 +16,14 @@ export const startMicrosoftOAuth = async () => {
   return await apiGet('/oauth/microsoft/start');
 };
 
+export const startHubSpotOAuth = async () => {
+  return await apiGet('/oauth/hubspot/start');
+};
+
+export const getHubSpotStatus = async () => {
+  return await apiGet('/crm/hubspot/status');
+};
+
 export const connectCrmProvider = async (provider: 'hubspot' | 'salesforce' | 'pipedrive', credentials: Record<string, any>) => {
   return await apiPost(`/crm/${provider}/connect`, credentials);
 };

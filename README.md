@@ -114,8 +114,58 @@ Remove `identity=` for production routing across multiple agents.
 - `CLIENT_URL` (CORS allowlist)
 - `SENDGRID_API_KEY` (enables invite email delivery)
 - `SENDGRID_FROM_EMAIL` (sender address for invite emails)
+- `TWILIO_HOLD_MUSIC_URL` (music played while callers wait)
+- `TWILIO_WAIT_SECONDS` (wait-loop pause per cycle, default `15`)
+- `TWILIO_MAX_WAIT_CYCLES` (max retry cycles before graceful hangup, default `2`)
+- `HUBSPOT_CLIENT_ID` (for real HubSpot OAuth)
+- `HUBSPOT_CLIENT_SECRET` (for real HubSpot OAuth)
+- `HUBSPOT_OAUTH_REDIRECT_URI` (must match HubSpot app redirect URI, e.g. `http://localhost:3090/api/oauth/hubspot/callback`)
 
 If `SENDGRID_API_KEY` and `SENDGRID_FROM_EMAIL` are not set, invites are still created but no email is sent.
+
+## Twilio Auth Token: Where to get it
+1. Open Twilio Console: `https://console.twilio.com/`
+2. Go to `Account` -> `API keys & tokens`
+3. Copy the account `Auth Token` and set:
+   - `TWILIO_AUTH_TOKEN=<your_auth_token>`
+
+Use the **Auth Token** for webhook verification + monitor APIs.  
+Do not use your API Secret as `TWILIO_AUTH_TOKEN` (they are different values).
+
+## Verify Monitor Capability
+While logged in as **Admin** or **Supervisor**, call:
+`GET /api/twilio/capabilities`
+
+Expected healthy result:
+- `configured: true`
+- `monitoringEnabled: true`
+- `canMonitor: true`
+
+If any is `false`, check missing envs returned in `missing[]`.
+
+You can check this in 3 ways:
+1. **Admin UI:** `Admin Settings` -> `Integrations` -> `Twilio Health` panel (uses the same endpoint).
+2. **Browser (dev mode):** open `http://localhost:3090/api/twilio/capabilities`.
+3. **Postman:** include `Authorization: Bearer <token>` and `X-Tenant-Id` in strict auth mode.
+
+## HubSpot OAuth + Live Sync
+1. Set backend env vars:
+   - `HUBSPOT_CLIENT_ID`
+   - `HUBSPOT_CLIENT_SECRET`
+   - `HUBSPOT_OAUTH_REDIRECT_URI`
+2. In HubSpot developer app, add the exact same redirect URI.
+3. In Admin UI:
+   - `Admin Settings` -> `Integrations` -> `Connect hubspot`
+   - Complete OAuth in popup.
+   - Click `Sync HubSpot Now`.
+4. API endpoints used:
+   - `GET /api/oauth/hubspot/start`
+   - `GET /api/oauth/hubspot/callback`
+   - `GET /api/crm/hubspot/status`
+   - `POST /api/crm/hubspot/sync`
+5. Synced data:
+   - Contacts -> `/api/crm/contacts` (`platform: HubSpot`)
+   - Deals -> `/api/crm/deals`
 
 ## Frontend Environment Variables (Vercel / Local)
 Set these in Vercel or `.env.local`:
