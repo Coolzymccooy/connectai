@@ -20,6 +20,7 @@ import { fetchCalendarEvents, createCalendarEvent, updateCalendarEvent } from '.
 import { fetchCampaigns, createCampaign, updateCampaign } from './services/campaignService';
 import { fetchCallById, fetchCallLogs, updateCall as updateCallLog } from './services/callLogService';
 import { fetchSettingsApi, saveSettingsApi } from './services/settingsService';
+import { fetchInvites } from './services/authPolicyService';
 import { sanitizeCallForStorage } from './utils/gdpr';
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -91,6 +92,7 @@ const mergeTeamWithDirectory = (team: User[], members: User[]): User[] => {
 
 const buildMergedSettings = (saved: Partial<AppSettings> | null | undefined): AppSettings => {
   const source = saved || {};
+  const sourceTeam = Array.isArray((source as any).team) ? (source as any).team : [];
   const merged = {
     ...DEFAULT_SETTINGS,
     ...source,
@@ -99,7 +101,25 @@ const buildMergedSettings = (saved: Partial<AppSettings> | null | undefined): Ap
   };
   return {
     ...merged,
-    team: dedupeTeamMembers(Array.isArray((merged as any).team) ? (merged as any).team : []),
+    team: dedupeTeamMembers(mergeTeamWithDirectory(DEFAULT_SETTINGS.team, sourceTeam)),
+  };
+};
+
+const buildInvitePlaceholder = (invite: any): User => {
+  const email = normalizeEmail(invite?.email);
+  const localPart = (email.split('@')[0] || 'team-member').replace(/[^a-z0-9]/gi, '-');
+  const role = (invite?.role as Role) || Role.AGENT;
+  const defaultByRole = DEFAULT_SETTINGS.team.find((t) => t.role === role);
+  return {
+    id: `invite_${localPart}`,
+    name: localPart.replace(/[-_]+/g, ' ').replace(/\b\w/g, (m) => m.toUpperCase()),
+    role,
+    avatarUrl: defaultByRole?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(localPart)}`,
+    extension: defaultByRole?.extension,
+    email,
+    status: 'active',
+    currentPresence: AgentStatus.OFFLINE,
+    canAccessRecordings: role === Role.ADMIN,
   };
 };
 
@@ -166,6 +186,7 @@ const App: React.FC = () => {
   const [authBootstrapping, setAuthBootstrapping] = useState(true);
   const [hasHydratedSettings, setHasHydratedSettings] = useState(false);
   const [incomingCallBanner, setIncomingCallBanner] = useState<Call | null>(null);
+  const [lastTeamSyncAt, setLastTeamSyncAt] = useState(0);
   
   const mountedRef = useRef(true);
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -401,9 +422,14 @@ const App: React.FC = () => {
       }
     };
     sync();
-    const interval = setInterval(sync, 10000);
+    const interval = setInterval(sync, 60000);
     return () => clearInterval(interval);
   }, [currentUser, isFirebaseConfigured]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    selfHealTeam({ silent: true }).catch(() => {});
+  }, [currentUser?.id]);
 
   useEffect(() => {
     if (!currentUser || isFirebaseConfigured) return;
@@ -429,7 +455,7 @@ const App: React.FC = () => {
       }
     };
     pullInternalSignals();
-    const interval = setInterval(pullInternalSignals, 1800);
+    const interval = setInterval(pullInternalSignals, 5000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -441,6 +467,32 @@ const App: React.FC = () => {
     setNotifications(prev => [{ id, type, message }, ...prev]);
     if (!showNotificationPanel) setUnreadCount(prev => prev + 1);
   };
+
+  const selfHealTeam = useCallback(async (options?: { silent?: boolean }) => {
+    const silent = Boolean(options?.silent);
+    const seedTeam = dedupeTeamMembers([...(appSettings.team || []), ...DEFAULT_SETTINGS.team, ...(currentUser ? [currentUser] : [])]);
+    let recovered = seedTeam;
+    try {
+      const saved = await fetchSettingsApi();
+      const merged = buildMergedSettings(saved);
+      recovered = dedupeTeamMembers(mergeTeamWithDirectory(seedTeam, merged.team || []));
+    } catch {
+      // keep seedTeam
+    }
+    try {
+      if (currentUser?.role === Role.ADMIN) {
+        const invites = await fetchInvites();
+        const accepted = (invites || []).filter((inv: any) => inv.status === 'accepted' && inv.email);
+        const placeholders = accepted.map(buildInvitePlaceholder);
+        recovered = dedupeTeamMembers(mergeTeamWithDirectory(recovered, placeholders));
+      }
+    } catch {
+      // invite lookup optional
+    }
+    setAppSettings((prev) => ({ ...prev, team: dedupeTeamMembers(mergeTeamWithDirectory(recovered, prev.team || [])) }));
+    if (!silent) addNotification('success', `Team rehydrated (${recovered.length} members).`);
+    return recovered;
+  }, [appSettings.team, currentUser]);
 
   const saveSettingsSafely = useCallback(async (next: AppSettings) => {
     try {
@@ -458,6 +510,12 @@ const App: React.FC = () => {
   }, []);
 
   const syncTeamNow = useCallback(async () => {
+    const now = Date.now();
+    if (now - lastTeamSyncAt < 15000) {
+      await selfHealTeam({ silent: false }).catch(() => {});
+      return;
+    }
+    setLastTeamSyncAt(now);
     try {
       const saved = await fetchSettingsApi();
       const merged = buildMergedSettings(saved);
@@ -466,10 +524,17 @@ const App: React.FC = () => {
         team: dedupeTeamMembers(mergeTeamWithDirectory(merged.team || [], prev.team || [])),
       }));
       addNotification('success', 'Team sync complete.');
-    } catch {
-      addNotification('error', 'Team sync failed.');
+    } catch (err: any) {
+      const msg = String(err?.message || '').trim();
+      if (msg.toLowerCase().includes('too many requests') || msg.includes('429')) {
+        await selfHealTeam({ silent: false }).catch(() => {});
+        addNotification('info', 'Sync rate-limited, applied local team self-heal.');
+        return;
+      }
+      await selfHealTeam({ silent: false }).catch(() => {});
+      addNotification('error', `Team sync failed${msg ? `: ${msg}` : '.'}`);
     }
-  }, []);
+  }, [lastTeamSyncAt, selfHealTeam]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -847,7 +912,7 @@ const App: React.FC = () => {
         // ignore polling errors
       }
     };
-    const interval = setInterval(syncActiveCall, 1200);
+    const interval = setInterval(syncActiveCall, 2500);
     return () => {
       cancelled = true;
       clearInterval(interval);
