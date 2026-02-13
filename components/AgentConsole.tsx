@@ -10,7 +10,7 @@ import {
 } from 'lucide-react';
 import { Call, CallStatus, TranscriptSegment, AppSettings, Notification, Lead, User, AiSuggestion, AgentStatus, Message, CallAnalysis, CrmContact, Campaign, Conversation, Meeting, ToolAction, Attachment, Role } from '../types';
 import { generateLeadBriefing, generateAiDraft, analyzeCallTranscript, extractToolActions, generateCampaignDraft, enrichLead, generateHelpAnswer } from '../services/geminiService';
-import { upsertCrmContact } from '../services/crmService';
+import { upsertCrmContact, fetchCrmContacts, fetchCrmDeals, createCrmTask } from '../services/crmService';
 import { updateCall as updateCallLog } from '../services/callLogService';
 import * as dbService from '../services/dbService';
 import { buildInternalConversationId } from '../utils/chat';
@@ -109,7 +109,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [activeTab, setActiveTab] = useState<'voice' | 'omnichannel' | 'campaigns' | 'outbound' | 'team' | 'calendar' | 'leads' | 'help'>('voice');
+  const [activeTab, setActiveTab] = useState<'voice' | 'omnichannel' | 'campaigns' | 'outbound' | 'team' | 'calendar' | 'leads' | 'crm' | 'help'>('voice');
   
   // AI Helper & Analysis State
   const [aiSuggestions, setAiSuggestions] = useState<AiSuggestion[]>([]);
@@ -202,6 +202,10 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     });
   }, [settings.team]);
   const [isCampaignDrafting, setIsCampaignDrafting] = useState(false);
+  const [crmContacts, setCrmContacts] = useState<CrmContact[]>([]);
+  const [crmDeals, setCrmDeals] = useState<any[]>([]);
+  const [crmSearch, setCrmSearch] = useState('');
+  const [crmLoading, setCrmLoading] = useState(false);
   const [teamSearch, setTeamSearch] = useState('');
   const [teamViewMode, setTeamViewMode] = useState<'cards' | 'list'>('cards');
   const filteredTeamDirectory = useMemo(() => {
@@ -233,6 +237,47 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
   const activeConversation = conversations.find(c => c.id === selectedConvId);
   const activeMessages = selectedConvId ? (messageMap[selectedConvId] || activeConversation?.messages || []) : (activeConversation?.messages || []);
+  const normalizePhone = (value?: string) => (value || '').replace(/\D/g, '');
+
+  const refreshCrmData = async () => {
+    setCrmLoading(true);
+    try {
+      const [contacts, deals] = await Promise.all([fetchCrmContacts(), fetchCrmDeals()]);
+      setCrmContacts(contacts || []);
+      setCrmDeals(deals || []);
+    } finally {
+      setCrmLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab !== 'crm') return;
+    refreshCrmData().catch(() => {});
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (!activeCall) return;
+    refreshCrmData().catch(() => {});
+  }, [activeCall?.id]);
+
+  const matchedCrmContact = useMemo(() => {
+    if (!activeCall) return null;
+    const candidate = normalizePhone(activeCall.phoneNumber || activeCall.customerExtension || '');
+    if (!candidate) return null;
+    return crmContacts.find((c) => normalizePhone(c.phone).endsWith(candidate) || candidate.endsWith(normalizePhone(c.phone))) || null;
+  }, [activeCall?.id, activeCall?.phoneNumber, activeCall?.customerExtension, crmContacts]);
+
+  const relatedDealsForMatched = useMemo(() => {
+    if (!matchedCrmContact) return [];
+    const email = (matchedCrmContact.email || '').toLowerCase();
+    const company = (matchedCrmContact.company || '').toLowerCase();
+    return crmDeals.filter((deal) => {
+      const raw = deal?.raw || {};
+      const props = raw?.properties || {};
+      const haystack = JSON.stringify(props).toLowerCase();
+      return (email && haystack.includes(email)) || (company && haystack.includes(company));
+    }).slice(0, 5);
+  }, [matchedCrmContact, crmDeals]);
 
   useEffect(() => {
     if (leads.length === 0) return;
@@ -916,6 +961,16 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       crmData: { platform: 'HubSpot', status: 'synced', syncedAt: Date.now() },
     };
     await persistWrapUpCall(updated);
+    await createCrmTask({
+      id: `task_${Date.now()}`,
+      subject: `Follow-up: ${lastEndedCall.customerName}`,
+      status: 'open',
+      dueDate: Date.now() + 24 * 60 * 60 * 1000,
+      summary: wrapUpAnalysis?.summary || '',
+      callId: lastEndedCall.id,
+      platform: 'HubSpot',
+    });
+    refreshCrmData().catch(() => {});
     setWrapUpActions(prev => ({ ...prev, crmSynced: true }));
     addNotification('success', 'CRM sync queued and confirmed.');
   };
@@ -992,6 +1047,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
           { id: 'campaigns', label: 'CAMPAIGNS' },
           { id: 'outbound', label: 'DIALER' },
           { id: 'leads', label: 'LEADS' },
+          { id: 'crm', label: 'CRM' },
           { id: 'help', label: 'HELP' }
         ].map(tab => (
           <button key={tab.id} onClick={() => setActiveTab(tab.id as any)} className={`pb-3 md:pb-4 px-3 whitespace-nowrap text-[10px] font-black uppercase tracking-[0.2em] transition-all border-b-2 rounded-t-lg ${activeTab === tab.id ? 'border-cyan-500 text-cyan-700 bg-cyan-50/70' : 'border-transparent text-slate-500 hover:text-slate-700 hover:bg-slate-100/70'}`}>
@@ -1042,6 +1098,25 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
                   {/* AI Helper Sidebar */}
                     <div className="col-span-12 lg:col-span-4 space-y-6 md:space-y-8 flex flex-col overflow-hidden">
+                       <div className="bg-white rounded-[2rem] border border-slate-200 shadow-sm p-5">
+                         <div className="flex items-center justify-between">
+                           <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-500">CRM Context</h4>
+                           <span className="text-[9px] px-2 py-1 rounded-md bg-slate-100 text-slate-600 font-black uppercase">HubSpot</span>
+                         </div>
+                         {matchedCrmContact ? (
+                           <div className="mt-3 space-y-2">
+                             <p className="text-sm font-black text-slate-800 uppercase">{matchedCrmContact.name}</p>
+                             <p className="text-[10px] text-slate-500 font-bold">{matchedCrmContact.phone} • {matchedCrmContact.email || 'no-email'}</p>
+                             <p className="text-[10px] text-slate-500 font-bold">Company: {matchedCrmContact.company || 'Unknown'}</p>
+                             <p className="text-[10px] text-slate-500 font-bold">Related deals: {relatedDealsForMatched.length}</p>
+                             <button onClick={() => window.open('https://app.hubspot.com/contacts', '_blank', 'noopener,noreferrer')} className="mt-2 px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase tracking-widest inline-flex items-center gap-2">
+                               <ExternalLink size={12} /> Open in CRM
+                             </button>
+                           </div>
+                         ) : (
+                           <p className="mt-3 text-[10px] font-bold uppercase tracking-widest text-slate-400">No contact match for this call yet.</p>
+                         )}
+                       </div>
                        <div className="flex-1 bg-slate-100 rounded-[3.5rem] border border-slate-200 shadow-inner p-6 md:p-10 flex flex-col overflow-hidden">
                         <h4 className="text-[10px] font-black uppercase tracking-[0.4em] text-slate-500 mb-8 flex items-center gap-2"><BrainCircuit size={14} className="text-brand-500"/> AI Helper</h4>
                         <div className="flex-1 space-y-6 overflow-y-auto scrollbar-hide pr-2">

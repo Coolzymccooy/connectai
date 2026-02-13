@@ -87,7 +87,11 @@ const upsertTeamMember = (team: User[], member: User): User[] => {
   });
   if (idx >= 0) {
     const next = [...team];
-    next[idx] = { ...next[idx], ...normalizedMember };
+    const mergedMember: User = { ...next[idx], ...normalizedMember };
+    if (normalizedMember.canAccessRecordings === undefined) mergedMember.canAccessRecordings = next[idx].canAccessRecordings;
+    if (normalizedMember.restrictOutboundNumbers === undefined) mergedMember.restrictOutboundNumbers = next[idx].restrictOutboundNumbers;
+    if (normalizedMember.allowedNumbers === undefined) mergedMember.allowedNumbers = next[idx].allowedNumbers;
+    next[idx] = mergedMember;
     return next;
   }
   return [...team, normalizedMember];
@@ -137,7 +141,7 @@ const buildInvitePlaceholder = (invite: any): User => {
     email,
     status: 'active',
     currentPresence: AgentStatus.OFFLINE,
-    canAccessRecordings: role === Role.ADMIN,
+    ...(role === Role.ADMIN ? { canAccessRecordings: true } : {}),
   };
 };
 
@@ -324,7 +328,7 @@ const App: React.FC = () => {
         ? appSettings.team.find((m) => normalizeEmail(m.email) === normalizedEmail)
         : null;
       const effectiveRole = knownMember?.role || storedRole;
-      const roleTemplate = DEFAULT_SETTINGS.team.find(u => u.role === effectiveRole);
+      const roleTemplate = knownMember || appSettings.team.find(u => u.role === effectiveRole) || DEFAULT_SETTINGS.team.find(u => u.role === effectiveRole);
       const profile: User = {
         id: user.uid,
         name: user.displayName || user.email || roleTemplate?.name || 'User',
@@ -626,6 +630,38 @@ const App: React.FC = () => {
       dbService.saveUser(updated).catch(() => {});
     }
   }, [agentStatus, currentUser, isFirebaseConfigured]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    const normalizedEmail = normalizeEmail(currentUser.email || '');
+    if (!normalizedEmail) return;
+    const member = appSettings.team.find((m) => normalizeEmail(m.email) === normalizedEmail);
+    if (!member) return;
+    if (member.role !== currentUser.role || member.canAccessRecordings !== currentUser.canAccessRecordings) {
+      const corrected: User = {
+        ...currentUser,
+        role: member.role,
+        extension: member.extension || currentUser.extension,
+        canAccessRecordings: member.canAccessRecordings ?? currentUser.canAccessRecordings,
+      };
+      setCurrentUser(corrected);
+      if (member.role !== currentUser.role) {
+        setView(member.role === Role.SUPERVISOR ? 'supervisor' : member.role === Role.ADMIN ? 'admin' : 'agent');
+        localStorage.setItem(`connectai_role_${currentUser.id}`, member.role);
+        addNotification('info', `Session aligned to ${member.role} role from team policy.`);
+      }
+    }
+  }, [currentUser?.id, currentUser?.role, currentUser?.email, appSettings.team]);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (currentUser.role === Role.AGENT && (view === 'admin' || view === 'supervisor')) {
+      setView('agent');
+    }
+    if (currentUser.role === Role.SUPERVISOR && view === 'admin') {
+      setView('supervisor');
+    }
+  }, [currentUser?.role, view]);
 
   const toggleMedia = async (type: 'video' | 'screen') => {
     if (!activeCall) return;
@@ -960,7 +996,7 @@ const App: React.FC = () => {
     if (knownMember && knownMember.role !== role) {
       addNotification('info', `Role adjusted to ${knownMember.role} for this account.`);
     }
-    const base = appSettings.team.find(u => u.role === effectiveRole);
+    const base = knownMember || appSettings.team.find(u => u.role === effectiveRole);
     const fallbackId = base?.id || `u_${effectiveRole.toLowerCase()}`;
     const userId = profile?.uid || fallbackId;
     const displayName = profile?.displayName || profile?.email || base?.name || `${effectiveRole.charAt(0) + effectiveRole.slice(1).toLowerCase()} User`;

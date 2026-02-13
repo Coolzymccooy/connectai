@@ -25,6 +25,14 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
   team = [],
   addNotification,
 }) => {
+  const getApiHeaders = () => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const token = localStorage.getItem('connectai_auth_token');
+    const tenantId = localStorage.getItem('connectai_tenant_id');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (tenantId) headers['X-Tenant-Id'] = tenantId;
+    return headers;
+  };
   const [activeTab, setActiveTab] = useState<'floor' | 'performance' | 'history' | 'alerts'>('floor');
   const [filterSource, setFilterSource] = useState<'all' | 'native' | 'migrated'>('all');
   const [monitoringMode, setMonitoringMode] = useState<Record<string, 'none' | 'listening' | 'whispering'>>({});
@@ -47,7 +55,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     let cancelled = false;
     const loadCapabilities = async () => {
       try {
-        const res = await fetch('/api/twilio/capabilities');
+        const res = await fetch('/api/twilio/capabilities', { headers: getApiHeaders() });
         if (!res.ok) return;
         const data = await res.json();
         if (!cancelled) {
@@ -165,10 +173,11 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     }
     setMonitoringBusy(true);
     try {
+      const monitorKey = call.twilioCallSid || call.id;
       const res = await fetch('/api/supervisor/monitor', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ callId: call.id, mode: mode === 'whispering' ? 'whisper' : 'listen' }),
+        headers: getApiHeaders(),
+        body: JSON.stringify({ callId: monitorKey, mode: mode === 'whispering' ? 'whisper' : 'listen' }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -182,7 +191,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       }
       setMonitoredCallId(call.id);
       if (call.agentId) setMonitoringMode(prev => ({ ...prev, [call.agentId as string]: mode }));
-      setMonitorSession({ participantSid: payload.participantSid, callId: call.id });
+      setMonitorSession({ participantSid: payload.participantSid, callId: payload.callId || monitorKey });
       addNotification?.('info', `Now monitoring ${call.agentName || call.customerName || 'call'}.`);
     } catch (err: any) {
       addNotification?.('error', err?.message || 'Monitor failed');
@@ -199,7 +208,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
       try {
         const res = await fetch('/api/supervisor/monitor/status', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getApiHeaders(),
           body: JSON.stringify({ participantSid: monitorSession?.participantSid, callId: monitorSession?.callId }),
         });
         if (!res.ok) throw new Error('status failed');
@@ -263,7 +272,7 @@ export const SupervisorDashboard: React.FC<SupervisorDashboardProps> = ({
     try {
       await fetch('/api/supervisor/monitor/stop', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getApiHeaders(),
         body: JSON.stringify({ participantSid: monitorSession.participantSid, callId: monitorSession.callId }),
       });
       setMonitoredCallId(null);

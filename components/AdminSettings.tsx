@@ -13,7 +13,7 @@ import { AppSettings, DepartmentRoute, Role, Notification, User, WorkflowRule, M
 import { VisualIvr } from './VisualIvr';
 import { startLegacyMigration } from '../services/migrationService';
 import { exportClusterData, downloadJson } from '../services/exportService';
-import { getIntegrationsStatus, startGoogleOAuth, startMicrosoftOAuth, startHubSpotOAuth, getHubSpotStatus, connectCrmProvider, syncCrmProvider, connectMarketingProvider, syncMarketingProvider } from '../services/integrationService';
+import { getIntegrationsStatus, startGoogleOAuth, startMicrosoftOAuth, startHubSpotOAuth, getHubSpotStatus, getHubSpotReadiness, connectCrmProvider, syncCrmProvider, connectMarketingProvider, syncMarketingProvider } from '../services/integrationService';
 import { apiRequest } from '../services/apiClient';
 import { saveSettingsApi } from '../services/settingsService';
 import { createInvite, fetchInvites } from '../services/authPolicyService';
@@ -244,6 +244,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
 
   const handleConnectHubSpotOAuth = async () => {
     try {
+      const readiness = await getHubSpotReadiness();
+      if (!readiness?.configured) {
+        const missing = Array.isArray(readiness?.missing) ? readiness.missing.join(', ') : 'HubSpot env vars';
+        addNotification('error', `HubSpot OAuth not configured. Missing: ${missing}`);
+        return;
+      }
       const { url } = await startHubSpotOAuth();
       if (url) {
         window.open(url, '_blank', 'noopener,noreferrer,width=800,height=860');
@@ -251,7 +257,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
         addNotification('error', 'HubSpot OAuth URL not returned.');
       }
     } catch (err: any) {
-      addNotification('error', `HubSpot OAuth failed: ${String(err?.message || 'start failed')}`);
+      const message = String(err?.message || 'start failed');
+      addNotification('error', `HubSpot OAuth failed: ${message}`);
     }
   };
 

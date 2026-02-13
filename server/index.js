@@ -568,6 +568,61 @@ const addConferenceParticipant = async (conferenceName, participant) => {
   return client.conferences(conferenceSid).participants.create(participant);
 };
 
+const isTwilioCallSid = (value = '') => /^CA[0-9a-f]{32}$/i.test(String(value).trim());
+
+const findCallByAnyId = async (tenantId, callId) => {
+  const normalized = String(callId || '').trim();
+  if (!normalized) return null;
+  if (isMongoReady()) {
+    const byExternal = await Call.findOne({ tenantId, $or: [{ externalId: normalized }, { twilioCallSid: normalized }] }).lean();
+    if (byExternal) return byExternal;
+    return null;
+  }
+  return (stores.calls || []).find(c => c.tenantId === tenantId && (c.id === normalized || c.externalId === normalized || c.twilioCallSid === normalized)) || null;
+};
+
+const resolveMonitorConference = async (tenantId, callId) => {
+  const call = await findCallByAnyId(tenantId, callId);
+  const identifiers = Array.from(new Set([
+    String(callId || '').trim(),
+    String(call?.id || '').trim(),
+    String(call?.externalId || '').trim(),
+    String(call?.twilioCallSid || '').trim(),
+  ].filter(Boolean)));
+
+  for (const id of identifiers) {
+    const conferenceName = id.startsWith('conf_') ? id : getConferenceName(id);
+    const sid = await findConferenceSid(conferenceName);
+    if (sid) {
+      return {
+        conferenceSid: sid,
+        conferenceName,
+        coachSid: identifiers.find(isTwilioCallSid) || '',
+        resolvedCallId: id,
+      };
+    }
+  }
+
+  // Last-resort fallback for active live floor: use most recent in-progress conference.
+  const client = getTwilioClient();
+  if (client) {
+    const list = await client.conferences.list({ status: 'in-progress', limit: 20 });
+    const candidate = (list || [])
+      .filter(c => String(c.friendlyName || '').startsWith('conf_'))
+      .sort((a, b) => new Date(b.dateUpdated || b.dateCreated || 0).getTime() - new Date(a.dateUpdated || a.dateCreated || 0).getTime())[0];
+    if (candidate?.sid && candidate?.friendlyName) {
+      return {
+        conferenceSid: candidate.sid,
+        conferenceName: candidate.friendlyName,
+        coachSid: identifiers.find(isTwilioCallSid) || '',
+        resolvedCallId: identifiers[0] || candidate.friendlyName.replace(/^conf_/, ''),
+      };
+    }
+  }
+
+  return null;
+};
+
 const enqueueJob = async (tenantId, type, payload = {}) => {
   const job = {
     tenantId,
@@ -2624,6 +2679,18 @@ app.get('/api/oauth/hubspot/start', authenticate, authorize([UserRole.ADMIN, Use
   res.json({ url: `https://app.hubspot.com/oauth/authorize?${params.toString()}` });
 });
 
+app.get('/api/oauth/hubspot/readiness', authenticate, authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), (req, res) => {
+  const missing = [];
+  if (!HUBSPOT_OAUTH.clientId) missing.push('HUBSPOT_CLIENT_ID');
+  if (!HUBSPOT_OAUTH.clientSecret) missing.push('HUBSPOT_CLIENT_SECRET');
+  if (!HUBSPOT_OAUTH.redirectUri) missing.push('HUBSPOT_OAUTH_REDIRECT_URI');
+  res.json({
+    configured: missing.length === 0,
+    missing,
+    redirectUri: HUBSPOT_OAUTH.redirectUri || '',
+  });
+});
+
 app.get('/api/oauth/hubspot/callback', async (req, res) => {
   const { code, state } = req.query || {};
   const st = oauthStates.get(state);
@@ -3091,23 +3158,31 @@ app.post('/api/supervisor/monitor', authenticate, authorize([UserRole.ADMIN, Use
   if (!getTwilioClient()) return res.status(500).json({ error: 'Twilio not configured' });
   if (!isTwilioMonitoringEnabled()) return res.status(400).json({ error: 'Monitoring not enabled' });
 
-  const conferenceName = getConferenceName(callId);
+  const resolved = await resolveMonitorConference(req.tenantId, callId);
+  if (!resolved?.conferenceName) return res.status(404).json({ error: 'Conference not active' });
   const supervisorIdentity = identity || req.user?.uid || req.user?.email || 'supervisor';
+  const effectiveMode = mode === 'whisper' && !resolved.coachSid ? 'listen' : mode;
   const participant = {
     from: `client:${supervisorIdentity}`,
     to: `client:${supervisorIdentity}`,
-    muted: mode === 'listen',
+    muted: effectiveMode === 'listen',
   };
-  if (mode === 'whisper') {
-    participant.coach = callId;
+  if (effectiveMode === 'whisper') {
+    participant.coach = resolved.coachSid;
     participant.muted = false;
   }
-  if (mode === 'barge') {
+  if (effectiveMode === 'barge') {
     participant.muted = false;
   }
   try {
-    const created = await addConferenceParticipant(conferenceName, participant);
-    res.json({ ok: true, participantSid: created.sid, conferenceName });
+    const created = await addConferenceParticipant(resolved.conferenceName, participant);
+    res.json({
+      ok: true,
+      participantSid: created.sid,
+      conferenceName: resolved.conferenceName,
+      callId: resolved.resolvedCallId || callId,
+      downgraded: mode === 'whisper' && effectiveMode !== 'whisper',
+    });
   } catch (err) {
     res.status(500).json({ error: err?.message || 'monitor failed' });
   }
@@ -3123,8 +3198,8 @@ app.post('/api/supervisor/monitor/stop', authenticate, authorize([UserRole.ADMIN
       return res.json({ ok: true });
     }
     if (callId) {
-      const conferenceName = getConferenceName(callId);
-      const conferenceSid = await findConferenceSid(conferenceName);
+      const resolved = await resolveMonitorConference(req.tenantId, callId);
+      const conferenceSid = resolved?.conferenceSid;
       if (!conferenceSid) return res.status(404).json({ error: 'Conference not active' });
       const parts = await client.conferences(conferenceSid).participants.list({ limit: 20 });
       await Promise.all(parts.map(p => client.conferences(conferenceSid).participants(p.sid).remove().catch(() => {})));
@@ -3146,8 +3221,8 @@ app.post('/api/supervisor/monitor/status', authenticate, authorize([UserRole.ADM
       return res.json({ active: participant?.status === 'in-progress', status: participant?.status });
     }
     if (callId) {
-      const conferenceName = getConferenceName(callId);
-      const conferenceSid = await findConferenceSid(conferenceName);
+      const resolved = await resolveMonitorConference(req.tenantId, callId);
+      const conferenceSid = resolved?.conferenceSid;
       if (!conferenceSid) return res.json({ active: false });
       const parts = await client.conferences(conferenceSid).participants.list({ limit: 20 });
       return res.json({ active: parts.length > 0 });
