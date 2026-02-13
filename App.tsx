@@ -146,6 +146,7 @@ const buildInvitePlaceholder = (invite: any): User => {
 };
 
 const App: React.FC = () => {
+  const [buildMeta, setBuildMeta] = useState<{ gitSha?: string; buildTime?: string } | null>(null);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [activeCall, setActiveCall] = useState<Call | null>(null);
   const [agentStatus, setAgentStatus] = useState<AgentStatus>(AgentStatus.OFFLINE);
@@ -221,6 +222,23 @@ const App: React.FC = () => {
     pathname: typeof window !== 'undefined' ? window.location.pathname : '/',
     hash: typeof window !== 'undefined' ? window.location.hash : ''
   }));
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/version.json', { cache: 'no-store' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data) return;
+        setBuildMeta({
+          gitSha: typeof data.gitSha === 'string' ? data.gitSha : '',
+          buildTime: typeof data.buildTime === 'string' ? data.buildTime : '',
+        });
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Activity Tracking: 5 minutes idle -> sign out
   const resetIdleTimer = useCallback(() => {
@@ -1164,7 +1182,17 @@ const App: React.FC = () => {
       <div className="flex-1 flex flex-col h-full overflow-hidden relative">
         {!isMeetingActive && (
           <header className="h-16 bg-slate-900/70 backdrop-blur-xl border-b border-slate-800 flex items-center justify-between px-4 md:px-8 z-40 shadow-sm shrink-0">
-            <h1 className="text-lg md:text-xl font-black text-slate-100 uppercase italic tracking-tighter">{view} HUB</h1>
+            <div className="flex items-center gap-3">
+              <h1 className="text-lg md:text-xl font-black text-slate-100 uppercase italic tracking-tighter">{view} HUB</h1>
+              {buildMeta?.gitSha && (
+                <span
+                  className="hidden md:inline-flex px-2 py-1 rounded-md border border-slate-700 bg-slate-900 text-[10px] font-black uppercase tracking-wider text-slate-300"
+                  title={`Build ${buildMeta.gitSha.slice(0, 12)}${buildMeta.buildTime ? ` • ${new Date(buildMeta.buildTime).toLocaleString()}` : ''}`}
+                >
+                  Build {buildMeta.gitSha.slice(0, 7)}
+                </span>
+              )}
+            </div>
             <HeaderProfileMenu user={currentUser} status={agentStatus} onStatusChange={setAgentStatus} onLogout={() => signOut(auth).then(() => setCurrentUser(null))} onUpdateUser={updateUserProfile} />
           </header>
         )}

@@ -1,7 +1,20 @@
 {
+  "headers": [
+    {
+      "source": "/index.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/sw.js",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-store, no-cache, must-revalidate" }
+      ]
+    }
+  ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "https://connectai-ldhc.onrender.com/api/:path*" },
     { "source": "/twilio/:path*", "destination": "https://connectai-ldhc.onrender.com/twilio/:path*" }
   ]
 }
-

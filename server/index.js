@@ -1645,6 +1645,14 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true, geminiConfigured: Boolean(GEMINI_API_KEY) });
 });
 
+app.get('/', (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: 'connectai-api',
+    health: '/api/health',
+  });
+});
+
 app.get('/api/health/deps', async (req, res) => {
   const mongo = isMongoReady();
   const firebase = Boolean(await getFirestore().catch(() => null));

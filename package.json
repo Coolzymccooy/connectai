@@ -4,6 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "prebuild": "node scripts/generate-version.mjs",
     "dev": "vite",
     "dev:server": "node server/index.js",
     "dev:worker": "node server/worker.js",
