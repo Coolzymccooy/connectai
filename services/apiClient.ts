@@ -22,9 +22,13 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const shouldRetryPath = (path: string) => {
   return (
     path.startsWith('/crm') ||
+    path.startsWith('/api/crm') ||
     path.startsWith('/marketing') ||
+    path.startsWith('/api/marketing') ||
     path.startsWith('/integrations') ||
-    path.startsWith('/oauth')
+    path.startsWith('/api/integrations') ||
+    path.startsWith('/oauth') ||
+    path.startsWith('/api/oauth')
   );
 };
 

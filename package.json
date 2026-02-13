@@ -11,7 +11,8 @@
     "test": "node --test",
     "build": "vite build",
     "preview": "vite preview",
-    "load:test": "node scripts/load-test.mjs"
+    "load:test": "node scripts/load-test.mjs",
+    "secrets:scan": "rg -n \"AIza|SG\\.|AC[0-9a-fA-F]{20,}|SK[0-9a-fA-F]{20,}|TWILIO_AUTH_TOKEN=|SENDGRID_API_KEY=|TERMII_API_KEY=|FIREBASE_SERVICE_ACCOUNT_JSON=\" -S . --glob \"!.env*\" --glob \"!node_modules/**\" --glob \"!dist/**\""
   },
   "dependencies": {
     "@google/genai": "^1.40.0",

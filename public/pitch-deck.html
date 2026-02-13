@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ConnectAI Pitch Deck</title>
+  <style>
+    :root{
+      --bg:#050816;
+      --ink:#eaf2ff;
+      --muted:#9db0cf;
+      --a:#35d6ff;
+      --b:#6b7bff;
+      --c:#2ee57b;
+      --d:#ff7a59;
+    }
+    *{box-sizing:border-box}
+    body{
+      margin:0;
+      font-family: "Space Grotesk", "Segoe UI", sans-serif;
+      color:var(--ink);
+      background:
+        radial-gradient(1200px 700px at 10% -10%, #13274e 0%, transparent 60%),
+        radial-gradient(900px 500px at 95% 10%, #1a1440 0%, transparent 60%),
+        linear-gradient(140deg, #040611, #070b1f 45%, #050816);
+      overflow:hidden;
+    }
+    .slides{display:flex;width:100vw;height:100vh;transition:transform .6s cubic-bezier(.2,.8,.2,1)}
+    .slide{
+      min-width:100vw;height:100vh;padding:48px 64px;position:relative;
+      display:grid;grid-template-rows:auto 1fr auto;gap:24px;
+    }
+    .brand{display:flex;align-items:center;justify-content:space-between}
+    .logo{font-weight:900;font-style:italic;font-size:40px;letter-spacing:.5px}
+    .tag{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.25em}
+    .title{font-size:58px;font-weight:900;line-height:1.02;margin:0;max-width:980px}
+    .subtitle{font-size:20px;color:#b4c3dd;max-width:850px}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:24px}
+    .card{
+      background:linear-gradient(150deg, rgba(255,255,255,.06), rgba(255,255,255,.015));
+      border:1px solid rgba(157,176,207,.2);
+      border-radius:22px;
+      padding:22px;
+      box-shadow:0 20px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08);
+      backdrop-filter: blur(8px);
+    }
+    .kpi{font-size:54px;font-weight:900}
+    .kpi small{font-size:16px;color:var(--muted)}
+    .kpi-line{font-size:13px;color:#b4c3dd;text-transform:uppercase;letter-spacing:.16em}
+    .pill{display:inline-flex;padding:8px 12px;border-radius:999px;background:rgba(53,214,255,.18);font-size:11px;letter-spacing:.12em;text-transform:uppercase;font-weight:800}
+    .bars{display:flex;align-items:flex-end;gap:10px;height:220px;margin-top:8px}
+    .bar{
+      flex:1;border-radius:12px 12px 4px 4px;background:linear-gradient(180deg,var(--a),var(--b));
+      transform-origin:bottom;animation:grow 1.2s ease forwards;opacity:.95;
+    }
+    .bar:nth-child(2){animation-delay:.1s}.bar:nth-child(3){animation-delay:.2s}.bar:nth-child(4){animation-delay:.3s}
+    .bar:nth-child(5){animation-delay:.4s}.bar:nth-child(6){animation-delay:.5s}
+    @keyframes grow{from{transform:scaleY(.05);opacity:.2}to{transform:scaleY(1);opacity:1}}
+    .ring{
+      width:220px;height:220px;border-radius:50%;
+      background:conic-gradient(var(--c) 0 64%, rgba(255,255,255,.08) 64% 100%);
+      position:relative;display:grid;place-items:center;margin:8px auto;
+      box-shadow:0 0 80px rgba(46,229,123,.2), inset 0 0 30px rgba(0,0,0,.35);
+    }
+    .ring:before{content:"";position:absolute;inset:18px;border-radius:50%;background:#090f24}
+    .ring span{position:relative;font-size:44px;font-weight:900}
+    .timeline{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+    .step{padding:16px;border-radius:16px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.15)}
+    .step b{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:#9dc9ff}
+    .step p{margin:8px 0 0 0;font-size:14px;color:#c6d3ea;line-height:1.4}
+    .foot{display:flex;justify-content:space-between;align-items:center;color:var(--muted);font-size:12px}
+    .nav{position:fixed;right:18px;bottom:18px;display:flex;gap:8px}
+    .btn{padding:10px 12px;border-radius:10px;border:1px solid rgba(255,255,255,.25);background:rgba(8,14,35,.7);color:#d5e3ff;cursor:pointer}
+    .slide::after{
+      content:"";position:absolute;inset:auto -80px -120px auto;width:360px;height:360px;border-radius:50%;
+      background:radial-gradient(circle, rgba(107,123,255,.35), transparent 66%);filter:blur(14px);pointer-events:none;
+    }
+    .hero3d{
+      transform:perspective(900px) rotateY(-16deg) rotateX(8deg);
+      border:1px solid rgba(255,255,255,.2);
+      border-radius:26px;
+      padding:18px;
+      background:linear-gradient(150deg, rgba(53,214,255,.12), rgba(107,123,255,.08));
+      box-shadow:0 30px 60px rgba(0,0,0,.45);
+    }
+    .mini-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+    .mini{padding:14px;border-radius:12px;background:rgba(255,255,255,.06);font-size:13px}
+    .mono{font-family: "JetBrains Mono", Consolas, monospace}
+    @media (max-width:900px){
+      .slide{padding:28px}
+      .title{font-size:38px}
+      .grid2{grid-template-columns:1fr}
+      .timeline{grid-template-columns:1fr 1fr}
+    }
+  </style>
+</head>
+<body>
+  <div id="slides" class="slides">
+    <section class="slide">
+      <div class="brand"><div class="logo">ConnectAI</div><div class="tag">SMB CCAaS • Investor Pitch</div></div>
+      <div class="grid2">
+        <div>
+          <h1 class="title">The AI-Native Contact Center Built for Modern SMBs</h1>
+          <p class="subtitle">Voice, video, omnichannel inbox, campaigns, QA, CRM sync, and supervisor intelligence in one operating surface.</p>
+          <p class="pill">From siloed tools to one command center</p>
+        </div>
+        <div class="hero3d">
+          <div class="mini-grid">
+            <div class="mini"><b>Omnichannel</b><br/>Voice, SMS, WhatsApp, chat</div>
+            <div class="mini"><b>AI Wrap-up</b><br/>Summary + QA + disposition</div>
+            <div class="mini"><b>Supervisor</b><br/>Live floor, whisper, monitor</div>
+            <div class="mini"><b>CRM</b><br/>HubSpot contacts + deals</div>
+            <div class="mini"><b>Security</b><br/>GDPR/NDPA controls</div>
+            <div class="mini"><b>Ops</b><br/>Usage/quota + exports</div>
+          </div>
+        </div>
+      </div>
+      <div class="foot"><span>Confidential</span><span>Slide 1 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">Problem</div><div class="tag">Why now</div></div>
+      <div class="grid2">
+        <div class="card"><div class="kpi">5+ <small>tools</small></div><div class="kpi-line">SMBs stitch multiple systems for calls, inbox, QA, CRM</div></div>
+        <div class="card"><div class="kpi">30-40% <small>lost time</small></div><div class="kpi-line">Agent context switching + manual wrap-up overhead</div></div>
+        <div class="card"><div class="kpi">Low visibility</div><div class="kpi-line">Supervisors miss real-time quality and coaching windows</div></div>
+        <div class="card"><div class="kpi">Revenue leak</div><div class="kpi-line">Disconnected follow-ups and stale CRM state</div></div>
+      </div>
+      <div class="foot"><span>Fragmentation kills throughput</span><span>Slide 2 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">Solution</div><div class="tag">ConnectAI platform</div></div>
+      <div class="timeline">
+        <div class="step"><b>1. Engage</b><p>Inbound/outbound voice + internal video calling with unified team directory.</p></div>
+        <div class="step"><b>2. Assist</b><p>AI prompts, live transcript, action extraction, and guided responses.</p></div>
+        <div class="step"><b>3. Decide</b><p>QA scoring, disposition guidance, and risk signals in real time.</p></div>
+        <div class="step"><b>4. Execute</b><p>CRM sync, tasks, follow-up scheduling, and export-ready analytics.</p></div>
+      </div>
+      <div class="grid2">
+        <div class="card"><p class="kpi-line">Core modules</p><p>Agent Hub • Supervisor Hub • Admin Hub • Campaigns • Dialer • CRM Window</p></div>
+        <div class="card"><p class="kpi-line">Deployment</p><p>Cloud-ready with tenant controls, invite flow, and operational guardrails.</p></div>
+      </div>
+      <div class="foot"><span>Call-centered operating system</span><span>Slide 3 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">Product Value</div><div class="tag">Quantified outcomes</div></div>
+      <div class="grid2">
+        <div class="card">
+          <p class="kpi-line">Expected impact profile</p>
+          <div class="bars">
+            <div class="bar" style="height:54%"></div>
+            <div class="bar" style="height:66%"></div>
+            <div class="bar" style="height:74%"></div>
+            <div class="bar" style="height:82%"></div>
+            <div class="bar" style="height:88%"></div>
+            <div class="bar" style="height:95%"></div>
+          </div>
+          <p class="kpi-line">Agent productivity trend (month-over-month)</p>
+        </div>
+        <div class="card" style="display:grid;place-items:center">
+          <div class="ring"><span>64%</span></div>
+          <p class="kpi-line">Potential reduction in manual wrap-up time</p>
+        </div>
+      </div>
+      <div class="foot"><span>AI and workflow compression</span><span>Slide 4 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">CRM Strategy</div><div class="tag">Beyond “Connected ✅”</div></div>
+      <div class="grid2">
+        <div class="card">
+          <p class="kpi-line">In-app CRM surface</p>
+          <ul>
+            <li>Contacts page: search name/phone/email, owner, stage, source badge</li>
+            <li>Deal context in live calls: stage, value, next step, notes</li>
+            <li>Wrap-up writeback: call summary + task + optional stage update</li>
+          </ul>
+        </div>
+        <div class="card">
+          <p class="kpi-line">Provider model</p>
+          <p>HubSpot live OAuth + sync available now, architecture ready for Salesforce/Pipedrive expansion with unified UX.</p>
+          <p class="mono">/api/crm/contacts • /api/crm/deals • /api/crm/tasks</p>
+        </div>
+      </div>
+      <div class="foot"><span>Call-centered CRM window</span><span>Slide 5 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">Supervisor Advantage</div><div class="tag">Quality at runtime</div></div>
+      <div class="grid2">
+        <div class="card"><div class="kpi">Live Floor</div><div class="kpi-line">Active calls, monitor/listen/whisper, alerting</div></div>
+        <div class="card"><div class="kpi">Risk Console</div><div class="kpi-line">Sentiment + escalation cues during interaction</div></div>
+        <div class="card"><div class="kpi">Replay + Logs</div><div class="kpi-line">Recording workflow, export, compliance controls</div></div>
+        <div class="card"><div class="kpi">Coaching Loop</div><div class="kpi-line">Immediate interventions reduce churn and QA drift</div></div>
+      </div>
+      <div class="foot"><span>No blind spots during live calls</span><span>Slide 6 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">Go-To-Market</div><div class="tag">SMB first</div></div>
+      <div class="timeline">
+        <div class="step"><b>ICP</b><p>Service SMBs with 10–200 seats needing call + CRM + QA consolidation.</p></div>
+        <div class="step"><b>Wedge</b><p>Replace dialer + QA first, then expand to inbox, campaigns, and CRM motion.</p></div>
+        <div class="step"><b>Land</b><p>Low-friction onboarding via invite flow, role templates, and cloud deploy.</p></div>
+        <div class="step"><b>Expand</b><p>Usage-led growth through minutes, seats, AI tokens, and advanced modules.</p></div>
+      </div>
+      <div class="foot"><span>Fast time-to-value</span><span>Slide 7 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">Business Model</div><div class="tag">Predictable expansion</div></div>
+      <div class="grid2">
+        <div class="card"><div class="kpi">SaaS + Usage</div><div class="kpi-line">Plan fees + voice minutes + AI token overages</div></div>
+        <div class="card"><div class="kpi">Multi-module upsell</div><div class="kpi-line">Supervisor analytics, campaigns, compliance exports</div></div>
+        <div class="card"><div class="kpi">Expansion vectors</div><div class="kpi-line">Seats, channels, CRM depth, integrations</div></div>
+        <div class="card"><div class="kpi">Healthy retention</div><div class="kpi-line">Operational lock-in via workflow + data continuity</div></div>
+      </div>
+      <div class="foot"><span>High gross margin software core</span><span>Slide 8 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">Roadmap</div><div class="tag">Next 2 quarters</div></div>
+      <div class="timeline">
+        <div class="step"><b>Q1</b><p>CRM writeback enhancements, transfer matrix, stronger coaching states.</p></div>
+        <div class="step"><b>Q1</b><p>Voice/video quality hardening, edge failover, monitoring reliability.</p></div>
+        <div class="step"><b>Q2</b><p>Departmental routing intelligence + queue forecasting models.</p></div>
+        <div class="step"><b>Q2</b><p>Executive scorecards and automated revenue attribution per call.</p></div>
+      </div>
+      <div class="foot"><span>Execution-focused roadmap</span><span>Slide 9 / 10</span></div>
+    </section>
+
+    <section class="slide">
+      <div class="brand"><div class="logo">Close</div><div class="tag">ConnectAI</div></div>
+      <div>
+        <h1 class="title">We Turn Every Customer Conversation Into a Revenue Operation</h1>
+        <p class="subtitle">One workspace for agents, supervisors, and admins. From first ring to CRM impact.</p>
+      </div>
+      <div class="grid2">
+        <div class="card"><p class="kpi-line">Ask</p><p>Design partners, pilot customers, and strategic operators.</p></div>
+        <div class="card"><p class="kpi-line">Contact</p><p>Founding Team • ConnectAI • investor@connectai.app</p></div>
+      </div>
+      <div class="foot"><span>Thank you</span><span>Slide 10 / 10</span></div>
+    </section>
+  </div>
+
+  <div class="nav">
+    <button class="btn" id="prev">Prev</button>
+    <button class="btn" id="next">Next</button>
+  </div>
+
+  <script>
+    const slides = document.getElementById('slides');
+    const total = slides.children.length;
+    let index = 0;
+    const go = (n) => {
+      index = Math.max(0, Math.min(total - 1, n));
+      slides.style.transform = `translateX(${-index * 100}vw)`;
+    };
+    document.getElementById('prev').onclick = () => go(index - 1);
+    document.getElementById('next').onclick = () => go(index + 1);
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowRight' || e.key === 'PageDown') go(index + 1);
+      if (e.key === 'ArrowLeft' || e.key === 'PageUp') go(index - 1);
+      if (e.key === 'Home') go(0);
+      if (e.key === 'End') go(total - 1);
+    });
+  </script>
+</body>
+</html>

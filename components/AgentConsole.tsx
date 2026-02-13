@@ -130,6 +130,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const [messageMap, setMessageMap] = useState<Record<string, Message[]>>({});
   const seededRef = useRef(false);
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
+  const selectedConvIdRef = useRef<string | null>(null);
   const [messageInput, setMessageInput] = useState('');
   const [aiDraftText, setAiDraftText] = useState<string | null>(null);
   const [isDrafting, setIsDrafting] = useState(false);
@@ -237,6 +238,10 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
   const activeConversation = conversations.find(c => c.id === selectedConvId);
   const activeMessages = selectedConvId ? (messageMap[selectedConvId] || activeConversation?.messages || []) : (activeConversation?.messages || []);
+
+  useEffect(() => {
+    selectedConvIdRef.current = selectedConvId;
+  }, [selectedConvId]);
   const normalizePhone = (value?: string) => (value || '').replace(/\D/g, '');
 
   const refreshCrmData = async () => {
@@ -312,12 +317,14 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         return;
       }
       setConversations(convos);
-      if (!selectedConvId && convos[0]) {
-        setSelectedConvId(convos[0].id);
+      const currentSelected = selectedConvIdRef.current;
+      if (currentSelected && convos.some((c) => c.id === currentSelected)) {
+        return;
       }
+      if (convos[0]) setSelectedConvId(convos[0].id);
     });
     return () => unsubscribe();
-  }, [isFirebaseConfigured, user.id, selectedConvId]);
+  }, [isFirebaseConfigured, user.id]);
 
   useEffect(() => {
     if (!isFirebaseConfigured || !selectedConvId) return;
@@ -912,6 +919,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     };
     try {
       await upsertCrmContact(contact);
+      refreshCrmData().catch(() => {});
       addNotification('success', 'Contact synced to CRM.');
     } catch {
       addNotification('error', 'CRM sync failed.');
@@ -1894,6 +1902,98 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                     <div className="text-sm font-bold text-slate-400">No leads yet. Import or add a lead to begin.</div>
                   )}
                 </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* CRM WINDOW */}
+        {activeTab === 'crm' && (
+          <div className="h-full flex flex-col gap-6 animate-in slide-in-from-right">
+            <div className="flex flex-col sm:flex-row sm:justify-between sm:items-end px-4 gap-4">
+              <div>
+                <h3 className="text-2xl font-black text-slate-800 uppercase italic tracking-tighter">CRM Window</h3>
+                <p className="text-[9px] font-black uppercase text-slate-400 tracking-[0.35em] mt-2 italic">Call-centered contact and deal context</p>
+              </div>
+              <button onClick={() => refreshCrmData().catch(() => {})} className="px-4 py-2.5 rounded-xl bg-slate-900 text-white text-[9px] font-black uppercase tracking-widest inline-flex items-center gap-2">
+                <RefreshCw size={14} /> Refresh CRM
+              </button>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.1fr] gap-6 flex-1 overflow-hidden">
+              <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 flex flex-col overflow-hidden">
+                <div className="relative mb-4">
+                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16}/>
+                  <input
+                    value={crmSearch}
+                    onChange={(e) => setCrmSearch(e.target.value)}
+                    placeholder="Search contacts by name, phone, email..."
+                    className="w-full bg-slate-50 border border-slate-200 rounded-xl py-3 pl-11 pr-4 text-xs font-bold outline-none focus:border-brand-500"
+                  />
+                </div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-3">
+                  {crmLoading ? 'Loading...' : `${crmContacts.length} contacts`}
+                </div>
+                <div className="flex-1 overflow-y-auto scrollbar-hide space-y-3">
+                  {crmContacts
+                    .filter((contact) => {
+                      const q = crmSearch.trim().toLowerCase();
+                      if (!q) return true;
+                      return (
+                        (contact.name || '').toLowerCase().includes(q) ||
+                        (contact.phone || '').toLowerCase().includes(q) ||
+                        (contact.email || '').toLowerCase().includes(q)
+                      );
+                    })
+                    .slice(0, 80)
+                    .map((contact) => (
+                      <div key={contact.id} className="p-4 rounded-2xl border border-slate-100 bg-slate-50">
+                        <div className="flex items-center justify-between">
+                          <p className="text-xs font-black uppercase text-slate-800">{contact.name}</p>
+                          <span className="text-[8px] px-2 py-1 rounded-md bg-brand-50 text-brand-700 font-black uppercase tracking-widest">{contact.platform || 'HubSpot'}</span>
+                        </div>
+                        <p className="mt-1 text-[10px] font-bold text-slate-500">{contact.phone || 'No phone'} • {contact.email || 'No email'}</p>
+                        <p className="mt-1 text-[10px] font-bold text-slate-500">Owner: {contact.ownerId || 'Unassigned'} • Stage: {contact.lifecycleStage || 'lead'}</p>
+                        <div className="mt-2">
+                          <button onClick={() => window.open('https://app.hubspot.com/contacts', '_blank', 'noopener,noreferrer')} className="text-[9px] font-black uppercase tracking-widest text-brand-600 inline-flex items-center gap-1">
+                            Open in CRM <ExternalLink size={12} />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  {crmContacts.length === 0 && !crmLoading && (
+                    <div className="text-sm font-bold text-slate-400">No CRM contacts yet. Sync HubSpot in Admin Settings.</div>
+                  )}
+                </div>
+              </div>
+              <div className="bg-white rounded-[2rem] border border-slate-200 shadow-xl p-6 flex flex-col overflow-hidden">
+                <h4 className="text-sm font-black uppercase tracking-widest text-slate-600 mb-4">Deal / Opportunity Context</h4>
+                {matchedCrmContact ? (
+                  <div className="space-y-4 overflow-y-auto scrollbar-hide">
+                    <div className="p-4 rounded-2xl border border-slate-100 bg-slate-50">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Matched Contact</p>
+                      <p className="mt-1 text-lg font-black italic text-slate-800">{matchedCrmContact.name}</p>
+                      <p className="text-[10px] font-bold text-slate-500">{matchedCrmContact.phone} • {matchedCrmContact.email || 'No email'}</p>
+                    </div>
+                    <div className="space-y-3">
+                      {relatedDealsForMatched.map((deal) => {
+                        const props = deal?.raw?.properties || {};
+                        return (
+                          <div key={deal.id} className="p-4 rounded-2xl border border-slate-100 bg-slate-50">
+                            <p className="text-xs font-black uppercase text-slate-800">{deal.name || props.dealname || 'Deal'}</p>
+                            <p className="mt-1 text-[10px] font-bold text-slate-500">Stage: {deal.stage || props.dealstage || 'N/A'}</p>
+                            <p className="text-[10px] font-bold text-slate-500">Value: {deal.amount || props.amount || 'N/A'}</p>
+                            <p className="text-[10px] font-bold text-slate-500">Next Step: {props.hs_next_step || 'Not set'}</p>
+                          </div>
+                        );
+                      })}
+                      {relatedDealsForMatched.length === 0 && (
+                        <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">No related deals found for this contact.</div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-sm font-bold text-slate-400">No active-call contact match. Start a call or refresh CRM.</div>
+                )}
               </div>
             </div>
           </div>

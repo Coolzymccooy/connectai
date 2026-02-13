@@ -25,23 +25,28 @@ import { getFirestore } from './services/firebaseAdminService.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const envPath = path.resolve(__dirname, '../.env.local');
-dotenv.config({ path: envPath });
+const rootEnvPath = path.resolve(__dirname, '../.env');
+const localEnvPath = path.resolve(__dirname, '../.env.local');
+dotenv.config({ path: rootEnvPath });
+dotenv.config({ path: localEnvPath });
 const readEnvFileValue = (key) => {
-  try {
-    const content = readFileSync(envPath, 'utf8');
-    const pattern = new RegExp(`^\\s*(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(.*)$`, 'i');
-    const line = content.split(/\r?\n/).find((l) => pattern.test(l));
-    if (!line) return '';
-    const match = line.match(pattern);
-    const raw = (match?.[1] || '').trim();
-    if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
-      return raw.slice(1, -1).trim();
+  const pattern = new RegExp(`^\\s*(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(.*)$`, 'i');
+  const readFromPath = (filePath) => {
+    try {
+      const content = readFileSync(filePath, 'utf8');
+      const line = content.split(/\r?\n/).find((l) => pattern.test(l));
+      if (!line) return '';
+      const match = line.match(pattern);
+      const raw = (match?.[1] || '').trim();
+      if ((raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))) {
+        return raw.slice(1, -1).trim();
+      }
+      return raw;
+    } catch {
+      return '';
     }
-    return raw;
-  } catch {
-    return '';
-  }
+  };
+  return readFromPath(rootEnvPath) || readFromPath(localEnvPath);
 };
 if (process.env.TWILIO_ACCOUNT_SID) {
   const sid = process.env.TWILIO_ACCOUNT_SID;
