@@ -8,6 +8,7 @@ export enum Role {
 export enum AgentStatus {
   AVAILABLE = 'AVAILABLE',
   BUSY = 'BUSY',
+  AWAY = 'AWAY',
   WRAP_UP = 'WRAP_UP',
   OFFLINE = 'OFFLINE',
 }

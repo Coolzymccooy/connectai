@@ -27,6 +27,37 @@ This README documents how to run, configure, and deploy the ConnectAI app end-to
    - Backend: `npm run dev:server`
    - Frontend: `npm run dev`
 
+## Local Team Invite + Video Test (Quick Runbook)
+Use this flow when you want to test internal calls/video with real team members locally.
+
+1. Start app and server:
+   - `npm run dev:all`
+2. Open two browser sessions:
+   - Session A: normal browser window
+   - Session B: Incognito/Private window (or a different browser)
+3. Sign in as Admin in Session A.
+4. Create team invite(s):
+   - Go to `Admin Settings` -> invite section
+   - Enter teammate email and role
+   - Create invite
+5. In Session B, sign in with invited email and accept invite flow.
+6. Confirm both users are visible in `Team` tab and marked online.
+7. Start video test:
+   - From Session A, open `Team` and click video call on Session B user
+   - Accept call in Session B
+8. Verify expected behavior:
+   - Your own camera tile appears immediately
+   - Remote participant tile appears after join
+   - `People` count reflects connected participants
+9. Add a third member (optional):
+   - Use `Invite Someone` inside video call or create another invite from Admin
+   - Join from a third browser profile/device
+
+Tips:
+- If camera is blank, confirm browser camera/mic permissions are allowed for `localhost`.
+- If invite does not appear, refresh Session B after invite creation.
+- If using invite-only auth, ensure invite email matches login email exactly.
+
 ## Core Flows
 ### 1) Inbound Voice Call (Twilio → App → Agent)
 1. Twilio sends webhook to `/twilio/voice/incoming`
@@ -81,6 +112,10 @@ Remove `identity=` for production routing across multiple agents.
 **Optional**
 - `RECORDING_RETENTION_DAYS`
 - `CLIENT_URL` (CORS allowlist)
+- `SENDGRID_API_KEY` (enables invite email delivery)
+- `SENDGRID_FROM_EMAIL` (sender address for invite emails)
+
+If `SENDGRID_API_KEY` and `SENDGRID_FROM_EMAIL` are not set, invites are still created but no email is sent.
 
 ## Frontend Environment Variables (Vercel / Local)
 Set these in Vercel or `.env.local`:

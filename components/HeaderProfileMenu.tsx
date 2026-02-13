@@ -29,6 +29,7 @@ export const HeaderProfileMenu: React.FC<HeaderProfileMenuProps> = ({ user, stat
   const animationFrameRef = useRef<number | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const safeStatus = status || AgentStatus.OFFLINE;
 
   const toggleMenu = () => setIsOpen(!isOpen);
 
@@ -103,11 +104,11 @@ export const HeaderProfileMenu: React.FC<HeaderProfileMenuProps> = ({ user, stat
           <p className="font-semibold text-slate-700 text-sm">{user.name}</p>
           <div className="flex items-center justify-end space-x-1">
              <span className={`w-2 h-2 rounded-full ${
-                status === AgentStatus.AVAILABLE ? 'bg-green-500' :
-                status === AgentStatus.BUSY ? 'bg-red-500' :
-                status === AgentStatus.WRAP_UP ? 'bg-amber-500' : 'bg-slate-400'
+                safeStatus === AgentStatus.AVAILABLE ? 'bg-green-500' :
+                safeStatus === AgentStatus.BUSY ? 'bg-red-500' :
+                safeStatus === AgentStatus.WRAP_UP ? 'bg-amber-500' : 'bg-slate-400'
              }`}></span>
-             <p className="text-xs text-slate-500 capitalize">{status.replace('_', ' ')}</p>
+             <p className="text-xs text-slate-500 capitalize">{safeStatus.replace('_', ' ')}</p>
           </div>
         </div>
         <img src={user.avatarUrl} alt="User" className="w-9 h-9 rounded-full border border-slate-200 object-cover" />
@@ -121,8 +122,8 @@ export const HeaderProfileMenu: React.FC<HeaderProfileMenuProps> = ({ user, stat
             <div className="p-4 border-b border-slate-100 bg-slate-50">
                <p className="text-xs font-bold text-slate-500 uppercase mb-2">Set Status</p>
                <div className="grid grid-cols-2 gap-2">
-                  {[AgentStatus.AVAILABLE, AgentStatus.BUSY, AgentStatus.WRAP_UP, AgentStatus.OFFLINE].map((s) => (
-                    <button key={s} onClick={() => { onStatusChange(s); setIsOpen(false); }} className={`text-xs px-2 py-1.5 rounded border transition-colors ${status === s ? 'bg-brand-50 border-brand-200 text-brand-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>{s.replace('_', ' ')}</button>
+                  {[AgentStatus.AVAILABLE, AgentStatus.AWAY, AgentStatus.BUSY, AgentStatus.WRAP_UP, AgentStatus.OFFLINE].map((s) => (
+                    <button key={s} onClick={() => { onStatusChange(s); setIsOpen(false); }} className={`text-xs px-2 py-1.5 rounded border transition-colors ${safeStatus === s ? 'bg-brand-50 border-brand-200 text-brand-700 font-medium' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>{s.replace('_', ' ')}</button>
                   ))}
                </div>
             </div>

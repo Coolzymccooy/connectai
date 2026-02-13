@@ -46,7 +46,8 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
   const [isMinimized, setIsMinimized] = useState(false);
   const [position, setPosition] = useState({ x: 0, y: 120 });
   const dragRef = useRef<{ active: boolean; startX: number; startY: number; originX: number; originY: number } | null>(null);
-  const [history, setHistory] = useState<AppCall[]>([]);
+const [history, setHistory] = useState<AppCall[]>([]);
+  const tokenCooldownUntilRef = useRef<number>(0);
   const activeHistoryIdRef = useRef<string | null>(null);
   const activeHistoryStartRef = useRef<number | null>(null);
   const activeHistoryRef = useRef<AppCall | null>(null);
@@ -80,21 +81,49 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
   useEffect(() => {
     let cancelled = false;
 
+    const readErrorResponse = async (response: Response) => {
+      try {
+        const raw = await response.text();
+        if (!raw) return '';
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed?.error) return String(parsed.error);
+          return JSON.stringify(parsed).slice(0, 240);
+        } catch {
+          return raw.slice(0, 240);
+        }
+      } catch {
+        return '';
+      }
+    };
+
     const initTwilio = async () => {
       if (deviceRef.current) return;
+      const now = Date.now();
+      if (now < tokenCooldownUntilRef.current) {
+        const waitSec = Math.max(1, Math.ceil((tokenCooldownUntilRef.current - now) / 1000));
+        setClientStatus('error');
+        setClientError(`Rate limit active. Retry in ${waitSec}s.`);
+        return;
+      }
       setClientStatus('connecting');
       setClientError(null);
 
       try {
         const response = await fetch(`/api/twilio/token?identity=${encodeURIComponent(identity)}`);
         if (!response.ok) {
-          let details = '';
-          try {
-            const body = await response.json();
-            details = body?.error ? `: ${body.error}` : JSON.stringify(body);
-          } catch {
-            details = (await response.text())?.slice(0, 240) || '';
+          if (response.status === 429) {
+            const retryAfter = Number(response.headers.get('retry-after') || '20');
+            tokenCooldownUntilRef.current = Date.now() + (Number.isFinite(retryAfter) ? retryAfter : 20) * 1000;
+            const waitSec = Math.max(1, Math.ceil((tokenCooldownUntilRef.current - Date.now()) / 1000));
+            setClientStatus('error');
+            setClientError(`Token rate-limited. Retry in ${waitSec}s.`);
+            setTimeout(() => {
+              if (!cancelled) initTwilio();
+            }, waitSec * 1000);
+            return;
           }
+          const details = await readErrorResponse(response);
           throw new Error(`Token endpoint error (${response.status})${details ? ` ${details}` : ''}`);
         }
         const data = await response.json();
@@ -124,6 +153,17 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
         nextDevice.on('tokenWillExpire', async () => {
           try {
             const tokenRes = await fetch(`/api/twilio/token?identity=${encodeURIComponent(identity)}`);
+            if (!tokenRes.ok) {
+              if (tokenRes.status === 429) {
+                const retryAfter = Number(tokenRes.headers.get('retry-after') || '20');
+                tokenCooldownUntilRef.current = Date.now() + (Number.isFinite(retryAfter) ? retryAfter : 20) * 1000;
+                const waitSec = Math.max(1, Math.ceil((tokenCooldownUntilRef.current - Date.now()) / 1000));
+                setClientError(`Token refresh rate-limited. Retrying in ${waitSec}s.`);
+                return;
+              }
+              const details = await readErrorResponse(tokenRes);
+              throw new Error(`Token refresh failed (${tokenRes.status})${details ? ` ${details}` : ''}`);
+            }
             const tokenData = await tokenRes.json();
             nextDevice.updateToken(tokenData.token);
           } catch (err) {
@@ -216,8 +256,8 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
   useEffect(() => {
     if (!floating) return;
     const setInitialPosition = () => {
-      const width = isMinimized ? 180 : 320;
-      const height = isMinimized ? 72 : 620;
+      const width = isMinimized ? 170 : 286;
+      const height = isMinimized ? 66 : 540;
       // Position on right side, but not too far down
       const x = Math.max(16, window.innerWidth - width - 32);
       const y = Math.max(100, Math.min(200, window.innerHeight - height - 32));
@@ -232,8 +272,8 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
       if (!dragRef.current?.active) return;
       const deltaX = event.clientX - dragRef.current.startX;
       const deltaY = event.clientY - dragRef.current.startY;
-      const panelWidth = isMinimized ? 180 : 320;
-      const panelHeight = isMinimized ? 72 : 620;
+      const panelWidth = isMinimized ? 170 : 286;
+      const panelHeight = isMinimized ? 66 : 540;
       const nextX = Math.min(Math.max(8, dragRef.current.originX + deltaX), window.innerWidth - panelWidth - 8);
       const nextY = Math.min(Math.max(8, dragRef.current.originY + deltaY), window.innerHeight - panelHeight - 8);
       setPosition({ x: nextX, y: nextY });
@@ -409,9 +449,18 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
                 {entry.direction} • {entry.status}
               </span>
             </div>
-            <span className="text-[10px] text-slate-400">
-              {entry.durationSeconds ? formatTime(entry.durationSeconds) : '--:--'}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-slate-400">
+                {entry.durationSeconds ? formatTime(entry.durationSeconds) : '--:--'}
+              </span>
+              <button
+                onClick={() => setNumber(normalizeNumber(entry.phoneNumber || ''))}
+                className="p-1.5 rounded-lg bg-white/10 text-white hover:bg-green-500/70 transition-colors"
+                title="Redial"
+              >
+                <Phone size={12} />
+              </button>
+            </div>
           </div>
         ))}
         {history.length === 0 && (
@@ -457,8 +506,8 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
   }
 
   return (
-    <div
-      className={`${floating ? 'fixed z-[9999]' : 'relative'} w-[320px] bg-slate-900 rounded-[3rem] p-8 shadow-2xl border border-white/10 flex flex-col items-center overflow-hidden`}
+      <div
+      className={`${floating ? 'fixed z-[9999]' : 'relative'} w-[286px] bg-slate-900 rounded-[2.2rem] p-5 shadow-2xl border border-white/10 flex flex-col items-center overflow-hidden`}
       style={floating ? { transform: `translate3d(${position.x}px, ${position.y}px, 0)`, top: 0, left: 0 } : undefined}
     >
       {/* Dynamic Island / Status */}
@@ -477,19 +526,19 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
         </button>
       </div>
 
-      <div className="mb-8 w-full text-center relative z-10">
+      <div className="mb-5 w-full text-center relative z-10">
         <div className="flex justify-center mb-4">
           <div className={`w-3 h-3 rounded-full ${status === 'connected' ? 'bg-green-500 animate-pulse' : 'bg-slate-600'}`}></div>
         </div>
         {status === 'connected' ? (
-          <h3 className="text-3xl font-black text-white tracking-tighter mb-1 h-10">{formatTime(duration)}</h3>
+          <h3 className="text-2xl font-black text-white tracking-tighter mb-1 h-8">{formatTime(duration)}</h3>
         ) : (
           <input
             value={number}
             onChange={(e) => handleInputChange(e.target.value)}
             onPaste={handlePaste}
             placeholder="Enter Number"
-            className="w-full bg-transparent text-center text-2xl font-black text-white tracking-tighter mb-1 h-10 outline-none placeholder:text-slate-600"
+            className="w-full bg-transparent text-center text-xl font-black text-white tracking-tighter mb-1 h-8 outline-none placeholder:text-slate-600"
           />
         )}
         <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-500">{status === 'idle' ? 'Ready to Call' : status.toUpperCase()}</p>
@@ -503,21 +552,21 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
 
       {/* Keypad */}
       {status === 'idle' || status === 'dialing' ? (
-        <div className="grid grid-cols-3 gap-4 mb-8">
+        <div className="grid grid-cols-3 gap-3 mb-5">
           {[1, 2, 3, 4, 5, 6, 7, 8, 9, '+', 0, '#'].map(n => (
             <button
               key={n}
               onClick={() => handleDigit(n.toString())}
-              className="w-16 h-16 rounded-full bg-white/5 hover:bg-white/10 text-white font-medium text-xl flex items-center justify-center transition-all active:scale-95"
+              className="w-14 h-14 rounded-full bg-white/5 hover:bg-white/10 text-white font-medium text-lg flex items-center justify-center transition-all active:scale-95"
             >
               {n}
             </button>
           ))}
         </div>
       ) : (
-        <div className="flex-1 flex flex-col items-center justify-center gap-6 mb-8 w-full">
-          <div className="w-24 h-24 rounded-full bg-slate-800 flex items-center justify-center relative">
-            <User size={40} className="text-slate-500" />
+        <div className="flex-1 flex flex-col items-center justify-center gap-4 mb-5 w-full">
+          <div className="w-20 h-20 rounded-full bg-slate-800 flex items-center justify-center relative">
+            <User size={32} className="text-slate-500" />
             <div className="absolute inset-0 border-2 border-green-500/30 rounded-full animate-ping"></div>
           </div>
           <div className="w-full bg-slate-800/50 rounded-xl p-4">
@@ -530,36 +579,36 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
       )}
 
       {/* Actions */}
-      <div className="flex gap-6 w-full justify-center">
+      <div className="flex gap-3 w-full justify-center">
         {status === 'connected' && (
           <button onClick={() => {
             const nextMuted = !isMuted;
             setIsMuted(nextMuted);
             call?.mute(nextMuted);
-          }} className={`p-6 rounded-[2rem] transition-all ${isMuted ? 'bg-white text-slate-900' : 'bg-slate-800 text-white'}`}
+          }} className={`p-4 rounded-2xl transition-all ${isMuted ? 'bg-white text-slate-900' : 'bg-slate-800 text-white'}`}
           >
-            {isMuted ? <MicOff size={24} /> : <Mic size={24} />}
+            {isMuted ? <MicOff size={20} /> : <Mic size={20} />}
           </button>
         )}
 
         {status === 'idle' ? (
-          <button onClick={handleCall} className="p-6 bg-green-500 text-white rounded-[2rem] shadow-xl shadow-green-900/50 hover:bg-green-400 transition-all w-full flex justify-center">
-            <Phone size={28} />
+          <button onClick={handleCall} className="p-4 bg-green-500 text-white rounded-2xl shadow-xl shadow-green-900/50 hover:bg-green-400 transition-all w-full flex justify-center">
+            <Phone size={22} />
           </button>
         ) : (
-          <button onClick={handleHangup} className="p-6 bg-red-600 text-white rounded-[2rem] shadow-xl shadow-red-900/50 hover:bg-red-500 transition-all w-full flex justify-center">
-            <PhoneOff size={28} />
+          <button onClick={handleHangup} className="p-4 bg-red-600 text-white rounded-2xl shadow-xl shadow-red-900/50 hover:bg-red-500 transition-all w-full flex justify-center">
+            <PhoneOff size={22} />
           </button>
         )}
         {status !== 'connected' && (
-          <button onClick={handleDelete} className="p-6 bg-slate-800 text-white rounded-[2rem] hover:bg-slate-700 transition-all">
-            <Delete size={24} />
+          <button onClick={handleDelete} className="p-4 bg-slate-800 text-white rounded-2xl hover:bg-slate-700 transition-all">
+            <Delete size={20} />
           </button>
         )}
 
         {status === 'connected' && (
-          <button className="p-6 bg-slate-800 text-white rounded-[2rem] hover:bg-slate-700 transition-all">
-            <Volume2 size={24} />
+          <button className="p-4 bg-slate-800 text-white rounded-2xl hover:bg-slate-700 transition-all">
+            <Volume2 size={20} />
           </button>
         )}
       </div>

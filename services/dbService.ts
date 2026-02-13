@@ -72,6 +72,17 @@ export const saveUser = async (user: User) => {
   await setDoc(userRef, user, { merge: true });
 };
 
+export const fetchUsers = (callback: (users: User[]) => void, onError?: (error: Error) => void) => {
+  const q = query(collection(db, USERS_COLLECTION));
+  return onSnapshot(q, (snapshot) => {
+    const users = snapshot.docs.map((doc) => doc.data() as User);
+    callback(users);
+  }, (error) => {
+    if (onError) onError(error as Error);
+    else console.warn('fetchUsers snapshot error:', error);
+  });
+};
+
 export const upsertConversation = async (conversation: Conversation & { participantIds?: string[] }) => {
   const convoRef = doc(db, CONVERSATIONS_COLLECTION, conversation.id);
   await setDoc(convoRef, {

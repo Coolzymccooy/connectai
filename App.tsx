@@ -18,7 +18,8 @@ import * as dbService from './services/dbService';
 import { synthesizeSpeech } from './services/geminiService';
 import { fetchCalendarEvents, createCalendarEvent, updateCalendarEvent } from './services/calendarService';
 import { fetchCampaigns, createCampaign, updateCampaign } from './services/campaignService';
-import { fetchCallById } from './services/callLogService';
+import { fetchCallById, fetchCallLogs, updateCall as updateCallLog } from './services/callLogService';
+import { fetchSettingsApi, saveSettingsApi } from './services/settingsService';
 import { sanitizeCallForStorage } from './utils/gdpr';
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -46,6 +47,61 @@ const PERSONAS = [
   { id: 'curious_lead', name: 'Curious Lead', prompt: 'You are Lisa, a polite business owner looking for an AI call center.' },
   { id: 'self_service', name: 'AI Voice Bot', prompt: 'ConnectAI Voice Bot mode.' }
 ];
+
+const normalizeEmail = (email?: string) => (email || '').trim().toLowerCase();
+const normalizeName = (name?: string) => (name || '').trim().toLowerCase();
+
+const teamFingerprint = (member: User) => {
+  const email = normalizeEmail(member.email);
+  if (email) return `email:${email}`;
+  const extension = (member.extension || '').trim().toLowerCase();
+  const name = normalizeName(member.name);
+  return `sig:${member.role}:${name}:${extension}`;
+};
+
+const upsertTeamMember = (team: User[], member: User): User[] => {
+  const normalizedMember: User = {
+    ...member,
+    currentPresence: member.currentPresence || AgentStatus.AVAILABLE,
+  };
+  const memberEmail = normalizeEmail(member.email);
+  const fingerprint = teamFingerprint(member);
+  const idx = team.findIndex((u) => {
+    if (u.id === member.id) return true;
+    const userEmail = normalizeEmail(u.email);
+    if (memberEmail && userEmail === memberEmail) return true;
+    return teamFingerprint(u) === fingerprint;
+  });
+  if (idx >= 0) {
+    const next = [...team];
+    next[idx] = { ...next[idx], ...normalizedMember };
+    return next;
+  }
+  return [...team, normalizedMember];
+};
+
+const dedupeTeamMembers = (team: User[]): User[] => {
+  return team.reduce((acc, member) => upsertTeamMember(acc, member), [] as User[]);
+};
+
+const mergeTeamWithDirectory = (team: User[], members: User[]): User[] => {
+  const merged = members.reduce((acc, member) => upsertTeamMember(acc, member), dedupeTeamMembers(team));
+  return dedupeTeamMembers(merged);
+};
+
+const buildMergedSettings = (saved: Partial<AppSettings> | null | undefined): AppSettings => {
+  const source = saved || {};
+  const merged = {
+    ...DEFAULT_SETTINGS,
+    ...source,
+    voice: { ...DEFAULT_SETTINGS.voice, ...((source as any).voice || {}) },
+    auth: { ...DEFAULT_SETTINGS.auth, ...((source as any).auth || {}) },
+  };
+  return {
+    ...merged,
+    team: dedupeTeamMembers(Array.isArray((merged as any).team) ? (merged as any).team : []),
+  };
+};
 
 const App: React.FC = () => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -107,6 +163,9 @@ const App: React.FC = () => {
   const [authNotice, setAuthNotice] = useState<string | null>(null);
   // Track verification state separate from User | null
   const [isUnverified, setIsUnverified] = useState(false);
+  const [authBootstrapping, setAuthBootstrapping] = useState(true);
+  const [hasHydratedSettings, setHasHydratedSettings] = useState(false);
+  const [incomingCallBanner, setIncomingCallBanner] = useState<Call | null>(null);
   
   const mountedRef = useRef(true);
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -116,21 +175,21 @@ const App: React.FC = () => {
     hash: typeof window !== 'undefined' ? window.location.hash : ''
   }));
 
-  // Activity Tracking: 5 minutes idle -> AWAY
+  // Activity Tracking: 5 minutes idle -> sign out
   const resetIdleTimer = useCallback(() => {
     if (!currentUser || activeCall) return;
     
-    // If we were away, mark as available
-    if (agentStatus === AgentStatus.AWAY) {
-        setAgentStatus(AgentStatus.AVAILABLE);
+    if (agentStatus === AgentStatus.AWAY || agentStatus === AgentStatus.OFFLINE) {
+      setAgentStatus(AgentStatus.AVAILABLE);
     }
 
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     
     idleTimerRef.current = setTimeout(() => {
-        if (!activeCall && agentStatus !== AgentStatus.OFFLINE) {
-            setAgentStatus(AgentStatus.AWAY);
-        }
+      if (activeCall) return;
+      setAuthNotice('Session expired due to inactivity.');
+      setAgentStatus(AgentStatus.OFFLINE);
+      signOut(auth).catch(() => {}).finally(() => setCurrentUser(null));
     }, 5 * 60 * 1000); // 5 minutes
   }, [currentUser, activeCall, agentStatus]);
 
@@ -173,6 +232,7 @@ const App: React.FC = () => {
     let verificationPoller: NodeJS.Timeout;
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
+      setAuthBootstrapping(false);
       if (!user) {
         localStorage.removeItem('connectai_auth_token');
         setCurrentUser(null);
@@ -214,6 +274,7 @@ const App: React.FC = () => {
   }, [isFirebaseConfigured]);
 
   const finishLogin = async (user: any) => {
+    try {
       const storedRole = (localStorage.getItem(`connectai_role_${user.uid}`) as Role) || Role.AGENT;
       const roleTemplate = DEFAULT_SETTINGS.team.find(u => u.role === storedRole);
       const profile: User = {
@@ -230,14 +291,26 @@ const App: React.FC = () => {
       const token = await user.getIdToken();
       localStorage.setItem('connectai_auth_token', token);
       setCurrentUser(profile);
+      setAppSettings(prev => {
+        const next = { ...prev, team: dedupeTeamMembers(upsertTeamMember(prev.team, profile)) };
+        if (hasHydratedSettings) saveSettingsSafely(next).catch(() => {});
+        return next;
+      });
       setView(storedRole === Role.SUPERVISOR ? 'supervisor' : storedRole === Role.ADMIN ? 'admin' : 'agent');
-      if (storedRole === Role.AGENT) setAgentStatus(AgentStatus.AVAILABLE);
+      setAgentStatus(profile.currentPresence || AgentStatus.AVAILABLE);
       if (isFirebaseConfigured) await dbService.saveUser(profile);
+    } catch (error) {
+      console.error('finishLogin failed:', error);
+      setAuthNotice('Login sync failed. Refresh and try again.');
+    }
   };
 
   const persistCall = useCallback(async (call: Call) => {
-    if (!isFirebaseConfigured) return;
     const safeCall = sanitizeCallForStorage(call, appSettings.compliance);
+    if (!isFirebaseConfigured) {
+      await updateCallLog(call.id, safeCall).catch(() => {});
+      return;
+    }
     await dbService.saveCall(safeCall);
   }, [isFirebaseConfigured, appSettings.compliance]);
 
@@ -268,7 +341,11 @@ const App: React.FC = () => {
         if (change.type === 'added' || change.type === 'modified') {
           if (!activeCall || activeCall.id === callData.id) {
             setActiveCall(callData);
-            if (callData.status === CallStatus.DIALING) persistCall({ ...callData, status: CallStatus.RINGING });
+            if (callData.status === CallStatus.DIALING) {
+              persistCall({ ...callData, status: CallStatus.RINGING });
+              setIncomingCallBanner({ ...callData, status: CallStatus.RINGING });
+              addNotification('info', `Incoming ${callData.isVideo ? 'video ' : ''}call from ${callData.agentName || callData.customerName || 'teammate'}.`);
+            }
           }
         } else if (change.type === 'removed') {
           if (activeCall?.id === callData.id) handleHangup();
@@ -292,25 +369,122 @@ const App: React.FC = () => {
       };
       const unsubCalls = dbService.fetchHistoricalCalls((calls) => setCallHistory(calls), handleFirebaseError);
       const unsubLeads = dbService.fetchLeads((leads) => setLeads(leads), handleFirebaseError);
+      const unsubUsers = dbService.fetchUsers((users) => {
+        setAppSettings((prev) => ({ ...prev, team: mergeTeamWithDirectory(prev.team, users) }));
+      }, handleFirebaseError);
       dbService.fetchSettings().then(saved => {
         if (!saved) return;
-        const merged = {
-          ...DEFAULT_SETTINGS,
-          ...saved,
-          voice: { ...DEFAULT_SETTINGS.voice, ...(saved as any).voice },
-          auth: { ...DEFAULT_SETTINGS.auth, ...(saved as any).auth },
-        };
-        setAppSettings(merged);
-      });
-      return () => { unsubCalls(); unsubLeads(); };
+        const merged = buildMergedSettings(saved);
+        setAppSettings((prev) => ({
+          ...merged,
+          team: dedupeTeamMembers(mergeTeamWithDirectory(merged.team || [], prev.team || [])),
+        }));
+      }).finally(() => setHasHydratedSettings(true));
+      return () => { unsubCalls(); unsubLeads(); unsubUsers(); };
     }
   }, [currentUser, isFirebaseConfigured]);
+
+  useEffect(() => {
+    if (!currentUser || isFirebaseConfigured) return;
+    const sync = async () => {
+      try {
+        const saved = await fetchSettingsApi();
+        const merged = buildMergedSettings(saved);
+        setAppSettings((prev) => ({
+          ...merged,
+          team: dedupeTeamMembers(mergeTeamWithDirectory(merged.team || [], prev.team || [])),
+        }));
+      } catch {
+        // Best-effort sync for non-Firebase sessions.
+      } finally {
+        setHasHydratedSettings(true);
+      }
+    };
+    sync();
+    const interval = setInterval(sync, 10000);
+    return () => clearInterval(interval);
+  }, [currentUser, isFirebaseConfigured]);
+
+  useEffect(() => {
+    if (!currentUser || isFirebaseConfigured) return;
+    let cancelled = false;
+    const pullInternalSignals = async () => {
+      try {
+        const calls = await fetchCallLogs({ limit: 100 });
+        if (cancelled) return;
+        const signal = calls.find((c) => {
+          if (c.targetAgentId !== currentUser.id) return false;
+          return c.status === CallStatus.DIALING || c.status === CallStatus.RINGING || c.status === CallStatus.ACTIVE;
+        });
+        if (signal && (!activeCall || activeCall.id === signal.id || activeCall.status === CallStatus.ENDED)) {
+          setActiveCall(signal);
+          if (signal.status === CallStatus.DIALING) {
+            await persistCall({ ...signal, status: CallStatus.RINGING });
+            setIncomingCallBanner({ ...signal, status: CallStatus.RINGING });
+            addNotification('info', `Incoming ${signal.isVideo ? 'video ' : ''}call from ${signal.agentName || signal.customerName || 'teammate'}.`);
+          }
+        }
+      } catch {
+        // best effort in API mode
+      }
+    };
+    pullInternalSignals();
+    const interval = setInterval(pullInternalSignals, 1800);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [currentUser, isFirebaseConfigured, activeCall, persistCall]);
 
   const addNotification = (type: Notification['type'], message: string) => {
     const id = Date.now().toString();
     setNotifications(prev => [{ id, type, message }, ...prev]);
     if (!showNotificationPanel) setUnreadCount(prev => prev + 1);
   };
+
+  const saveSettingsSafely = useCallback(async (next: AppSettings) => {
+    try {
+      const latest = await fetchSettingsApi();
+      const base = buildMergedSettings(latest);
+      const mergedPayload: AppSettings = {
+        ...base,
+        ...next,
+        team: dedupeTeamMembers(mergeTeamWithDirectory(base.team || [], next.team || [])),
+      };
+      await saveSettingsApi(mergedPayload);
+    } catch {
+      await saveSettingsApi(next);
+    }
+  }, []);
+
+  const syncTeamNow = useCallback(async () => {
+    try {
+      const saved = await fetchSettingsApi();
+      const merged = buildMergedSettings(saved);
+      setAppSettings((prev) => ({
+        ...merged,
+        team: dedupeTeamMembers(mergeTeamWithDirectory(merged.team || [], prev.team || [])),
+      }));
+      addNotification('success', 'Team sync complete.');
+    } catch {
+      addNotification('error', 'Team sync failed.');
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    if (currentUser.currentPresence === agentStatus) return;
+    const updated = { ...currentUser, currentPresence: agentStatus };
+    setCurrentUser(updated);
+    setAppSettings((prev) => {
+      const next = { ...prev, team: dedupeTeamMembers(upsertTeamMember(prev.team, updated)) };
+      if (hasHydratedSettings) saveSettingsSafely(next).catch(() => {});
+      return next;
+    });
+    if (isFirebaseConfigured) {
+      dbService.saveUser(updated).catch(() => {});
+    }
+  }, [agentStatus, currentUser, isFirebaseConfigured]);
 
   const toggleMedia = async (type: 'video' | 'screen') => {
     if (!activeCall) return;
@@ -364,10 +538,14 @@ const App: React.FC = () => {
 
   const updateUserProfile = async (updated: User) => {
     setCurrentUser(updated);
-    setAppSettings(prev => ({
-      ...prev,
-      team: prev.team.map(u => u.id === updated.id ? updated : u)
-    }));
+    setAppSettings(prev => {
+      const next = {
+        ...prev,
+        team: dedupeTeamMembers(upsertTeamMember(prev.team, updated))
+      };
+      if (hasHydratedSettings) saveSettingsSafely(next).catch(() => {});
+      return next;
+    });
     if (isFirebaseConfigured) await dbService.saveUser(updated);
     addNotification('success', 'Profile updated.');
   };
@@ -474,12 +652,20 @@ const App: React.FC = () => {
 
   const startInternalCall = async (target: User) => {
     if (activeCall && activeCall.status !== CallStatus.ENDED) return;
+    const normalizedTargetEmail = normalizeEmail(target.email);
+    const resolvedByEmail = normalizedTargetEmail
+      ? appSettings.team.find((member) => normalizeEmail(member.email) === normalizedTargetEmail && member.id !== target.id)
+      : undefined;
+    const resolvedById = appSettings.team.find((member) => member.id === target.id);
+    const resolvedTarget = resolvedByEmail || resolvedById || target;
+    const isVideoCall = (target as any).isVideo !== false;
     const newCall: Call = {
-      id: `int_${Date.now()}`, direction: 'internal', customerName: target.name, phoneNumber: `EXT ${target.extension}`, customerEmail: target.email, customerExtension: target.extension, queue: 'Internal Matrix', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, agentEmail: currentUser?.email, agentExtension: currentUser?.extension, targetAgentId: target.id, isVideo: true, participants: [target.id, currentUser!.id], emailSynced: true, transcriptionEnabled: true
+      id: `int_${Date.now()}`, direction: 'internal', customerName: resolvedTarget.name, phoneNumber: `EXT ${resolvedTarget.extension}`, customerEmail: resolvedTarget.email, customerExtension: resolvedTarget.extension, queue: 'Internal Matrix', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, agentEmail: currentUser?.email, agentExtension: currentUser?.extension, targetAgentId: resolvedTarget.id, isVideo: isVideoCall, participants: [resolvedTarget.id, currentUser!.id], emailSynced: true, transcriptionEnabled: true
     };
     setActiveCall(newCall);
     await persistCall(newCall);
     setAgentStatus(AgentStatus.BUSY);
+    addNotification('info', `Dialing ${resolvedTarget.name}...`);
     if (!isFirebaseConfigured) {
       setTimeout(() => {
         setActiveCall(prev => (prev?.id === newCall.id) ? { ...prev, status: CallStatus.ACTIVE } : prev);
@@ -499,6 +685,7 @@ const App: React.FC = () => {
     liveService?.stop();
     setLiveService(null);
     setAudioLevel(0);
+    setIncomingCallBanner(null);
     if (activeCall) {
       if (activeCall.roomId) {
         const meetingToClose = meetings.find(m => m.roomId === activeCall.roomId);
@@ -626,11 +813,46 @@ const App: React.FC = () => {
       localStorage.setItem(`connectai_role_${profile.uid}`, role);
     }
     setCurrentUser(user);
+    setAppSettings(prev => {
+      const next = {
+        ...prev,
+        team: dedupeTeamMembers(upsertTeamMember(prev.team, user))
+      };
+      if (hasHydratedSettings) saveSettingsSafely(next).catch(() => {});
+      return next;
+    });
     setAuthNotice(null);
     setView(role === Role.SUPERVISOR ? 'supervisor' : role === Role.ADMIN ? 'admin' : 'agent');
-    if (role === Role.AGENT) setAgentStatus(AgentStatus.AVAILABLE);
+    setAgentStatus(user.currentPresence || AgentStatus.AVAILABLE);
     if (isFirebaseConfigured) await dbService.saveUser(user);
   };
+
+  useEffect(() => {
+    if (!activeCall || isFirebaseConfigured) return;
+    let cancelled = false;
+    const syncActiveCall = async () => {
+      try {
+        const latest = await fetchCallById(activeCall.id);
+        if (cancelled || !latest) return;
+        setActiveCall((prev) => {
+          if (!prev || prev.id !== latest.id) return prev;
+          return { ...prev, ...latest };
+        });
+        if (latest.status === CallStatus.ENDED) {
+          setCallHistory((h) => [latest, ...h.filter((c) => c.id !== latest.id)]);
+          setActiveCall((prev) => (prev?.id === latest.id ? null : prev));
+          setAgentStatus(AgentStatus.WRAP_UP);
+        }
+      } catch {
+        // ignore polling errors
+      }
+    };
+    const interval = setInterval(syncActiveCall, 1200);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [activeCall?.id, isFirebaseConfigured]);
 
   if (isLanding) return <LandingPage />;
   
@@ -661,14 +883,52 @@ const App: React.FC = () => {
       );
   }
 
+  if (authBootstrapping && isAppRoute) {
+    return (
+      <div className="min-h-[100dvh] bg-slate-950 flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 mx-auto mb-3 bg-brand-600 rounded-xl animate-pulse"></div>
+          <p className="text-xs font-black tracking-widest uppercase text-slate-400">Restoring Session</p>
+        </div>
+      </div>
+    );
+  }
   if (!isAppRoute && !currentUser) return <LandingPage />;
   if (!currentUser) return <LoginScreen onLogin={handleLogin} externalMessage={authNotice} onClearExternalMessage={() => setAuthNotice(null)} />;
 
-  const isMeetingActive = activeCall && (activeCall.status !== CallStatus.ENDED) && (activeCall.direction === 'internal' || activeCall.isVideo);
+  const isMeetingActive = activeCall && (activeCall.status !== CallStatus.ENDED) && (activeCall.direction === 'internal' || activeCall.isVideo || Boolean(activeCall.roomId));
+
+  const acceptIncomingBannerCall = async () => {
+    if (!incomingCallBanner) return;
+    const next = { ...incomingCallBanner, status: CallStatus.ACTIVE };
+    setActiveCall(next);
+    setIncomingCallBanner(null);
+    await persistCall(next);
+    setAgentStatus(AgentStatus.BUSY);
+  };
+
+  const declineIncomingBannerCall = async () => {
+    if (!incomingCallBanner) return;
+    const next = { ...incomingCallBanner, status: CallStatus.ENDED };
+    setIncomingCallBanner(null);
+    setActiveCall(null);
+    await persistCall(next);
+    setAgentStatus(AgentStatus.AVAILABLE);
+  };
 
   return (
-    <div className="flex h-[100dvh] bg-slate-50 app-compact flex-col md:flex-row overflow-hidden">
+    <div className="flex h-[100dvh] bg-[radial-gradient(120%_120%_at_50%_0%,#0f172a_0%,#020617_58%,#000000_100%)] app-compact flex-col md:flex-row overflow-hidden">
       <ToastContainer notifications={notifications} removeNotification={() => { }} />
+      {incomingCallBanner && incomingCallBanner.status !== CallStatus.ENDED && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[140] bg-white border border-slate-200 rounded-2xl shadow-2xl px-4 py-3 flex items-center gap-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Incoming {incomingCallBanner.isVideo ? 'Video' : 'Voice'} Call</p>
+            <p className="text-sm font-black uppercase italic text-slate-800">{incomingCallBanner.agentName || incomingCallBanner.customerName || 'Teammate'}</p>
+          </div>
+          <button onClick={declineIncomingBannerCall} className="px-3 py-2 rounded-lg border border-slate-200 text-[9px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50">Decline</button>
+          <button onClick={acceptIncomingBannerCall} className="px-3 py-2 rounded-lg bg-brand-600 text-white text-[9px] font-black uppercase tracking-widest hover:bg-brand-700">Accept</button>
+        </div>
+      )}
       {!isMeetingActive && (
         <div className="w-full md:w-20 h-16 md:h-full bg-brand-900 flex flex-row md:flex-col items-center justify-between md:justify-start px-4 md:px-0 md:py-6 z-50 shadow-xl shrink-0">
           <button
@@ -692,8 +952,8 @@ const App: React.FC = () => {
       )}
       <div className="flex-1 flex flex-col h-full overflow-hidden relative">
         {!isMeetingActive && (
-          <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-4 md:px-8 z-40 shadow-sm shrink-0">
-            <h1 className="text-lg md:text-xl font-black text-slate-800 uppercase italic tracking-tighter">{view} HUB</h1>
+          <header className="h-16 bg-slate-900/70 backdrop-blur-xl border-b border-slate-800 flex items-center justify-between px-4 md:px-8 z-40 shadow-sm shrink-0">
+            <h1 className="text-lg md:text-xl font-black text-slate-100 uppercase italic tracking-tighter">{view} HUB</h1>
             <HeaderProfileMenu user={currentUser} status={agentStatus} onStatusChange={setAgentStatus} onLogout={() => signOut(auth).then(() => setCurrentUser(null))} onUpdateUser={updateUserProfile} />
           </header>
         )}
@@ -712,10 +972,10 @@ const App: React.FC = () => {
           ) : (
             <>
               {view === 'agent' && (
-                <div className="p-4 md:p-8 h-full">
+                <div className="p-4 md:p-8 h-full bg-[radial-gradient(110%_100%_at_50%_0%,rgba(15,23,42,0.55)_0%,rgba(2,6,23,0.15)_55%,rgba(2,6,23,0)_100%)]">
                   <div className="h-full relative">
                     <div className="h-full">
-                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} onUpdateCampaign={handleUpdateCampaign} onCreateLead={handleCreateLead} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} />
+                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} onEndActiveCall={handleHangup} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} onUpdateCampaign={handleUpdateCampaign} onCreateLead={handleCreateLead} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} />
                     </div>
 
                   </div>
@@ -723,7 +983,7 @@ const App: React.FC = () => {
               )}
               {view === 'supervisor' && <div className="p-8 h-full"><SupervisorDashboard calls={callHistory} team={appSettings.team} addNotification={addNotification} activeCall={activeCall} /></div>}
               {view === 'logs' && <div className="h-full"><CallLogView currentUser={currentUser} /></div>}
-              {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} />}
+              {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} onSyncTeamNow={syncTeamNow} />}
               {showSoftphone && (
                 <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} agentName={currentUser?.name} agentEmail={currentUser?.email} enableServerLogs onCallEnded={handleSoftphoneCallEnded} />
               )}
@@ -762,6 +1022,7 @@ const App: React.FC = () => {
 };
 
 export default App;
+
 
 
 

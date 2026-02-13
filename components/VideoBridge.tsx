@@ -140,6 +140,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const peerRef = useRef<Peer | null>(null);
   const [peerId, setPeerId] = useState<string>('');
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
+  const dialingPeersRef = useRef<Set<string>>(new Set());
   
   // Feature States
   const [intelligence, setIntelligence] = useState<{ text: string, links: {title: string, uri: string}[] } | null>(null);
@@ -172,6 +173,25 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     });
   }, [isFirebaseConfigured, activeCall.id]);
 
+  useEffect(() => {
+    if (!isVideoEnabled || localStream) return;
+    let cancelled = false;
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+      .then((stream) => {
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        setLocalStream(stream);
+      })
+      .catch((err) => {
+        console.warn('Local media bootstrap failed:', err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeCall.id, isVideoEnabled, localStream]);
+
   const registerConnection = useCallback((call: MediaConnection, remoteUserId: string) => {
     connectionsRef.current.set(remoteUserId, call);
     call.on('stream', (remoteStream) => {
@@ -179,6 +199,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     });
     call.on('close', () => {
       connectionsRef.current.delete(remoteUserId);
+      dialingPeersRef.current.delete(remoteUserId);
       setRemoteStreams(prev => {
         const next = new Map(prev);
         next.delete(remoteUserId);
@@ -187,6 +208,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     });
     call.on('error', (err) => {
       console.warn('PeerJS call error', err);
+      dialingPeersRef.current.delete(remoteUserId);
     });
   }, []);
 
@@ -431,14 +453,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   };
 
   // --- CALL LOGIC ---
-  const callUser = async (targetUserId: string) => {
+  const callUser = useCallback(async (targetUserId: string) => {
     if (!peerRef.current) return;
     const stream = localStream ?? await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
     if (!localStream) setLocalStream(stream);
     const targetPeerId = `connectai-user-${targetUserId}`;
     const call = peerRef.current.call(targetPeerId, stream);
     registerConnection(call, targetUserId);
-  };
+  }, [localStream, registerConnection]);
 
   const handleTerminate = () => {
     stopScreenShare();
@@ -461,6 +483,21 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const participants = useMemo(() => 
     roster.filter(t => activeCall.participants?.includes(t.id) || t.id === currentUser.id),
   [roster, activeCall.participants, currentUser.id]);
+
+  useEffect(() => {
+    if (!peerId) return;
+    participants
+      .filter((p) => p.id !== currentUser.id)
+      .forEach((p) => {
+        if (remoteStreams.has(p.id)) return;
+        if (connectionsRef.current.has(p.id)) return;
+        if (dialingPeersRef.current.has(p.id)) return;
+        dialingPeersRef.current.add(p.id);
+        callUser(p.id).catch(() => {
+          dialingPeersRef.current.delete(p.id);
+        });
+      });
+  }, [participants, currentUser.id, peerId, remoteStreams, callUser]);
 
   return (
     <div className="fixed inset-0 z-[100] bg-[#111] flex flex-col overflow-hidden text-white font-sans selection:bg-brand-500/30">

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { User, Shield, Lock, Headset, LayoutDashboard, Settings, Mail, KeyRound, ArrowRight, Loader2, CheckCircle, AlertCircle } from 'lucide-react';
+import { User, Shield, Lock, Headset, LayoutDashboard, Settings, Mail, KeyRound, ArrowRight, Loader2, CheckCircle, AlertCircle, Eye, EyeOff } from 'lucide-react';
 import { Role } from '../types';
 import { auth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, signOut, updateProfile, GoogleAuthProvider, signInWithPopup } from '../services/firebase';
 import { acceptInvite, fetchAuthPolicy } from '../services/authPolicyService';
@@ -14,6 +14,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
   const [mode, setMode] = useState<'login' | 'signup' | 'reset'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [name, setName] = useState('');
   const [role, setRole] = useState<Role>(Role.AGENT);
   const [busy, setBusy] = useState(false);
@@ -155,6 +158,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
     setError(null);
     setMessage(null);
     try {
+      if (password !== confirmPassword) {
+        setError('Passwords do not match.');
+        setBusy(false);
+        return;
+      }
       const policyCheck = await enforcePolicy(email);
       if (policyCheck.error) {
         setError(policyCheck.error);
@@ -221,22 +229,39 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
     }
   };
 
+  const handlePendingInviteCta = async () => {
+    if (!email || !email.includes('@')) {
+      setMode('signup');
+      return;
+    }
+    try {
+      const policy = await fetchAuthPolicy(email);
+      setPolicyCache(policy);
+      if (policy?.invite?.status === 'pending' || !policy?.inviteOnly) {
+        setMode('signup');
+        setError(null);
+      }
+    } catch {
+      setMode('signup');
+    }
+  };
+
   return (
-    <div className="min-h-[100dvh] bg-slate-50 flex flex-col justify-center items-center p-4 sm:p-6 transition-all duration-500 overflow-y-auto">
-      <div className="max-w-5xl w-full grid grid-cols-1 md:grid-cols-2 bg-white rounded-2xl shadow-xl overflow-hidden border border-slate-100 min-h-0 md:min-h-[560px] my-auto">
+    <div className="min-h-[100dvh] bg-[radial-gradient(120%_120%_at_50%_0%,#111827_0%,#0f172a_55%,#020617_100%)] flex flex-col justify-center items-center p-4 sm:p-6 transition-all duration-500 overflow-y-auto">
+      <div className="max-w-5xl w-full grid grid-cols-1 md:grid-cols-2 bg-white/95 backdrop-blur-xl rounded-2xl shadow-2xl overflow-hidden border border-white/20 min-h-0 md:min-h-[560px] my-auto">
         {/* Left: Brand Side - Hidden on Mobile to prioritize Login */}
-        <div className="hidden md:flex bg-brand-900 p-12 text-white flex-col justify-between relative overflow-hidden">
+          <div className="hidden md:flex bg-[linear-gradient(145deg,#0f172a_0%,#1e1b4b_60%,#312e81_100%)] p-12 text-white flex-col justify-between relative overflow-hidden">
           <div className="absolute top-0 left-0 w-full h-full opacity-10 pointer-events-none">
             <div className="absolute top-[-50%] left-[-50%] w-[200%] h-[200%] bg-[radial-gradient(circle,rgba(255,255,255,0.8)_0%,transparent_60%)]"></div>
           </div>
 
-          <div className="z-10">
-            <div className="w-12 h-12 bg-brand-500 rounded-xl flex items-center justify-center text-white font-bold text-2xl shadow-lg mb-6">
-              C
-            </div>
-            <h1 className="text-3xl font-bold mb-2">ConnectAI</h1>
-            <p className="text-brand-200">The AI-native contact center for modern SMBs.</p>
-          </div>
+            <button className="z-10 text-left" onClick={() => window.location.assign('/')}>
+              <div className="w-12 h-12 bg-brand-500 rounded-xl flex items-center justify-center text-white font-bold text-2xl shadow-lg mb-6 hover:scale-105 transition-transform">
+                C
+              </div>
+              <h1 className="text-3xl font-bold mb-2">ConnectAI</h1>
+              <p className="text-brand-200">The AI-native contact center for modern SMBs.</p>
+            </button>
 
           <div className="space-y-4 z-10">
             <div className="flex items-center space-x-3 text-sm text-brand-100">
@@ -257,13 +282,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
         </div>
 
         {/* Right: Auth Form */}
-        <div className="p-6 md:p-12 flex flex-col justify-center w-full">
+          <div className="p-6 md:p-12 flex flex-col justify-center w-full bg-gradient-to-b from-white to-slate-50/70">
           
           {/* Mobile Header (Visible only on mobile) */}
-          <div className="md:hidden flex items-center gap-3 mb-8">
+           <button className="md:hidden flex items-center gap-3 mb-8 text-left" onClick={() => window.location.assign('/')}>
              <div className="w-10 h-10 bg-brand-600 rounded-lg flex items-center justify-center text-white font-bold text-xl">C</div>
              <h1 className="text-xl font-bold text-slate-900">ConnectAI</h1>
-          </div>
+           </button>
 
           <div className="flex items-center gap-2 mb-6 bg-slate-100/50 p-1 rounded-xl w-full sm:w-fit">
             <button onClick={() => setMode('login')} className={`flex-1 sm:flex-none px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all ${mode === 'login' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}>Sign In</button>
@@ -309,10 +334,30 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Password"
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   className="w-full outline-none text-sm placeholder:text-slate-400"
                   required
                 />
+                <button type="button" onClick={() => setShowPassword((prev) => !prev)} className="text-slate-400 hover:text-slate-600">
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            )}
+
+            {mode === 'signup' && (
+              <div className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-xl focus-within:border-brand-500 focus-within:ring-1 focus-within:ring-brand-200 transition-all">
+                <KeyRound size={16} className="text-slate-400" />
+                <input
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  placeholder="Confirm password"
+                  type={showConfirmPassword ? 'text' : 'password'}
+                  className="w-full outline-none text-sm placeholder:text-slate-400"
+                  required
+                />
+                <button type="button" onClick={() => setShowConfirmPassword((prev) => !prev)} className="text-slate-400 hover:text-slate-600">
+                  {showConfirmPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
               </div>
             )}
 
@@ -330,6 +375,25 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
                    <option value={Role.ADMIN}>Admin Console</option>
                  </select>
                </div>
+            )}
+
+            {mode === 'login' && (
+              <div className="text-right">
+                <button
+                  type="button"
+                  onClick={handlePendingInviteCta}
+                  className="text-[11px] font-black uppercase tracking-widest text-brand-600 hover:text-brand-700 underline"
+                >
+                  Pending Invite? Create Account
+                </button>
+              </div>
+            )}
+            {mode === 'login' && (
+              <div className="text-right -mt-1">
+                <button type="button" onClick={() => setMode('reset')} className="text-[11px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 underline">
+                  Forgot Password?
+                </button>
+              </div>
             )}
             
             {error && (

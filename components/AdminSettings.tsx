@@ -34,9 +34,10 @@ interface AdminSettingsProps {
   settings: AppSettings;
   onUpdateSettings: (newSettings: AppSettings) => void;
   addNotification: (type: Notification['type'], message: string) => void;
+  onSyncTeamNow?: () => void | Promise<void>;
 }
 
-export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdateSettings, addNotification }) => {
+export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdateSettings, addNotification, onSyncTeamNow }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'ivr' | 'team' | 'migration' | 'billing' | 'anatomy'>('general');
   const [isMigrating, setIsMigrating] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -88,6 +89,28 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const [inviteRole, setInviteRole] = useState<Role>(Role.AGENT);
   const [inviteTenantId, setInviteTenantId] = useState('');
   const [invites, setInvites] = useState<any[]>([]);
+  const teamMembers = useMemo(() => {
+    const seen = new Set<string>();
+    return (settings.team || []).filter((member) => {
+      const email = (member.email || '').trim().toLowerCase();
+      const fallback = `${member.role}:${(member.name || '').trim().toLowerCase()}:${(member.extension || '').trim().toLowerCase()}`;
+      const key = email || fallback || member.id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [settings.team]);
+  const [collapsedGeneral, setCollapsedGeneral] = useState<Record<string, boolean>>({
+    access: false,
+    providers: false,
+    calendar: false,
+    crm: false,
+    observability: false,
+    marketing: true,
+  });
+  const toggleGeneralSection = (key: string) => {
+    setCollapsedGeneral((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   useEffect(() => {
     const checkHealth = async () => {
@@ -376,7 +399,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   };
 
   return (
-    <div className="h-full flex flex-col bg-slate-50 overflow-hidden">
+    <div className="h-full flex flex-col bg-[radial-gradient(120%_120%_at_50%_0%,rgba(15,23,42,0.42)_0%,rgba(2,6,23,0.14)_58%,rgba(2,6,23,0.02)_100%)] overflow-hidden">
       {/* Header */}
       <div className="bg-white border-b px-6 pt-6 shrink-0">
          <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 gap-4">
@@ -414,196 +437,124 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       <div className="flex-1 overflow-y-auto p-6 scrollbar-hide pb-12">
         {/* INTEGRATIONS TAB */}
         {activeTab === 'general' && (
-           <div className="max-w-4xl space-y-6 animate-in fade-in">
-              <div className="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-sm">
-                <h4 className="text-lg font-black uppercase italic tracking-tight mb-4">Access Control</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                  <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
-                    Invite-Only Onboarding
-                    <input
-                      type="checkbox"
-                      checked={Boolean(authSettings.inviteOnly)}
-                      onChange={(e) => setAuthSettings({ ...authSettings, inviteOnly: e.target.checked })}
-                      className="h-4 w-4 rounded border-slate-300"
-                    />
-                  </label>
-                  <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
-                    Auto-Tenant By Domain
-                    <input
-                      type="checkbox"
-                      checked={Boolean(authSettings.autoTenantByDomain)}
-                      onChange={(e) => setAuthSettings({ ...authSettings, autoTenantByDomain: e.target.checked })}
-                      className="h-4 w-4 rounded border-slate-300"
-                    />
-                  </label>
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
-                  <div>
-                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Allowed Domains (one per line)</label>
-                    <textarea
-                      className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
-                      rows={4}
-                      placeholder="company.com"
-                      value={authDomains}
-                      onChange={(e) => setAuthDomains(e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Domain → Tenant Map (domain=tenantId)</label>
-                    <textarea
-                      className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
-                      rows={4}
-                      placeholder="company.com=connectai-main"
-                      value={domainTenantMap}
-                      onChange={(e) => setDomainTenantMap(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <button
-                  onClick={handleSaveAuth}
-                  className="px-6 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
-                >
-                  Save Access Policy
-                </button>
-              </div>
-              {['hubSpot', 'pipedrive', 'salesforce'].map((key) => {
-                const isEnabled = key === 'hubSpot' ? settings.integrations.hubSpot.enabled : (settings.integrations as any)[key];
-                return (
-                  <div key={key} className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 flex items-center justify-between shadow-sm">
-                    <div className="flex items-center gap-6">
-                      <div className={`w-16 h-16 rounded-[1.5rem] flex items-center justify-center border shadow-sm ${isEnabled ? 'bg-orange-50 text-orange-600 border-orange-100' : 'bg-slate-50 text-slate-400 border-slate-100 grayscale'}`}>
-                        <Database size={28}/>
+           <div className="max-w-6xl space-y-4 animate-in fade-in [&_input]:p-2.5 [&_textarea]:p-2.5 [&_select]:p-2.5 [&_button]:tracking-[0.12em]">
+              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm">
+                  <button onClick={() => toggleGeneralSection('access')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">Access Control</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.access ? 'rotate-180' : ''}`} />
+                  </button>
+                  {!collapsedGeneral.access && (
+                    <div className="mt-4 space-y-4">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100">
+                          Invite-Only
+                          <input type="checkbox" checked={Boolean(authSettings.inviteOnly)} onChange={(e) => setAuthSettings({ ...authSettings, inviteOnly: e.target.checked })} className="h-4 w-4 rounded border-slate-300" />
+                        </label>
+                        <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100">
+                          Auto-Tenant Domain
+                          <input type="checkbox" checked={Boolean(authSettings.autoTenantByDomain)} onChange={(e) => setAuthSettings({ ...authSettings, autoTenantByDomain: e.target.checked })} className="h-4 w-4 rounded border-slate-300" />
+                        </label>
                       </div>
-                      <div>
-                        <h4 className="text-xl font-black uppercase italic tracking-tight">{key.replace('hubSpot', 'HubSpot Enterprise')}</h4>
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Two-way sync</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder="Allowed domains&#10;company.com" value={authDomains} onChange={(e) => setAuthDomains(e.target.value)} />
+                        <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder="domain=tenantId&#10;company.com=connectai-main" value={domainTenantMap} onChange={(e) => setDomainTenantMap(e.target.value)} />
+                      </div>
+                      <button onClick={handleSaveAuth} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[10px] font-black uppercase">Save Policy</button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm">
+                  <button onClick={() => toggleGeneralSection('providers')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">Core Providers</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.providers ? 'rotate-180' : ''}`} />
+                  </button>
+                  {!collapsedGeneral.providers && (
+                    <div className="mt-4 grid grid-cols-1 gap-2.5">
+                      {['hubSpot', 'pipedrive', 'salesforce'].map((key) => {
+                        const isEnabled = key === 'hubSpot' ? settings.integrations.hubSpot.enabled : (settings.integrations as any)[key];
+                        return (
+                          <div key={key} className="flex items-center justify-between rounded-xl border border-slate-100 bg-slate-50 px-3 py-2.5">
+                            <div>
+                              <p className="text-xs font-black uppercase tracking-widest text-slate-700">{key.replace('hubSpot', 'HubSpot')}</p>
+                              <p className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Two-way sync</p>
+                            </div>
+                            <button onClick={() => handleToggleIntegration(key as any)} className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase ${isEnabled ? 'bg-slate-900 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}>{isEnabled ? 'Connected' : 'Connect'}</button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm">
+                  <button onClick={() => toggleGeneralSection('calendar')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">Calendar Sync</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.calendar ? 'rotate-180' : ''}`} />
+                  </button>
+                  {!collapsedGeneral.calendar && (
+                    <div className="mt-4 space-y-3">
+                      <div className="flex gap-2 flex-wrap">
+                        <button onClick={async () => { try { const { url } = await startGoogleOAuth(); if (url) window.open(url, '_blank', 'noopener,noreferrer'); } catch {} }} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase">Google</button>
+                        <button onClick={async () => { try { const { url } = await startMicrosoftOAuth(); if (url) window.open(url, '_blank', 'noopener,noreferrer'); } catch {} }} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase">Microsoft</button>
+                      </div>
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Status: {integrationStatus?.calendar?.google ? 'Google Connected' : integrationStatus?.calendar?.microsoft ? 'Microsoft Connected' : 'Not Connected'}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm">
+                  <button onClick={() => toggleGeneralSection('crm')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">CRM Sync</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.crm ? 'rotate-180' : ''}`} />
+                  </button>
+                  {!collapsedGeneral.crm && (
+                    <div className="mt-4 space-y-3">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Primary: {(settings.integrations.primaryCrm || 'HubSpot')}</p>
+                      <div className="flex gap-2 flex-wrap">
+                        {['hubspot', 'salesforce', 'pipedrive'].map((provider) => (
+                          <button key={provider} onClick={() => { setCrmProvider(provider as any); setShowCrmModal(true); }} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase">
+                            {integrationStatus?.crm?.[provider]?.status ? `Connected: ${provider}` : `Connect ${provider}`}
+                          </button>
+                        ))}
                       </div>
                     </div>
-                    <button onClick={() => handleToggleIntegration(key as any)} className={`px-6 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${isEnabled ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-200'}`}>{isEnabled ? 'Connected' : 'Connect'}</button>
-                  </div>
-                );
-              })}
+                  )}
+                </div>
 
-              <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-sm">
-                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Calendar Sync</h4>
-                <div className="flex gap-3 flex-wrap">
-                  <button
-                    onClick={async () => {
-                      try {
-                        const { url } = await startGoogleOAuth();
-                        if (url) window.open(url, '_blank', 'noopener,noreferrer');
-                      } catch {}
-                    }}
-                    className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
-                  >
-                    Connect Google
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm xl:col-span-2">
+                  <button onClick={() => toggleGeneralSection('observability')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">Observability</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.observability ? 'rotate-180' : ''}`} />
                   </button>
-                  <button
-                    onClick={async () => {
-                      try {
-                        const { url } = await startMicrosoftOAuth();
-                        if (url) window.open(url, '_blank', 'noopener,noreferrer');
-                      } catch {}
-                    }}
-                    className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
-                  >
-                    Connect Microsoft
+                  {!collapsedGeneral.observability && (
+                    <div className="mt-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2.5">
+                        <div className="p-3 rounded-xl bg-slate-50 border border-slate-100"><p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Latency</p><p className="text-sm font-black text-slate-800 mt-1">Avg {opsMetrics?.requests?.latency?.avg ?? 0} ms</p><p className="text-[9px] text-slate-500 mt-1">P95 {opsMetrics?.requests?.latency?.p95 ?? 0}</p></div>
+                        <div className="p-3 rounded-xl bg-slate-50 border border-slate-100"><p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Errors</p><p className="text-sm font-black text-slate-800 mt-1">{opsMetrics?.requests?.errors ?? 0}</p><p className="text-[9px] text-slate-500 mt-1">Total {opsMetrics?.requests?.total ?? 0}</p></div>
+                        <div className="p-3 rounded-xl bg-slate-50 border border-slate-100"><p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Backlog</p><p className="text-sm font-black text-slate-800 mt-1">{opsMetrics?.jobs?.pendingCount ?? 0}</p><p className="text-[9px] text-slate-500 mt-1">{opsMetrics?.jobs?.lastRunAt ? new Date(opsMetrics.jobs.lastRunAt).toLocaleTimeString() : 'n/a'}</p></div>
+                        <div className="p-3 rounded-xl bg-slate-50 border border-slate-100"><p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Last Error</p><p className="text-[10px] font-bold text-slate-700 mt-1 line-clamp-2">{opsMetrics?.jobs?.lastError || 'None'}</p></div>
+                      </div>
+                      <button onClick={async () => { try { const res = await fetch('/api/metrics/summary'); if (!res.ok) return; const data = await res.json(); setOpsMetrics(data); addNotification('success', 'Metrics refreshed.'); } catch {} }} className="mt-3 px-4 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase">Refresh Metrics</button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm xl:col-span-2">
+                  <button onClick={() => toggleGeneralSection('marketing')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">Marketing Sync</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.marketing ? 'rotate-180' : ''}`} />
                   </button>
-                </div>
-                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-4">
-                  Status: {integrationStatus?.calendar?.google ? 'Google Connected' : integrationStatus?.calendar?.microsoft ? 'Microsoft Connected' : 'Not Connected'}
-                </p>
-              </div>
-
-              <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-sm">
-                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">CRM Sync</h4>
-                <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-4">
-                  Primary CRM: {(settings.integrations.primaryCrm || 'HubSpot')}
-                </p>
-                <div className="flex gap-3 flex-wrap">
-                  {['hubspot', 'salesforce', 'pipedrive'].map((provider) => (
-                    <button
-                      key={provider}
-                      onClick={() => {
-                        setCrmProvider(provider as any);
-                        setShowCrmModal(true);
-                      }}
-                      className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
-                    >
-                      {integrationStatus?.crm?.[provider]?.status ? `Connected: ${provider}` : `Connect ${provider}`}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="bg-white p-6 md:p-8 rounded-[2rem] border border-slate-200 shadow-sm">
-                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Observability</h4>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Latency</p>
-                    <p className="text-lg font-black text-slate-800 mt-2">
-                      Avg {opsMetrics?.requests?.latency?.avg ?? 0} ms
-                    </p>
-                    <p className="text-[10px] text-slate-500 mt-1">
-                      P95 {opsMetrics?.requests?.latency?.p95 ?? 0} ms • Max {opsMetrics?.requests?.latency?.max ?? 0} ms
-                    </p>
-                  </div>
-                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Errors</p>
-                    <p className="text-lg font-black text-slate-800 mt-2">
-                      {opsMetrics?.requests?.errors ?? 0} errors
-                    </p>
-                    <p className="text-[10px] text-slate-500 mt-1">
-                      Total {opsMetrics?.requests?.total ?? 0} requests
-                    </p>
-                  </div>
-                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Job Backlog</p>
-                    <p className="text-lg font-black text-slate-800 mt-2">
-                      {opsMetrics?.jobs?.pendingCount ?? 0} pending
-                    </p>
-                    <p className="text-[10px] text-slate-500 mt-1">
-                      Last run: {opsMetrics?.jobs?.lastRunAt ? new Date(opsMetrics.jobs.lastRunAt).toLocaleTimeString() : 'n/a'}
-                    </p>
-                  </div>
-                  <div className="p-5 rounded-2xl bg-slate-50 border border-slate-100">
-                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Last Error</p>
-                    <p className="text-sm font-bold text-slate-700 mt-2 line-clamp-2">
-                      {opsMetrics?.jobs?.lastError || 'None'}
-                    </p>
-                  </div>
-                </div>
-                <button
-                  onClick={async () => {
-                    try {
-                      const res = await fetch('/api/metrics/summary');
-                      if (!res.ok) return;
-                      const data = await res.json();
-                      setOpsMetrics(data);
-                      addNotification('success', 'Metrics refreshed.');
-                    } catch {}
-                  }}
-                  className="mt-6 px-6 py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
-                >
-                  Refresh Metrics
-                </button>
-              </div>
-
-              <div className="bg-white p-8 rounded-[2.5rem] border border-slate-200 shadow-sm">
-                <h4 className="text-xl font-black uppercase italic tracking-tight mb-4">Marketing Sync</h4>
-                <div className="flex gap-3 flex-wrap">
-                  {['hubspot', 'mailchimp', 'marketo'].map((provider) => (
-                    <button
-                      key={provider}
-                      onClick={() => {
-                        setMarketingProvider(provider);
-                        setShowMarketingModal(true);
-                      }}
-                      className="px-5 py-2.5 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest"
-                    >
-                      Connect {provider}
-                    </button>
-                  ))}
+                  {!collapsedGeneral.marketing && (
+                    <div className="mt-4 flex gap-2 flex-wrap">
+                      {['hubspot', 'mailchimp', 'marketo'].map((provider) => (
+                        <button key={provider} onClick={() => { setMarketingProvider(provider); setShowMarketingModal(true); }} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase">
+                          Connect {provider}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
            </div>
@@ -777,21 +728,31 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                 ))}
               </div>
             </div>
-            <div className="flex justify-between items-end mb-4"><p className="text-[11px] font-black uppercase text-slate-400 tracking-[0.4em]">Team members: {settings.team.length}</p><button onClick={() => setShowInviteModal(true)} className="px-8 py-4 bg-slate-900 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center gap-3 shadow-xl hover:bg-slate-800 transition-all"><UserPlus size={16}/> Invite Member</button></div>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {settings.team.map(member => (
-                <div key={member.id} className="bg-white p-8 rounded-[2.5rem] border border-slate-200 group hover:border-brand-500/30 hover:shadow-xl transition-all">
+            <div className="flex flex-wrap justify-between items-end gap-3 mb-4">
+              <p className="text-[11px] font-black uppercase text-slate-400 tracking-[0.4em]">Team members: {teamMembers.length}</p>
+              <div className="flex items-center gap-2">
+                <button onClick={() => onSyncTeamNow?.()} className="px-4 py-3 border border-slate-200 text-slate-600 bg-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-50 transition-all">
+                  Sync Team Now
+                </button>
+                <button onClick={() => setShowInviteModal(true)} className="px-6 py-3 bg-slate-900 text-white rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center gap-2 shadow-xl hover:bg-slate-800 transition-all">
+                  <UserPlus size={14}/> Invite Member
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+              {teamMembers.map(member => (
+                <div key={member.id} className="bg-white/95 backdrop-blur-sm p-5 rounded-[1.8rem] border border-slate-200 group hover:border-brand-500/30 hover:shadow-xl transition-all">
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-5">
-                      <img src={member.avatarUrl} className="w-14 h-14 rounded-2xl border border-slate-100" />
+                    <div className="flex items-center gap-3">
+                      <img src={member.avatarUrl} className="w-11 h-11 rounded-xl border border-slate-100" />
                       <div>
-                        <h4 className="text-xl font-black italic uppercase tracking-tight text-slate-800">{member.name}</h4>
+                        <h4 className="text-lg font-black italic uppercase tracking-tight text-slate-800 line-clamp-1">{member.name}</h4>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{member.role} â€¢ EXT {member.extension}</p>
                       </div>
                     </div>
-                    <button onClick={() => handleRemoveUser(member.id)} className="p-3 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"><UserMinus size={18}/></button>
+                    <button onClick={() => handleRemoveUser(member.id)} className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"><UserMinus size={16}/></button>
                   </div>
-                  <div className="mt-6 border-t border-slate-100 pt-6 space-y-4">
+                  <div className="mt-4 border-t border-slate-100 pt-4 space-y-3">
                     <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500">
                       Restrict Outbound Numbers
                       <input
@@ -813,8 +774,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                     <div>
                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Allowed Numbers (one per line)</label>
                       <textarea
-                        className="mt-2 w-full bg-slate-50 p-4 rounded-2xl border-2 border-slate-100 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
-                        rows={3}
+                        className="mt-2 w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                        rows={2}
                         placeholder="+12025550123"
                         value={(member.allowedNumbers || []).join('\n')}
                         onChange={(e) => handleUpdateMember(member.id, { allowedNumbers: e.target.value.split('\n').map(v => v.trim()).filter(Boolean) })}

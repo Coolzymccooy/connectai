@@ -93,6 +93,58 @@ const getTenantId = (req) => {
   return req.user?.tenantId || (headerTenant ? headerTenant.toString() : DEFAULT_TENANT_ID);
 };
 
+const buildInvitePortalUrl = (invite) => {
+  const base = process.env.CLIENT_URL || process.env.PUBLIC_URL || 'http://localhost:5173';
+  const trimmedBase = base.replace(/\/+$/, '');
+  const params = new URLSearchParams({
+    email: invite.email,
+    tenantId: invite.tenantId,
+  });
+  return `${trimmedBase}/login?${params.toString()}`;
+};
+
+const sendInviteEmail = async (invite) => {
+  const apiKey = process.env.SENDGRID_API_KEY;
+  const fromEmail = process.env.SENDGRID_FROM_EMAIL;
+  if (!apiKey || !fromEmail) return false;
+  if (typeof fetch !== 'function') return false;
+
+  const inviteUrl = buildInvitePortalUrl(invite);
+  const tenantLabel = invite.tenantId || DEFAULT_TENANT_ID;
+  const roleLabel = invite.role || UserRole.AGENT;
+
+  const payload = {
+    personalizations: [{ to: [{ email: invite.email }] }],
+    from: { email: fromEmail },
+    subject: 'You are invited to ConnectAI',
+    content: [
+      {
+        type: 'text/plain',
+        value: `You have been invited to ConnectAI as ${roleLabel} for tenant ${tenantLabel}. Open ${inviteUrl} and sign up or sign in with this email.`,
+      },
+      {
+        type: 'text/html',
+        value: `<p>You have been invited to <strong>ConnectAI</strong> as <strong>${roleLabel}</strong> for tenant <strong>${tenantLabel}</strong>.</p><p><a href="${inviteUrl}">Open ConnectAI</a> and sign up or sign in with this email address.</p>`,
+      },
+    ],
+  };
+
+  try {
+    const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+    return response.ok;
+  } catch (error) {
+    console.warn('sendInviteEmail failed:', error?.message || error);
+    return false;
+  }
+};
+
 const log = (level, message, meta = {}) => {
   const entry = { level, message, time: new Date().toISOString(), ...meta };
   console.log(JSON.stringify(entry));
@@ -715,7 +767,8 @@ app.post('/api/invites', authenticate, authorize([UserRole.ADMIN]), async (req, 
   };
   stores.invites = upsertById(stores.invites, invite);
   await saveStore('invites', stores.invites);
-  res.json(invite);
+  const emailDispatched = await sendInviteEmail(invite);
+  res.json({ ...invite, emailDispatched });
 });
 
 app.post('/api/invites/accept', async (req, res) => {
