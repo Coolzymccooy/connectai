@@ -174,9 +174,12 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   }, [isFirebaseConfigured, activeCall.id]);
 
   useEffect(() => {
-    if (!isVideoEnabled || localStream) return;
+    if (localStream) return;
     let cancelled = false;
-    navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+    const constraints: MediaStreamConstraints = isVideoEnabled
+      ? { video: true, audio: true }
+      : { video: false, audio: true };
+    navigator.mediaDevices.getUserMedia(constraints)
       .then((stream) => {
         if (cancelled) {
           stream.getTracks().forEach((track) => track.stop());
@@ -230,7 +233,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     peer.on('call', async (call) => {
       try {
         const existing = localStreamRef.current;
-        const stream = existing ?? await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        const stream = existing ?? await navigator.mediaDevices.getUserMedia(
+          isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
+        );
         if (!existing) setLocalStream(stream);
         call.answer(stream);
         registerConnection(call, call.peer.replace('connectai-user-', ''));
@@ -246,7 +251,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       connectionsRef.current.clear();
       peer.destroy();
     };
-  }, [currentUser.id, registerConnection]);
+  }, [currentUser.id, registerConnection, isVideoEnabled]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -455,12 +460,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   // --- CALL LOGIC ---
   const callUser = useCallback(async (targetUserId: string) => {
     if (!peerRef.current) return;
-    const stream = localStream ?? await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    const stream = localStream ?? await navigator.mediaDevices.getUserMedia(
+      isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
+    );
     if (!localStream) setLocalStream(stream);
     const targetPeerId = `connectai-user-${targetUserId}`;
     const call = peerRef.current.call(targetPeerId, stream);
     registerConnection(call, targetUserId);
-  }, [localStream, registerConnection]);
+  }, [localStream, registerConnection, isVideoEnabled]);
 
   const handleTerminate = () => {
     stopScreenShare();

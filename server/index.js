@@ -47,6 +47,7 @@ https.globalAgent.maxSockets = maxSockets;
 
 const app = express();
 app.set('trust proxy', 1);
+const isDevEnv = process.env.NODE_ENV !== 'production';
 
 // --- GLOBAL SECURITY & PERFORMANCE ---
 app.use(helmet()); // Secure HTTP headers
@@ -60,7 +61,7 @@ app.use(cors({
 // --- RATE LIMITING (DDoS Protection) ---
 const limiter = rateLimit({
   windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
-  max: Number(process.env.API_RATE_LIMIT_MAX || 150),
+  max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 2000 : 300)),
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -68,13 +69,13 @@ app.use('/api/', limiter);
 
 const twilioLimiter = rateLimit({
   windowMs: Number(process.env.TWILIO_RATE_LIMIT_WINDOW_MS || 60 * 1000),
-  max: Number(process.env.TWILIO_RATE_LIMIT_MAX || 200),
+  max: Number(process.env.TWILIO_RATE_LIMIT_MAX || (isDevEnv ? 800 : 250)),
   standardHeaders: true,
   legacyHeaders: false,
 });
 const aiLimiter = rateLimit({
   windowMs: Number(process.env.AI_RATE_LIMIT_WINDOW_MS || 60 * 1000),
-  max: Number(process.env.AI_RATE_LIMIT_MAX || 90),
+  max: Number(process.env.AI_RATE_LIMIT_MAX || (isDevEnv ? 240 : 120)),
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -1307,9 +1308,9 @@ app.get('/api/health/deps', async (req, res) => {
     },
     requestMetrics: summarizeLatencies(),
     rateLimits: {
-      api: { windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000), max: Number(process.env.API_RATE_LIMIT_MAX || 150) },
-      twilio: { windowMs: Number(process.env.TWILIO_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.TWILIO_RATE_LIMIT_MAX || 200) },
-      ai: { windowMs: Number(process.env.AI_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.AI_RATE_LIMIT_MAX || 90) },
+      api: { windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000), max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 2000 : 300)) },
+      twilio: { windowMs: Number(process.env.TWILIO_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.TWILIO_RATE_LIMIT_MAX || (isDevEnv ? 800 : 250)) },
+      ai: { windowMs: Number(process.env.AI_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.AI_RATE_LIMIT_MAX || (isDevEnv ? 240 : 120)) },
     },
   });
 });

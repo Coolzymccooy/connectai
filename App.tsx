@@ -190,6 +190,8 @@ const App: React.FC = () => {
   
   const mountedRef = useRef(true);
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const internalPollCooldownRef = useRef(0);
+  const activeCallPollCooldownRef = useRef(0);
 
   const [route, setRoute] = useState(() => ({
     pathname: typeof window !== 'undefined' ? window.location.pathname : '/',
@@ -422,7 +424,7 @@ const App: React.FC = () => {
       }
     };
     sync();
-    const interval = setInterval(sync, 60000);
+    const interval = setInterval(sync, 180000);
     return () => clearInterval(interval);
   }, [currentUser, isFirebaseConfigured]);
 
@@ -435,8 +437,10 @@ const App: React.FC = () => {
     if (!currentUser || isFirebaseConfigured) return;
     let cancelled = false;
     const pullInternalSignals = async () => {
+      if (activeCall && activeCall.status !== CallStatus.ENDED) return;
+      if (Date.now() < internalPollCooldownRef.current) return;
       try {
-        const calls = await fetchCallLogs({ limit: 100 });
+        const calls = await fetchCallLogs({ limit: 25 });
         if (cancelled) return;
         const signal = calls.find((c) => {
           if (c.targetAgentId !== currentUser.id) return false;
@@ -450,17 +454,20 @@ const App: React.FC = () => {
             addNotification('info', `Incoming ${signal.isVideo ? 'video ' : ''}call from ${signal.agentName || signal.customerName || 'teammate'}.`);
           }
         }
-      } catch {
-        // best effort in API mode
+      } catch (err: any) {
+        const msg = String(err?.message || '').toLowerCase();
+        if (msg.includes('429') || msg.includes('too many requests')) {
+          internalPollCooldownRef.current = Date.now() + 45000;
+        }
       }
     };
     pullInternalSignals();
-    const interval = setInterval(pullInternalSignals, 5000);
+    const interval = setInterval(pullInternalSignals, 8000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [currentUser, isFirebaseConfigured, activeCall, persistCall]);
+  }, [currentUser, isFirebaseConfigured, activeCall?.id, activeCall?.status, persistCall]);
 
   const addNotification = (type: Notification['type'], message: string) => {
     const id = Date.now().toString();
@@ -723,7 +730,7 @@ const App: React.FC = () => {
       : undefined;
     const resolvedById = appSettings.team.find((member) => member.id === target.id);
     const resolvedTarget = resolvedByEmail || resolvedById || target;
-    const isVideoCall = (target as any).isVideo !== false;
+    const isVideoCall = Boolean((target as any).isVideo);
     const newCall: Call = {
       id: `int_${Date.now()}`, direction: 'internal', customerName: resolvedTarget.name, phoneNumber: `EXT ${resolvedTarget.extension}`, customerEmail: resolvedTarget.email, customerExtension: resolvedTarget.extension, queue: 'Internal Matrix', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, agentEmail: currentUser?.email, agentExtension: currentUser?.extension, targetAgentId: resolvedTarget.id, isVideo: isVideoCall, participants: [resolvedTarget.id, currentUser!.id], emailSynced: true, transcriptionEnabled: true
     };
@@ -894,8 +901,10 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!activeCall || isFirebaseConfigured) return;
+    if (activeCall.status === CallStatus.ENDED) return;
     let cancelled = false;
     const syncActiveCall = async () => {
+      if (Date.now() < activeCallPollCooldownRef.current) return;
       try {
         const latest = await fetchCallById(activeCall.id);
         if (cancelled || !latest) return;
@@ -908,16 +917,20 @@ const App: React.FC = () => {
           setActiveCall((prev) => (prev?.id === latest.id ? null : prev));
           setAgentStatus(AgentStatus.WRAP_UP);
         }
-      } catch {
-        // ignore polling errors
+      } catch (err: any) {
+        const msg = String(err?.message || '').toLowerCase();
+        if (msg.includes('429') || msg.includes('too many requests')) {
+          activeCallPollCooldownRef.current = Date.now() + 30000;
+        }
       }
     };
-    const interval = setInterval(syncActiveCall, 2500);
+    syncActiveCall();
+    const interval = setInterval(syncActiveCall, 8000);
     return () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [activeCall?.id, isFirebaseConfigured]);
+  }, [activeCall?.id, activeCall?.status, isFirebaseConfigured]);
 
   if (isLanding) return <LandingPage />;
   
@@ -961,7 +974,10 @@ const App: React.FC = () => {
   if (!isAppRoute && !currentUser) return <LandingPage />;
   if (!currentUser) return <LoginScreen onLogin={handleLogin} externalMessage={authNotice} onClearExternalMessage={() => setAuthNotice(null)} />;
 
-  const isMeetingActive = activeCall && (activeCall.status !== CallStatus.ENDED) && (activeCall.direction === 'internal' || activeCall.isVideo || Boolean(activeCall.roomId));
+  const isMeetingActive =
+    Boolean(activeCall) &&
+    activeCall!.status === CallStatus.ACTIVE &&
+    (activeCall!.direction === 'internal' || Boolean(activeCall!.isVideo) || Boolean(activeCall!.roomId));
 
   const acceptIncomingBannerCall = async () => {
     if (!incomingCallBanner) return;
