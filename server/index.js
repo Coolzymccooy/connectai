@@ -361,7 +361,7 @@ const normalizeSettingsShape = (input = {}) => {
   };
   const fallbackDesktopRelease = {
     latestVersion: '0.0.0-beta',
-    windowsDownloadUrl: 'https://github.com/Coolzymccooy/connectai/releases/latest/download/ConnectAI-Desktop-windows-x64.msi',
+    windowsDownloadUrl: '/downloads/ConnectAI-Desktop-windows-x64-setup.exe',
     releaseNotesUrl: 'https://github.com/Coolzymccooy/connectai/blob/master/CHANGELOG.md',
     releasesPageUrl: 'https://github.com/Coolzymccooy/connectai/releases',
     publishedAt: new Date('2026-02-14T00:00:00.000Z').toISOString(),
@@ -436,6 +436,25 @@ const normalizeSettingsShape = (input = {}) => {
       },
     },
   };
+};
+
+const resolveDesktopDownloadUrl = (rawUrl, releasesUrl) => {
+  const fallback = releasesUrl || 'https://github.com/Coolzymccooy/connectai/releases';
+  const candidate = String(rawUrl || '').trim();
+  if (!candidate) return fallback;
+  if (candidate.startsWith('/')) return candidate;
+  try {
+    const parsed = new URL(candidate);
+    const isGitHub = parsed.hostname.toLowerCase().includes('github.com');
+    const marker = '/releases/latest/download/';
+    if (isGitHub && parsed.pathname.includes(marker)) {
+      const repoRoot = parsed.pathname.split(marker)[0];
+      return `${parsed.origin}${repoRoot}/releases/latest`;
+    }
+    return candidate;
+  } catch {
+    return fallback;
+  }
 };
 
 const getSettingsForTenant = async (tenantId) => {
@@ -1818,7 +1837,7 @@ const getPublicDesktopReleaseFallback = () => {
         windows: {
           label: 'Windows x64',
           fileName: 'ConnectAI-Desktop-windows-x64.msi',
-          url: 'https://github.com/Coolzymccooy/connectai/releases/latest/download/ConnectAI-Desktop-windows-x64.msi',
+          url: 'https://github.com/Coolzymccooy/connectai/releases/latest',
           size: 'Coming soon',
         },
       },
@@ -1831,18 +1850,23 @@ app.get('/api/public/desktop-release', async (_req, res) => {
     const fallback = getPublicDesktopReleaseFallback();
     const settings = await getSettingsForTenant(DEFAULT_TENANT_ID).catch(() => null);
     const desktop = settings?.desktopRelease || {};
+    const releasesUrl = desktop.releasesPageUrl || fallback.releasesUrl;
+    const downloadUrl = resolveDesktopDownloadUrl(
+      desktop.windowsDownloadUrl || fallback.downloads?.windows?.url || '',
+      releasesUrl
+    );
     res.json({
       ...fallback,
       latestVersion: desktop.latestVersion || fallback.latestVersion,
       publishedAt: desktop.publishedAt || fallback.publishedAt,
       unsigned: desktop.unsignedBeta ?? fallback.unsigned,
-      releasesUrl: desktop.releasesPageUrl || fallback.releasesUrl,
+      releasesUrl,
       notesUrl: desktop.releaseNotesUrl || fallback.notesUrl,
       downloads: {
         windows: {
           label: 'Windows x64',
           fileName: desktop.fileName || fallback.downloads?.windows?.fileName || 'ConnectAI-Desktop-windows-x64.msi',
-          url: desktop.windowsDownloadUrl || fallback.downloads?.windows?.url || '',
+          url: downloadUrl,
           size: desktop.fileSizeLabel || fallback.downloads?.windows?.size || 'N/A',
         },
       },

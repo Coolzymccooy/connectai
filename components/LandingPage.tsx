@@ -59,11 +59,30 @@ export const LandingPage: React.FC = () => {
   };
 
   const desktopDownload = desktopRelease?.downloads?.windows;
+  const resolveDesktopDownloadUrl = (rawUrl?: string, fallbackUrl?: string) => {
+    const fallback = fallbackUrl || 'https://github.com/Coolzymccooy/connectai/releases';
+    const candidate = (rawUrl || '').trim();
+    if (!candidate) return fallback;
+    if (candidate.startsWith('/')) return candidate;
+    try {
+      const parsed = new URL(candidate);
+      const isGitHub = parsed.hostname.toLowerCase().includes('github.com');
+      const marker = '/releases/latest/download/';
+      if (isGitHub && parsed.pathname.includes(marker)) {
+        const repoRoot = parsed.pathname.split(marker)[0];
+        return `${parsed.origin}${repoRoot}/releases/latest`;
+      }
+      return candidate;
+    } catch {
+      return fallback;
+    }
+  };
   const hasDownloadUrl = Boolean(desktopDownload?.url);
   const desktopVersion = desktopRelease?.latestVersion || 'N/A';
   const desktopDate = desktopRelease?.publishedAt ? new Date(desktopRelease.publishedAt).toLocaleDateString() : 'N/A';
   const releasesUrl = desktopRelease?.releasesUrl || 'https://github.com/Coolzymccooy/connectai/releases';
   const notesUrl = desktopRelease?.notesUrl || 'https://github.com/Coolzymccooy/connectai/blob/master/CHANGELOG.md';
+  const resolvedDesktopDownloadUrl = resolveDesktopDownloadUrl(desktopDownload?.url, releasesUrl);
 
   return (
     <div className="landing-page h-screen min-h-screen overflow-y-auto bg-slate-950 text-slate-900">
@@ -198,7 +217,7 @@ export const LandingPage: React.FC = () => {
                   <div className="mt-6 flex flex-wrap gap-3">
                     {hasDownloadUrl ? (
                       <a
-                        href={desktopDownload.url}
+                        href={resolvedDesktopDownloadUrl}
                         className="inline-flex items-center gap-2 rounded-full bg-cyan-300 px-5 py-2.5 text-sm font-semibold text-slate-900 transition hover:bg-cyan-200"
                       >
                         <Download size={15} />

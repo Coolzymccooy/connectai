@@ -30,7 +30,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   desktopRelease: {
     latestVersion: '0.0.0-beta',
-    windowsDownloadUrl: 'https://github.com/Coolzymccooy/connectai/releases/latest/download/ConnectAI-Desktop-windows-x64.msi',
+    windowsDownloadUrl: '/downloads/ConnectAI-Desktop-windows-x64-setup.exe',
     releaseNotesUrl: 'https://github.com/Coolzymccooy/connectai/blob/master/CHANGELOG.md',
     releasesPageUrl: 'https://github.com/Coolzymccooy/connectai/releases',
     publishedAt: new Date('2026-02-14T00:00:00.000Z').toISOString(),

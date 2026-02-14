@@ -10,7 +10,7 @@
     "windows": {
       "label": "Windows x64",
       "fileName": "ConnectAI-Desktop-windows-x64.msi",
-      "url": "https://github.com/Coolzymccooy/connectai/releases/latest/download/ConnectAI-Desktop-windows-x64.msi",
+      "url": "/downloads/ConnectAI-Desktop-windows-x64-setup.exe",
       "size": "Coming soon"
     }
   }
