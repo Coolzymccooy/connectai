@@ -36,6 +36,8 @@ const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean
         if (videoEl) {
           videoEl.srcObject = stream;
           videoEl.muted = Boolean(isLocal);
+          videoEl.autoplay = true;
+          videoEl.playsInline = true;
           setNeedsAudioTap(false);
           try {
             await videoEl.play();
@@ -43,18 +45,26 @@ const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean
             if (!isLocal) {
               // Browsers can block autoplay-with-audio. Keep rendering, then request user tap to unmute.
               videoEl.muted = true;
-              await videoEl.play();
+              try {
+                await videoEl.play();
+              } catch {
+                // keep rendering fallback
+              }
               if (active) setNeedsAudioTap(true);
             } else {
               videoEl.muted = true;
-              await videoEl.play();
+              try {
+                await videoEl.play();
+              } catch {
+                // keep rendering fallback
+              }
             }
           }
           if (active) setStatus('admitted');
         }
       } catch (err) {
         console.warn("Media Playback Blocked by Browser:", err);
-        if (active) setStatus('error');
+        if (active) setStatus(stream ? 'admitted' : 'error');
       }
     };
 
@@ -134,6 +144,8 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
 }) => {
   const isVideoEnabled = activeCall.isVideo !== false;
   const [viewMode, setViewMode] = useState<'gallery' | 'speaker' | 'large-gallery'>('gallery');
+  const [participantRailDock, setParticipantRailDock] = useState<'top' | 'right' | 'left'>('right');
+  const [focusedParticipantId, setFocusedParticipantId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<SidebarTab>('intelligence');
   const [showSidebar, setShowSidebar] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
@@ -144,6 +156,10 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [copyFeedback, setCopyFeedback] = useState(false);
   const [showReactions, setShowReactions] = useState(false);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [reconnectRunning, setReconnectRunning] = useState(false);
+  const [reconnectNote, setReconnectNote] = useState('');
+  const [mediaError, setMediaError] = useState<string | null>(null);
   const [flyingEmojis, setFlyingEmojis] = useState<{id: number, emoji: string, left: number}[]>([]);
   
   // Device Management
@@ -173,6 +189,8 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [peerId, setPeerId] = useState<string>('');
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const dialingPeersRef = useRef<Set<string>>(new Set());
+  const screenShareAttemptingRef = useRef(false);
+  const screenSharePromptCooldownRef = useRef(0);
   
   // Feature States
   const [intelligence, setIntelligence] = useState<{ text: string, links: {title: string, uri: string}[] } | null>(null);
@@ -181,22 +199,49 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [chatInput, setChatInput] = useState('');
   const [messages, setMessages] = useState<MeetingMessage[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaDevicesRef = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+
+  const getUserMediaSafe = useCallback(async (constraints: MediaStreamConstraints) => {
+    const fn = mediaDevicesRef?.getUserMedia?.bind(mediaDevicesRef);
+    if (!fn) {
+      const msg = 'Media devices unavailable. Use HTTPS or localhost and allow camera/mic permissions.';
+      setMediaError(msg);
+      throw new Error(msg);
+    }
+    setMediaError(null);
+    return fn(constraints);
+  }, [mediaDevicesRef]);
+
+  const getDisplayMediaSafe = useCallback(async (constraints: DisplayMediaStreamOptions) => {
+    const fn = (mediaDevicesRef as any)?.getDisplayMedia?.bind(mediaDevicesRef);
+    if (!fn) {
+      const msg = 'Screen share unavailable on this origin. Use HTTPS or localhost.';
+      setMediaError(msg);
+      throw new Error(msg);
+    }
+    setMediaError(null);
+    return fn(constraints);
+  }, [mediaDevicesRef]);
 
   // --- DEVICE DISCOVERY ---
   useEffect(() => {
     const fetchDevices = async () => {
       try {
-        const devices = await navigator.mediaDevices.enumerateDevices();
+        const enumerateFn = mediaDevicesRef?.enumerateDevices?.bind(mediaDevicesRef);
+        if (!enumerateFn) return;
+        const devices = await enumerateFn();
         setVideoDevices(devices.filter(d => d.kind === 'videoinput'));
         setAudioDevices(devices.filter(d => d.kind === 'audioinput'));
       } catch (e) {
         console.warn("Device enumeration failed", e);
+        setMediaError('Device access failed. Check browser permissions and secure origin.');
       }
     };
     fetchDevices();
-    navigator.mediaDevices.addEventListener('devicechange', fetchDevices);
-    return () => navigator.mediaDevices.removeEventListener('devicechange', fetchDevices);
-  }, []);
+    if (!mediaDevicesRef?.addEventListener || !mediaDevicesRef?.removeEventListener) return;
+    mediaDevicesRef.addEventListener('devicechange', fetchDevices);
+    return () => mediaDevicesRef.removeEventListener('devicechange', fetchDevices);
+  }, [mediaDevicesRef]);
 
   useEffect(() => {
     if (!isFirebaseConfigured) return;
@@ -211,7 +256,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     const constraints: MediaStreamConstraints = isVideoEnabled
       ? { video: true, audio: true }
       : { video: false, audio: true };
-    navigator.mediaDevices.getUserMedia(constraints)
+    getUserMediaSafe(constraints)
       .then((stream) => {
         if (cancelled) {
           stream.getTracks().forEach((track) => track.stop());
@@ -224,15 +269,17 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       })
       .catch((err) => {
         console.warn('Local media bootstrap failed:', err);
+        setMediaError(String((err as any)?.message || 'Failed to start camera/microphone.'));
       });
     return () => {
       cancelled = true;
     };
-  }, [activeCall.id, isVideoEnabled, localStream, isMuted]);
+  }, [activeCall.id, isVideoEnabled, localStream, isMuted, getUserMediaSafe]);
 
   const registerConnection = useCallback((call: MediaConnection, remoteUserId: string) => {
     connectionsRef.current.set(remoteUserId, call);
     call.on('stream', (remoteStream) => {
+      dialingPeersRef.current.delete(remoteUserId);
       remoteStream.getAudioTracks().forEach((track) => {
         track.enabled = true;
       });
@@ -271,7 +318,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     peer.on('call', async (call) => {
       try {
         const existing = localStreamRef.current;
-        const stream = existing ?? await navigator.mediaDevices.getUserMedia(
+        const stream = existing ?? await getUserMediaSafe(
           isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
         );
         stream.getAudioTracks().forEach((track) => {
@@ -282,6 +329,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         registerConnection(call, call.peer.replace('connectai-user-', ''));
       } catch (err) {
         console.error('Failed to get local stream', err);
+        setMediaError(String((err as any)?.message || 'Failed to access local media.'));
       }
     });
 
@@ -292,7 +340,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       connectionsRef.current.clear();
       peer.destroy();
     };
-  }, [currentUser.id, registerConnection, isVideoEnabled, isMuted]);
+  }, [currentUser.id, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -374,7 +422,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         } 
       };
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const stream = await getUserMediaSafe(constraints);
       setLocalStream(stream);
       
       const videoTrack = stream.getVideoTracks()[0];
@@ -395,7 +443,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     } catch (err) {
       console.error("Hardware Session Rejected:", err);
     }
-  }, [isMuted, isVideoEnabled, localStream]);
+  }, [isMuted, isVideoEnabled, localStream, getUserMediaSafe]);
 
   // --- ROBUST SCREEN SHARE ---
   const replaceOutgoingVideoTrack = useCallback((track: MediaStreamTrack | null) => {
@@ -415,15 +463,20 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     const cameraTrack = localStream?.getVideoTracks()[0] || null;
     if (cameraTrack) replaceOutgoingVideoTrack(cameraTrack);
     
-    if (activeCall.isScreenSharing && onToggleMedia) {
+    if (activeCall.isScreenSharing && activeCall.screenShareOwnerId === currentUser.id && onToggleMedia) {
         onToggleMedia('screen');
     }
-  }, [screenStream, localStream, replaceOutgoingVideoTrack, activeCall.isScreenSharing, onToggleMedia]);
+  }, [screenStream, localStream, replaceOutgoingVideoTrack, activeCall.isScreenSharing, activeCall.screenShareOwnerId, currentUser.id, onToggleMedia]);
 
   const startScreenShare = useCallback(async () => {
     try {
+      const now = Date.now();
+      if (activeCall.screenShareOwnerId && activeCall.screenShareOwnerId !== currentUser.id) return;
+      if (screenShareAttemptingRef.current) return;
+      if (now < screenSharePromptCooldownRef.current) return;
       if (screenStream) return;
-      const stream = await navigator.mediaDevices.getDisplayMedia({ 
+      screenShareAttemptingRef.current = true;
+      const stream = await getDisplayMediaSafe({ 
           video: { displaySurface: 'monitor' }, 
           audio: true 
       });
@@ -437,16 +490,24 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       
     } catch (err) {
       console.error('Screen share rejected:', err);
+      // Avoid re-prompt loops when user cancels browser picker.
+      screenSharePromptCooldownRef.current = Date.now() + 4000;
+      if (activeCall.isScreenSharing && activeCall.screenShareOwnerId === currentUser.id) {
+        onToggleMedia('screen');
+      }
+    } finally {
+      screenShareAttemptingRef.current = false;
     }
-  }, [replaceOutgoingVideoTrack, stopScreenShare, activeCall.isScreenSharing]);
+  }, [replaceOutgoingVideoTrack, stopScreenShare, activeCall.isScreenSharing, activeCall.screenShareOwnerId, onToggleMedia, screenStream, currentUser.id, getDisplayMediaSafe]);
 
   useEffect(() => {
-    if (activeCall.isScreenSharing && !screenStream) {
+    const isLocalShareOwner = activeCall.screenShareOwnerId === currentUser.id;
+    if (activeCall.isScreenSharing && isLocalShareOwner && !screenStream) {
       startScreenShare();
-    } else if (!activeCall.isScreenSharing && screenStream) {
+    } else if ((!activeCall.isScreenSharing || !isLocalShareOwner) && screenStream) {
       stopScreenShare();
     }
-  }, [activeCall.isScreenSharing, startScreenShare, stopScreenShare, screenStream]);
+  }, [activeCall.isScreenSharing, activeCall.screenShareOwnerId, currentUser.id, startScreenShare, stopScreenShare, screenStream]);
 
   // --- REACTIONS ---
   const triggerReaction = (emoji: string) => {
@@ -472,6 +533,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     if (localStream) {
       localStream.getAudioTracks().forEach(t => t.enabled = !nextMuted);
     }
+    setMediaError(null);
   };
 
   const handleSendMessage = (text: string = chatInput, files: Attachment[] = []) => {
@@ -498,10 +560,33 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     return `${h > 0 ? h + ':' : ''}${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
+  const meetingShareLink = useMemo(() => {
+    if (typeof window === 'undefined') return `/#/app?room=${encodeURIComponent(roomId)}`;
+    return `${window.location.origin}/#/app?room=${encodeURIComponent(roomId)}`;
+  }, [roomId]);
+
+  const handleCopyMeetingLink = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(meetingShareLink);
+      setCopyFeedback(true);
+      setTimeout(() => setCopyFeedback(false), 1600);
+    } catch {
+      // noop
+    }
+  }, [meetingShareLink]);
+
+  const handlePopOutMeeting = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    window.open(meetingShareLink, '_blank', 'noopener,noreferrer');
+  }, [meetingShareLink]);
+
   // --- CALL LOGIC ---
   const callUser = useCallback(async (targetUserId: string) => {
     if (!peerRef.current) return;
-    const stream = localStream ?? await navigator.mediaDevices.getUserMedia(
+    if (connectionsRef.current.has(targetUserId)) return;
+    if (dialingPeersRef.current.has(targetUserId)) return;
+    dialingPeersRef.current.add(targetUserId);
+    const stream = localStream ?? await getUserMediaSafe(
       isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
     );
     stream.getAudioTracks().forEach((track) => {
@@ -510,8 +595,20 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     if (!localStream) setLocalStream(stream);
     const targetPeerId = `connectai-user-${targetUserId}`;
     const call = peerRef.current.call(targetPeerId, stream);
+    const dialTimeout = window.setTimeout(() => {
+      dialingPeersRef.current.delete(targetUserId);
+    }, 8000);
+    call.on('stream', () => {
+      window.clearTimeout(dialTimeout);
+    });
+    call.on('close', () => {
+      window.clearTimeout(dialTimeout);
+    });
+    call.on('error', () => {
+      window.clearTimeout(dialTimeout);
+    });
     registerConnection(call, targetUserId);
-  }, [localStream, registerConnection, isVideoEnabled, isMuted]);
+  }, [localStream, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe]);
 
   const bindRemoteAudioEl = useCallback((userId: string, element: HTMLAudioElement | null) => {
     if (!element) {
@@ -573,6 +670,19 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     setNeedsRemoteAudioUnlock(blocked);
   }, []);
 
+  useEffect(() => {
+    if (!remoteStreams.size) return;
+    const unlock = () => {
+      unlockRemoteAudio().catch(() => {});
+    };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock);
+      window.removeEventListener('keydown', unlock);
+    };
+  }, [remoteStreams.size, unlockRemoteAudio]);
+
   const handleTerminate = () => {
     stopScreenShare();
     connectionsRef.current.forEach(c => c.close());
@@ -591,10 +701,109 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     return base;
   }, [team, currentUser]);
   
-  const participants = useMemo(() => 
-    roster.filter(t => activeCall.participants?.includes(t.id) || t.id === currentUser.id),
-  [roster, activeCall.participants, currentUser.id]);
+  const safeParticipantIds = useMemo(
+    () => (Array.isArray(activeCall.participants) ? activeCall.participants : [currentUser.id]),
+    [activeCall.participants, currentUser.id]
+  );
+  const participants = useMemo(
+    () => roster.filter((t) => safeParticipantIds.includes(t.id) || t.id === currentUser.id),
+    [roster, safeParticipantIds, currentUser.id]
+  );
   const isMeetingSession = Boolean(activeCall.roomId || (activeCall.direction === 'internal' && activeCall.isVideo));
+  const isPresentationMode = Boolean(activeCall.isScreenSharing);
+  const hostId = activeCall.hostId || activeCall.agentId || participants[0]?.id || currentUser.id;
+  const isHost = hostId === currentUser.id;
+  const waitingRoom = useMemo(
+    () => (Array.isArray(activeCall.waitingRoom) ? activeCall.waitingRoom : []),
+    [activeCall.waitingRoom]
+  );
+  const expectedRemoteIds = useMemo(
+    () => participants.filter((p) => p.id !== currentUser.id).map((p) => p.id),
+    [participants, currentUser.id]
+  );
+  const focusedParticipant = useMemo(() => {
+    if (!participants.length) return null;
+    if (focusedParticipantId) {
+      const existing = participants.find((p) => p.id === focusedParticipantId);
+      if (existing) return existing;
+    }
+    return participants.find((p) => p.id !== currentUser.id) || participants[0] || null;
+  }, [participants, focusedParticipantId, currentUser.id]);
+
+  const updateMeetingControls = useCallback((patch: Partial<Call>) => {
+    if (!onUpdateCall) return;
+    onUpdateCall({
+      ...activeCall,
+      hostId,
+      ...patch,
+    });
+  }, [onUpdateCall, activeCall, hostId]);
+
+  const handleToggleLobby = useCallback(() => {
+    if (!isHost) return;
+    updateMeetingControls({ lobbyEnabled: !activeCall.lobbyEnabled });
+  }, [isHost, updateMeetingControls, activeCall.lobbyEnabled]);
+
+  const handleToggleMeetingLock = useCallback(() => {
+    if (!isHost) return;
+    updateMeetingControls({ meetingLocked: !activeCall.meetingLocked });
+  }, [isHost, updateMeetingControls, activeCall.meetingLocked]);
+
+  const admitOneFromLobby = useCallback((userId: string) => {
+    if (!isHost) return;
+    const nextParticipants = Array.from(new Set([...(Array.isArray(activeCall.participants) ? activeCall.participants : []), userId]));
+    const nextWaiting = (activeCall.waitingRoom || []).filter((id) => id !== userId);
+    updateMeetingControls({ participants: nextParticipants, waitingRoom: nextWaiting });
+  }, [isHost, activeCall.participants, activeCall.waitingRoom, updateMeetingControls]);
+
+  const admitAllFromLobby = useCallback(() => {
+    if (!isHost || !waitingRoom.length) return;
+    const nextParticipants = Array.from(new Set([...(Array.isArray(activeCall.participants) ? activeCall.participants : []), ...waitingRoom]));
+    updateMeetingControls({ participants: nextParticipants, waitingRoom: [] });
+  }, [isHost, waitingRoom, activeCall.participants, updateMeetingControls]);
+
+  const reconnectDiagnostics = useMemo(() => {
+    const connectedRemoteIds = new Set(remoteStreams.keys());
+    const missing = expectedRemoteIds.filter((id) => !connectedRemoteIds.has(id));
+    const localAudioTracks = localStream?.getAudioTracks().length || 0;
+    const localVideoTracks = localStream?.getVideoTracks().length || 0;
+    return {
+      peerReady: Boolean(peerRef.current && !peerRef.current.destroyed),
+      expected: expectedRemoteIds.length,
+      connected: connectedRemoteIds.size,
+      missing,
+      localAudioTracks,
+      localVideoTracks,
+      needsRemoteAudioUnlock,
+    };
+  }, [remoteStreams, expectedRemoteIds, localStream, needsRemoteAudioUnlock]);
+
+  const runReconnectSweep = useCallback(async () => {
+    if (reconnectRunning) return;
+    setReconnectRunning(true);
+    setReconnectNote('Running reconnect sweep...');
+    try {
+      const reconnectTargets = expectedRemoteIds.filter((id) => !remoteStreams.has(id));
+      reconnectTargets.forEach((id) => {
+        const existing = connectionsRef.current.get(id);
+        if (existing) {
+          try { existing.close(); } catch {}
+          connectionsRef.current.delete(id);
+        }
+      });
+      for (const target of reconnectTargets) {
+        await callUser(target).catch(() => {});
+      }
+      if (!reconnectTargets.length) {
+        setReconnectNote('No missing peers detected. Media state looks healthy.');
+      } else {
+        setReconnectNote(`Reconnect attempted for ${reconnectTargets.length} participant(s).`);
+      }
+    } finally {
+      setReconnectRunning(false);
+      setTimeout(() => setReconnectNote(''), 2800);
+    }
+  }, [reconnectRunning, expectedRemoteIds, remoteStreams, callUser]);
 
   useEffect(() => {
     if (!peerId) return;
@@ -604,12 +813,25 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         if (remoteStreams.has(p.id)) return;
         if (connectionsRef.current.has(p.id)) return;
         if (dialingPeersRef.current.has(p.id)) return;
-        dialingPeersRef.current.add(p.id);
         callUser(p.id).catch(() => {
           dialingPeersRef.current.delete(p.id);
         });
       });
   }, [participants, currentUser.id, peerId, remoteStreams, callUser]);
+
+  useEffect(() => {
+    if (!peerId) return;
+    if (activeCall.status !== CallStatus.ACTIVE) return;
+    const interval = window.setInterval(() => {
+      expectedRemoteIds.forEach((id) => {
+        if (remoteStreams.has(id)) return;
+        const existing = connectionsRef.current.get(id);
+        if (existing) return;
+        callUser(id).catch(() => {});
+      });
+    }, 2500);
+    return () => window.clearInterval(interval);
+  }, [peerId, activeCall.status, expectedRemoteIds, remoteStreams, callUser]);
 
   return (
     <div className="fixed inset-0 z-[100] bg-[#111] flex flex-col overflow-hidden text-white font-sans selection:bg-brand-500/30">
@@ -629,6 +851,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
               Enable Audio
             </button>
           )}
+          {mediaError && (
+            <div className="ml-3 px-3 py-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 text-[10px] font-black tracking-wide text-rose-200 max-w-[420px] truncate" title={mediaError}>
+              {mediaError}
+            </div>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -642,7 +869,44 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
            <button onClick={() => setShowSidebar(!showSidebar)} className={`p-2 rounded-md hover:bg-[#333] transition-colors ${showSidebar ? 'bg-[#4f46e5] text-white' : 'text-gray-400'}`}>
              <Users size={18}/>
            </button>
+           {isPresentationMode && (
+             <>
+               <div className="h-6 w-[1px] bg-[#333] mx-1"></div>
+               <button onClick={() => setParticipantRailDock('top')} className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${participantRailDock === 'top' ? 'bg-indigo-600 text-white' : 'bg-[#2b2b2b] text-gray-300 hover:bg-[#3a3a3a]'}`}>Top</button>
+               <button onClick={() => setParticipantRailDock('left')} className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${participantRailDock === 'left' ? 'bg-indigo-600 text-white' : 'bg-[#2b2b2b] text-gray-300 hover:bg-[#3a3a3a]'}`}>Left</button>
+               <button onClick={() => setParticipantRailDock('right')} className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${participantRailDock === 'right' ? 'bg-indigo-600 text-white' : 'bg-[#2b2b2b] text-gray-300 hover:bg-[#3a3a3a]'}`}>Right</button>
+             </>
+           )}
         </div>
+      </div>
+      <div className="h-12 bg-[#171717] border-b border-[#2c2c2c] flex items-center gap-2 px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 overflow-x-auto scrollbar-hide">
+        <button onClick={() => setRaisedHand((v) => !v)} className={`px-3 py-1.5 rounded-md border ${raisedHand ? 'bg-amber-500/20 border-amber-400/40 text-amber-200' : 'bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]'}`}>Take Control</button>
+        <button onClick={handlePopOutMeeting} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">Pop Out</button>
+        <button onClick={() => setActiveTab('chat')} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">Chat</button>
+        <button onClick={() => { setActiveTab('participants'); setShowSidebar(true); }} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">People</button>
+        <button onClick={() => setShowReactions((v) => !v)} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">React</button>
+        <button onClick={() => setViewMode((v) => (v === 'gallery' ? 'speaker' : 'gallery'))} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">View</button>
+        <button onClick={() => setShowSettings(true)} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">Camera</button>
+        <button onClick={toggleMute} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">Mic</button>
+        <button onClick={handleCopyMeetingLink} className="px-3 py-1.5 rounded-md border bg-indigo-600 border-indigo-500 hover:bg-indigo-500 text-white">Share Link</button>
+        <button onClick={() => setShowDiagnostics((v) => !v)} className={`px-3 py-1.5 rounded-md border ${showDiagnostics ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]'}`}>Reconnect</button>
+        {isHost && (
+          <>
+            <button onClick={handleToggleLobby} className={`px-3 py-1.5 rounded-md border ${activeCall.lobbyEnabled ? 'bg-amber-600/20 border-amber-400/40 text-amber-200' : 'bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]'}`}>
+              {activeCall.lobbyEnabled ? 'Lobby On' : 'Lobby Off'}
+            </button>
+            <button onClick={handleToggleMeetingLock} className={`px-3 py-1.5 rounded-md border ${activeCall.meetingLocked ? 'bg-rose-600/20 border-rose-400/40 text-rose-200' : 'bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]'}`}>
+              {activeCall.meetingLocked ? 'Meeting Locked' : 'Lock Meeting'}
+            </button>
+            {waitingRoom.length > 0 && (
+              <button onClick={admitAllFromLobby} className="px-3 py-1.5 rounded-md border bg-emerald-600 border-emerald-500 hover:bg-emerald-500 text-white">
+                Admit {waitingRoom.length}
+              </button>
+            )}
+          </>
+        )}
+        <span className={`text-[9px] ${copyFeedback ? 'text-emerald-300' : 'text-slate-500'}`}>{copyFeedback ? 'Link Copied' : 'Invite participants with link'}</span>
+        {reconnectNote && <span className="text-[9px] text-emerald-300">{reconnectNote}</span>}
       </div>
 
       {/* 2. Main Stage */}
@@ -652,9 +916,37 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         {activeCall.isScreenSharing && (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-red-600/90 backdrop-blur-md px-6 py-2 rounded-full flex items-center gap-3 shadow-2xl border border-red-400/30">
                 <Monitor size={16} className="animate-pulse"/>
-                <span className="text-xs font-bold uppercase tracking-wider">You are presenting</span>
-                <button onClick={stopScreenShare} className="bg-white text-red-600 px-3 py-1 rounded-full text-[10px] font-black hover:bg-gray-100 transition-colors">STOP</button>
+                <span className="text-xs font-bold uppercase tracking-wider">
+                  {activeCall.screenShareOwnerId === currentUser.id ? 'You are presenting' : 'Screen share live'}
+                </span>
+                {activeCall.screenShareOwnerId === currentUser.id && (
+                  <button onClick={stopScreenShare} className="bg-white text-red-600 px-3 py-1 rounded-full text-[10px] font-black hover:bg-gray-100 transition-colors">STOP</button>
+                )}
             </div>
+        )}
+
+        {showDiagnostics && (
+          <div className="absolute top-4 right-4 z-40 w-[300px] rounded-xl border border-emerald-400/30 bg-black/75 backdrop-blur-md p-3">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Reconnect Diagnostics</p>
+              <button
+                onClick={runReconnectSweep}
+                disabled={reconnectRunning}
+                className="px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60"
+              >
+                {reconnectRunning ? 'Running...' : 'Run Sweep'}
+              </button>
+            </div>
+            <div className="space-y-1 text-[10px] text-slate-200">
+              <p>Peer: {reconnectDiagnostics.peerReady ? 'Ready' : 'Not Ready'}</p>
+              <p>Remote Connected: {reconnectDiagnostics.connected}/{reconnectDiagnostics.expected}</p>
+              <p>Local Tracks: audio {reconnectDiagnostics.localAudioTracks} / video {reconnectDiagnostics.localVideoTracks}</p>
+              <p>Audio Unlock: {reconnectDiagnostics.needsRemoteAudioUnlock ? 'Required' : 'OK'}</p>
+              {reconnectDiagnostics.missing.length > 0 && (
+                <p className="text-amber-300">Missing: {reconnectDiagnostics.missing.join(', ')}</p>
+              )}
+            </div>
+          </div>
         )}
 
         {/* Flying Reactions Layer */}
@@ -667,42 +959,96 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         </div>
 
         <div className={`flex-1 p-4 transition-all duration-300 flex items-center justify-center ${showSidebar ? 'mr-[320px]' : ''}`}>
-          <div className={`grid gap-3 w-full h-full max-h-full transition-all duration-500
-             ${participants.length === 1 ? 'grid-cols-1' : ''}
-             ${participants.length === 2 ? 'grid-cols-1 md:grid-cols-2' : ''}
-             ${participants.length >= 3 && participants.length <= 4 ? 'grid-cols-2' : ''}
-             ${participants.length > 4 ? 'grid-cols-2 md:grid-cols-3' : ''}
-          `}>
-             {participants.map(p => {
-                 const isLocal = p.id === currentUser.id;
-                 const stream = isLocal ? activeVideoStream : remoteStreams.get(p.id);
-                 
-                 return (
-                    <div key={p.id} className="relative bg-[#1a1a1a] rounded-xl overflow-hidden border border-[#333] shadow-lg group">
+          {isPresentationMode ? (
+            <div className={`w-full h-full grid gap-3 ${participantRailDock === 'top' ? 'grid-rows-[120px_1fr]' : participantRailDock === 'left' ? 'grid-cols-[220px_1fr]' : 'grid-cols-[1fr_220px]'}`}>
+              <div className={`rounded-xl border border-[#333] bg-[#0d1117] overflow-hidden ${participantRailDock === 'right' ? 'order-2' : participantRailDock === 'left' ? 'order-1' : 'order-1'}`}>
+                <div className={`${participantRailDock === 'top' ? 'h-full flex overflow-x-auto gap-2 p-2' : 'h-full overflow-y-auto p-2 space-y-2'}`}>
+                  {participants.map((p) => {
+                    const isLocal = p.id === currentUser.id;
+                    const stream = isLocal ? activeVideoStream : remoteStreams.get(p.id);
+                    return (
+                      <button
+                        key={`rail-${p.id}`}
+                        onClick={() => setFocusedParticipantId(p.id)}
+                        className={`${participantRailDock === 'top' ? 'min-w-[160px] w-[160px]' : 'w-full h-[104px]'} rounded-lg overflow-hidden border ${focusedParticipant?.id === p.id ? 'border-indigo-500' : 'border-[#2b313c]'} bg-[#111827] relative`}
+                        title={`Focus ${p.name}`}
+                      >
                         {stream || (isLocal && activeCall.isVideo) ? (
-                            <NeuralVideoSlot 
-                                stream={stream || null} 
-                                mirrored={isLocal && !activeCall.isScreenSharing && mirrorVideo} 
-                                effect={isLocal ? backgroundEffect : 'none'}
-                                isLocal={isLocal}
-                                label={p.name}
-                                isMuted={isLocal ? isMuted : false} 
-                            />
+                          <NeuralVideoSlot
+                            stream={stream || null}
+                            mirrored={isLocal && !activeCall.isScreenSharing && mirrorVideo}
+                            effect="none"
+                            isLocal={isLocal}
+                            label={p.name}
+                            isMuted={isLocal ? isMuted : false}
+                          />
                         ) : (
-                            <div className="w-full h-full flex flex-col items-center justify-center gap-4">
-                                <div className="w-20 h-20 rounded-full bg-indigo-600 flex items-center justify-center text-2xl font-bold text-white shadow-xl">
-                                    {p.name.charAt(0)}
-                                </div>
-                                <p className="text-sm font-medium text-gray-400">{p.name} {isLocal && '(You)'}</p>
-                            </div>
+                          <div className="w-full h-full flex flex-col items-center justify-center gap-2">
+                            <div className="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-bold text-white">{p.name.charAt(0)}</div>
+                            <p className="text-[10px] text-gray-300">{p.name}</p>
+                          </div>
                         )}
-                        <div className="absolute top-3 right-3 flex gap-2">
-                            {isLocal && isMuted && <div className="p-1.5 bg-black/60 rounded-md backdrop-blur-sm"><MicOff size={14} className="text-red-500"/></div>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className={`relative rounded-xl border border-[#333] overflow-hidden bg-[#070b13] ${participantRailDock === 'right' ? 'order-1' : participantRailDock === 'left' ? 'order-2' : 'order-2'}`}>
+                {(screenStream || activeVideoStream) ? (
+                  <NeuralVideoSlot
+                    stream={screenStream || activeVideoStream}
+                    mirrored={false}
+                    effect="none"
+                    isLocal={Boolean(screenStream)}
+                    label={screenStream ? `${currentUser.name} (Presenting)` : (focusedParticipant?.name || currentUser.name)}
+                    isMuted={screenStream ? isMuted : Boolean(focusedParticipant?.id === currentUser.id ? isMuted : false)}
+                  />
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center gap-3">
+                    <Monitor size={38} className="text-slate-500" />
+                    <p className="text-xs uppercase tracking-widest text-slate-400 font-black">Presentation Starting...</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className={`grid gap-3 w-full h-full max-h-full transition-all duration-500
+               ${participants.length === 1 ? 'grid-cols-1' : ''}
+               ${participants.length === 2 ? 'grid-cols-1 md:grid-cols-2' : ''}
+               ${participants.length >= 3 && participants.length <= 4 ? 'grid-cols-2' : ''}
+               ${participants.length > 4 ? 'grid-cols-2 md:grid-cols-3' : ''}
+            `}>
+              {participants.map(p => {
+                const isLocal = p.id === currentUser.id;
+                const stream = isLocal ? activeVideoStream : remoteStreams.get(p.id);
+
+                return (
+                  <div key={p.id} className="relative bg-[#1a1a1a] rounded-xl overflow-hidden border border-[#333] shadow-lg group">
+                    {stream || (isLocal && activeCall.isVideo) ? (
+                      <NeuralVideoSlot
+                        stream={stream || null}
+                        mirrored={isLocal && !activeCall.isScreenSharing && mirrorVideo}
+                        effect={isLocal ? backgroundEffect : 'none'}
+                        isLocal={isLocal}
+                        label={p.name}
+                        isMuted={isLocal ? isMuted : false}
+                      />
+                    ) : (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-4">
+                        <div className="w-20 h-20 rounded-full bg-indigo-600 flex items-center justify-center text-2xl font-bold text-white shadow-xl">
+                          {p.name.charAt(0)}
                         </div>
+                        <p className="text-sm font-medium text-gray-400">{p.name} {isLocal && '(You)'}</p>
+                      </div>
+                    )}
+                    <div className="absolute top-3 right-3 flex gap-2">
+                      {isLocal && isMuted && <div className="p-1.5 bg-black/60 rounded-md backdrop-blur-sm"><MicOff size={14} className="text-red-500"/></div>}
                     </div>
-                 );
-             })}
-          </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* 3. Sidebar */}
@@ -740,6 +1086,34 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                 )}
                 {activeTab === 'participants' && (
                   <div className="space-y-4">
+                     {isHost && (
+                       <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/10">
+                          <div className="flex items-center justify-between mb-2">
+                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-300">Lobby</p>
+                            <span className="text-[10px] text-amber-200">{waitingRoom.length} waiting</span>
+                          </div>
+                          {waitingRoom.length === 0 ? (
+                            <p className="text-[10px] text-slate-400">No one is waiting right now.</p>
+                          ) : (
+                            <div className="space-y-2">
+                              {waitingRoom.map((waitingId) => {
+                                const user = team.find((u) => u.id === waitingId);
+                                return (
+                                  <div key={`waiting-${waitingId}`} className="flex items-center justify-between gap-2 text-[10px] text-slate-200">
+                                    <span>{user?.name || waitingId}</span>
+                                    <button
+                                      onClick={() => admitOneFromLobby(waitingId)}
+                                      className="px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-black uppercase tracking-wider"
+                                    >
+                                      Admit
+                                    </button>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+                       </div>
+                     )}
                      <button onClick={() => setShowInviteModal(true)} className="w-full py-2 bg-[#2a2a2a] rounded-lg text-xs font-bold uppercase tracking-wider text-white hover:bg-[#333] transition-colors border border-[#333] flex items-center justify-center gap-2">
                         <UserPlus size={14}/> Invite Someone
                      </button>

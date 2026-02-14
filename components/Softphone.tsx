@@ -237,9 +237,9 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
             if (timerRef.current) window.clearInterval(timerRef.current);
             timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
           });
-          incomingCall.on('disconnect', handleHangup);
-          incomingCall.on('cancel', handleHangup);
-          incomingCall.on('reject', handleHangup);
+          incomingCall.on('disconnect', () => handleHangup(true));
+          incomingCall.on('cancel', () => handleHangup(true));
+          incomingCall.on('reject', () => handleHangup(true));
           incomingCall.accept();
         });
 
@@ -407,9 +407,13 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
         if (timerRef.current) window.clearInterval(timerRef.current);
         timerRef.current = window.setInterval(() => setDuration(d => d + 1), 1000);
       });
-      newCall.on('disconnect', handleHangup);
-      newCall.on('cancel', handleHangup);
-      newCall.on('reject', handleHangup);
+      newCall.on('disconnect', () => handleHangup(true));
+      newCall.on('cancel', () => handleHangup(true));
+      newCall.on('reject', () => handleHangup(true));
+      newCall.on('error', (err: any) => {
+        setClientError(err?.message || 'Call failed unexpectedly.');
+        handleHangup(true);
+      });
     } catch (err) {
       console.error('Twilio call failed:', err);
       if (activeHistoryIdRef.current) {
@@ -425,7 +429,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
     }
   };
 
-  const handleHangup = () => {
+  const handleHangup = (fromRemoteEvent = false) => {
     setStatus('idle');
     setNumber('');
     setDuration(0);
@@ -435,11 +439,13 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
       window.clearInterval(timerRef.current);
       timerRef.current = null;
     }
-    if (call) {
+    if (!fromRemoteEvent && call) {
       call.disconnect();
     }
     setCall(null);
-    device?.disconnectAll();
+    if (!fromRemoteEvent) {
+      device?.disconnectAll();
+    }
     if (activeHistoryIdRef.current) {
       const endedAt = Date.now();
       const startedAt = activeHistoryStartRef.current || endedAt;

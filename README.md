@@ -217,6 +217,78 @@ JWT payload must include:
 3. Set env vars listed above
 4. `vercel.json` rewrites `/api/*` and `/twilio/*` to backend
 
+## Desktop App (Tauri)
+You can run ConnectAI as a Windows desktop app without rewriting the frontend.
+
+### One-time prerequisites (Windows)
+1. Install Rust via `rustup`:
+   - https://rustup.rs/
+2. Install Visual Studio Build Tools (C++ + Windows SDK):
+   - https://aka.ms/vs/17/release/vs_BuildTools.exe
+3. Restart terminal after install.
+
+### Desktop dev run
+1. Install dependencies:
+   - `npm install`
+2. Start desktop + backend:
+   - `npm run desktop:dev`
+
+This runs:
+- Express API server (`npm run dev:server`)
+- Vite frontend (via Tauri `beforeDevCommand`)
+- Native desktop shell (`tauri dev`)
+
+### Desktop production build
+- `npm run desktop:build`
+
+### Desktop beta release packaging (GitHub Releases)
+After building desktop installers, package artifacts with stable and versioned names:
+
+1. Build + package in one go:
+   - `npm run desktop:release`
+2. Output folder:
+   - `release/desktop/vX.Y.Z/`
+3. Generated files include:
+   - `ConnectAI-Desktop-vX.Y.Z-windows-x64.msi`
+   - `ConnectAI-Desktop-windows-x64.msi` (stable latest alias)
+   - `ConnectAI-Desktop-vX.Y.Z-windows-x64-setup.exe` (if available)
+   - `ConnectAI-Desktop-windows-x64-setup.exe` (stable latest alias, if available)
+   - `SHA256SUMS.txt`
+   - `desktop-release.json` (release metadata template)
+
+To publish website metadata from packaged artifacts:
+- `npm run desktop:manifest:publish -- --source release/desktop/vX.Y.Z/desktop-release.json`
+
+### Website desktop download metadata
+The landing page reads:
+- `public/desktop-release.json`
+
+This drives:
+- latest version/date
+- Windows download link
+- release notes link
+- "View all releases" fallback
+
+### GitHub release automation
+A GitHub Actions workflow is included:
+- `.github/workflows/desktop-release.yml`
+
+Trigger:
+- Push a tag like `v0.1.0`
+
+Result:
+- Builds Windows desktop installer
+- Packages standardized artifacts + checksums
+- Publishes assets to GitHub Releases (pre-release by default)
+
+### Desktop pre-release checklist
+1. `npm run build`
+2. `npm run desktop:build`
+3. Login smoke test in desktop app
+4. Basic call setup smoke test (voice + video device access)
+5. Upload release assets and verify download URL
+6. Verify landing page download card resolves in <= 2 clicks
+
 ## Beta Testing Checklist
 - `TWILIO_AUTH_TOKEN` set and verified
 - `PUBLIC_URL` correct

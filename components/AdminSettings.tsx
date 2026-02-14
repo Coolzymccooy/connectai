@@ -9,7 +9,7 @@ import {
   ArrowRight, Play, FileJson, Share, UserMinus, Key, Server, Hash, Layers3, Phone,
   ChevronUp, Sliders, Sparkles, Wand2, ShieldAlert, Check
 } from 'lucide-react';
-import { AppSettings, DepartmentRoute, Role, Notification, User, WorkflowRule, MigrationProvider, IntegrationLog, ChannelType, IvrConfig, WebhookConfig, SchemaMapping, IvrOption } from '../types';
+import { AppSettings, DepartmentRoute, Role, Notification, User, WorkflowRule, MigrationProvider, IntegrationLog, ChannelType, IvrConfig, WebhookConfig, SchemaMapping, IvrOption, BroadcastAudience, BroadcastMessage } from '../types';
 import { VisualIvr } from './VisualIvr';
 import { startLegacyMigration } from '../services/migrationService';
 import { exportClusterData, downloadJson } from '../services/exportService';
@@ -57,6 +57,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const [showInviteModal, setShowInviteModal] = useState(false);
   const [showWalletModal, setShowWalletModal] = useState(false);
   const [showScaleModal, setShowScaleModal] = useState(false);
+  const [billingProcessing, setBillingProcessing] = useState(false);
   const [showCrmModal, setShowCrmModal] = useState(false);
   const [crmProvider, setCrmProvider] = useState<'hubspot' | 'salesforce' | 'pipedrive' | null>(null);
   const [crmCredentials, setCrmCredentials] = useState({ apiKey: '', endpoint: '', clientId: '' });
@@ -113,9 +114,29 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     providers: false,
     calendar: false,
     crm: false,
+    broadcast: false,
+    desktopRelease: false,
     observability: false,
     marketing: true,
   });
+  const [broadcastDraft, setBroadcastDraft] = useState({
+    title: '',
+    body: '',
+    audience: 'ALL' as BroadcastAudience,
+    inApp: true,
+    email: false,
+  });
+  const [desktopReleaseDraft, setDesktopReleaseDraft] = useState({
+    latestVersion: settings.desktopRelease?.latestVersion || '',
+    windowsDownloadUrl: settings.desktopRelease?.windowsDownloadUrl || '',
+    releaseNotesUrl: settings.desktopRelease?.releaseNotesUrl || '',
+    releasesPageUrl: settings.desktopRelease?.releasesPageUrl || '',
+    publishedAt: settings.desktopRelease?.publishedAt ? String(settings.desktopRelease?.publishedAt).slice(0, 10) : '',
+    fileName: settings.desktopRelease?.fileName || '',
+    fileSizeLabel: settings.desktopRelease?.fileSizeLabel || '',
+    unsignedBeta: settings.desktopRelease?.unsignedBeta ?? true,
+  });
+  const [desktopReleaseSaving, setDesktopReleaseSaving] = useState(false);
   const toggleGeneralSection = (key: string) => {
     setCollapsedGeneral((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -223,6 +244,19 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     setAuthDomains(settings.auth.allowedDomains.join('\n'));
     setDomainTenantMap(settings.auth.domainTenantMap.map((m) => `${m.domain}=${m.tenantId}`).join('\n'));
   }, [settings.auth]);
+
+  useEffect(() => {
+    setDesktopReleaseDraft({
+      latestVersion: settings.desktopRelease?.latestVersion || '',
+      windowsDownloadUrl: settings.desktopRelease?.windowsDownloadUrl || '',
+      releaseNotesUrl: settings.desktopRelease?.releaseNotesUrl || '',
+      releasesPageUrl: settings.desktopRelease?.releasesPageUrl || '',
+      publishedAt: settings.desktopRelease?.publishedAt ? String(settings.desktopRelease?.publishedAt).slice(0, 10) : '',
+      fileName: settings.desktopRelease?.fileName || '',
+      fileSizeLabel: settings.desktopRelease?.fileSizeLabel || '',
+      unsignedBeta: settings.desktopRelease?.unsignedBeta ?? true,
+    });
+  }, [settings.desktopRelease]);
 
   useEffect(() => {
     fetchInvites().then(setInvites).catch(() => {});
@@ -381,6 +415,94 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     }
   };
 
+  const handleSaveDesktopRelease = async () => {
+    const isHttpUrl = (value: string) => /^https?:\/\//i.test(value.trim());
+    if (!desktopReleaseDraft.latestVersion.trim()) {
+      addNotification('error', 'Desktop release version is required.');
+      return;
+    }
+    if (desktopReleaseDraft.windowsDownloadUrl && !isHttpUrl(desktopReleaseDraft.windowsDownloadUrl)) {
+      addNotification('error', 'Windows download URL must start with http:// or https://');
+      return;
+    }
+    if (desktopReleaseDraft.releaseNotesUrl && !isHttpUrl(desktopReleaseDraft.releaseNotesUrl)) {
+      addNotification('error', 'Release notes URL must start with http:// or https://');
+      return;
+    }
+    if (desktopReleaseDraft.releasesPageUrl && !isHttpUrl(desktopReleaseDraft.releasesPageUrl)) {
+      addNotification('error', 'Releases page URL must start with http:// or https://');
+      return;
+    }
+    const publishedAtIso = desktopReleaseDraft.publishedAt
+      ? new Date(`${desktopReleaseDraft.publishedAt}T00:00:00.000Z`).toISOString()
+      : new Date().toISOString();
+
+    const nextSettings: AppSettings = {
+      ...settings,
+      desktopRelease: {
+        latestVersion: desktopReleaseDraft.latestVersion.trim(),
+        windowsDownloadUrl: desktopReleaseDraft.windowsDownloadUrl.trim(),
+        releaseNotesUrl: desktopReleaseDraft.releaseNotesUrl.trim(),
+        releasesPageUrl: desktopReleaseDraft.releasesPageUrl.trim(),
+        publishedAt: publishedAtIso,
+        fileName: desktopReleaseDraft.fileName.trim(),
+        fileSizeLabel: desktopReleaseDraft.fileSizeLabel.trim(),
+        unsignedBeta: Boolean(desktopReleaseDraft.unsignedBeta),
+      },
+    };
+
+    setDesktopReleaseSaving(true);
+    try {
+      const saved = await saveSettingsApi(nextSettings);
+      onUpdateSettings(saved);
+      addNotification('success', 'Desktop release metadata updated.');
+    } catch {
+      addNotification('error', 'Failed to save desktop release metadata.');
+    } finally {
+      setDesktopReleaseSaving(false);
+    }
+  };
+
+  const handleSendBroadcast = async () => {
+    if (!broadcastDraft.title.trim() || !broadcastDraft.body.trim()) {
+      addNotification('error', 'Broadcast title and message are required.');
+      return;
+    }
+
+    try {
+      const response = await apiRequest<{ settings: AppSettings; broadcast: BroadcastMessage }>('/api/broadcasts/send', {
+        method: 'POST',
+        body: {
+          title: broadcastDraft.title.trim(),
+          body: broadcastDraft.body.trim(),
+          audience: broadcastDraft.audience,
+          inApp: broadcastDraft.inApp,
+          email: broadcastDraft.email,
+        },
+      });
+      onUpdateSettings(response.settings);
+      setBroadcastDraft({ title: '', body: '', audience: 'ALL', inApp: true, email: false });
+      addNotification('success', 'Broadcast sent.');
+      if (response.broadcast?.email) {
+        const delivered = response.broadcast?.delivery?.delivered || 0;
+        const failed = response.broadcast?.delivery?.failed || 0;
+        addNotification('info', `Email delivery: ${delivered} delivered, ${failed} failed.`);
+      }
+    } catch {
+      addNotification('error', 'Failed to send broadcast.');
+    }
+  };
+
+  const handleArchiveBroadcast = async (id: string) => {
+    try {
+      const response = await apiRequest<{ settings: AppSettings }>(`/api/broadcasts/${id}/archive`, { method: 'POST' });
+      onUpdateSettings(response.settings);
+      addNotification('success', 'Broadcast archived.');
+    } catch {
+      addNotification('error', 'Failed to archive broadcast.');
+    }
+  };
+
   const handleAddIvrOption = () => {
     const maxExisting = editIvr.options.reduce((max, option) => {
       const parsed = Number(option.key);
@@ -511,6 +633,17 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     }
   };
 
+  const currency = ((settings.subscription.currency || 'GBP').toUpperCase() as 'USD' | 'GBP' | 'NGN');
+  const currencySymbols: Record<'USD' | 'GBP' | 'NGN', string> = { USD: '$', GBP: '£', NGN: '₦' };
+  const currencyLabel: Record<'USD' | 'GBP' | 'NGN', string> = { USD: 'US Dollar', GBP: 'British Pound', NGN: 'Nigerian Naira' };
+  const topUpPresets: Record<'USD' | 'GBP' | 'NGN', number[]> = {
+    USD: [50, 100, 250],
+    GBP: [25, 50, 100],
+    NGN: [20000, 50000, 100000],
+  };
+  const formatMoney = (value: number, code: 'USD' | 'GBP' | 'NGN') =>
+    new Intl.NumberFormat(code === 'NGN' ? 'en-NG' : 'en-GB', { style: 'currency', currency: code }).format(value);
+
   const handleTopUp = (amount: number) => {
     const nextSettings = {
       ...settings,
@@ -521,8 +654,57 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     };
     onUpdateSettings(nextSettings);
     saveSettingsApi(nextSettings).catch(() => {});
-    addNotification('success', `Balance updated: +$${amount}`);
+    addNotification('success', `Balance updated: +${formatMoney(amount, currency)}`);
     setShowWalletModal(false);
+  };
+
+  const handleCurrencyChange = async (nextCurrency: 'USD' | 'GBP' | 'NGN') => {
+    const nextSettings = {
+      ...settings,
+      subscription: {
+        ...settings.subscription,
+        currency: nextCurrency,
+      },
+    };
+    onUpdateSettings(nextSettings);
+    try {
+      const saved = await saveSettingsApi(nextSettings);
+      onUpdateSettings(saved);
+      addNotification('success', `Billing currency updated to ${nextCurrency}.`);
+    } catch {
+      addNotification('error', 'Failed to update billing currency.');
+    }
+  };
+
+  const handleStripeCheckout = async (mode: 'topup' | 'subscription', amount?: number) => {
+    setBillingProcessing(true);
+    try {
+      const config = await apiRequest<any>('/api/billing/stripe/config', { method: 'GET' });
+      if (!config?.configured) {
+        throw new Error('BILLING_NOT_CONFIGURED');
+      }
+      const payload: any = { mode };
+      if (mode === 'topup' && amount) payload.amount = amount;
+      if (mode === 'subscription') payload.plan = settings.subscription.plan;
+      const response = await apiRequest<{ url: string }>('/api/billing/stripe/checkout', { method: 'POST', body: payload });
+      if (!response?.url) throw new Error('Stripe checkout URL missing.');
+      window.open(response.url, '_blank', 'noopener,noreferrer');
+      addNotification('success', 'Stripe checkout opened.');
+    } catch (err: any) {
+      const raw = String(err?.message || 'unknown error');
+      const lower = raw.toLowerCase();
+      if (raw === 'BILLING_NOT_CONFIGURED' || lower.includes('stripe not configured') || lower.includes('missing stripe_secret_key')) {
+        addNotification('error', 'Billing checkout is not configured yet. Add Stripe server keys in environment settings, then retry.');
+      } else if (lower.includes('cannot post /api/billing/stripe/checkout') || lower.includes('<!doctype')) {
+        addNotification('error', 'Billing service is temporarily unavailable. Start/restart backend API and ensure Stripe routes are deployed.');
+      } else if (lower.includes('missing stripe price')) {
+        addNotification('error', 'Billing plan price is not configured yet. Add STRIPE_PRICE_* values in environment settings.');
+      } else {
+        addNotification('error', `Stripe checkout failed: ${raw}`);
+      }
+    } finally {
+      setBillingProcessing(false);
+    }
   };
 
   const handleScaleInfrastructure = async () => {
@@ -763,6 +945,185 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                             </div>
                           )}
                         </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm xl:col-span-2">
+                  <button onClick={() => toggleGeneralSection('broadcast')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">Broadcast Center</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.broadcast ? 'rotate-180' : ''}`} />
+                  </button>
+                  {!collapsedGeneral.broadcast && (
+                    <div className="mt-4 space-y-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                        Send operational updates to specific roles across the app.
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <input
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold uppercase tracking-widest outline-none focus:border-brand-500 md:col-span-2"
+                          placeholder="Broadcast title"
+                          value={broadcastDraft.title}
+                          onChange={(e) => setBroadcastDraft((prev) => ({ ...prev, title: e.target.value }))}
+                        />
+                        <textarea
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold tracking-wide outline-none focus:border-brand-500 md:col-span-2"
+                          rows={3}
+                          placeholder="Write message to your team..."
+                          value={broadcastDraft.body}
+                          onChange={(e) => setBroadcastDraft((prev) => ({ ...prev, body: e.target.value }))}
+                        />
+                        <select
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[10px] font-black uppercase tracking-widest outline-none focus:border-brand-500"
+                          value={broadcastDraft.audience}
+                          onChange={(e) => setBroadcastDraft((prev) => ({ ...prev, audience: e.target.value as BroadcastAudience }))}
+                        >
+                          <option value="ALL">All roles</option>
+                          <option value="AGENT">Agents only</option>
+                          <option value="SUPERVISOR">Supervisors only</option>
+                          <option value="ADMIN">Admins only</option>
+                        </select>
+                        <div className="flex gap-3">
+                          <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100 flex-1">
+                            In-app
+                            <input type="checkbox" checked={broadcastDraft.inApp} onChange={(e) => setBroadcastDraft((prev) => ({ ...prev, inApp: e.target.checked }))} className="h-4 w-4 rounded border-slate-300" />
+                          </label>
+                          <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100 flex-1">
+                            Email
+                            <input type="checkbox" checked={broadcastDraft.email} onChange={(e) => setBroadcastDraft((prev) => ({ ...prev, email: e.target.checked }))} className="h-4 w-4 rounded border-slate-300" />
+                          </label>
+                        </div>
+                      </div>
+                      <button onClick={handleSendBroadcast} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[10px] font-black uppercase">
+                        Send Broadcast
+                      </button>
+
+                      <div className="mt-2 rounded-xl border border-slate-200 overflow-hidden">
+                        <div className="grid grid-cols-12 bg-slate-50 px-3 py-2">
+                          <span className="col-span-3 text-[9px] font-black uppercase tracking-widest text-slate-500">Time</span>
+                          <span className="col-span-2 text-[9px] font-black uppercase tracking-widest text-slate-500">Audience</span>
+                          <span className="col-span-3 text-[9px] font-black uppercase tracking-widest text-slate-500">Message</span>
+                          <span className="col-span-2 text-[9px] font-black uppercase tracking-widest text-slate-500">Delivery</span>
+                          <span className="col-span-1 text-[9px] font-black uppercase tracking-widest text-slate-500">InApp</span>
+                          <span className="col-span-1 text-[9px] font-black uppercase tracking-widest text-slate-500">Email</span>
+                          <span className="col-span-1 text-[9px] font-black uppercase tracking-widest text-slate-500">Action</span>
+                        </div>
+                        <div className="max-h-52 overflow-y-auto">
+                          {(settings.broadcastCenter?.messages || []).length ? (
+                            (settings.broadcastCenter?.messages || []).slice(0, 20).map((row) => (
+                              <div key={row.id} className="grid grid-cols-12 px-3 py-2 border-t border-slate-100">
+                                <span className="col-span-3 text-[10px] font-bold text-slate-700">{row.sentAt ? new Date(row.sentAt).toLocaleString() : '-'}</span>
+                                <span className="col-span-2 text-[10px] font-black uppercase text-slate-600">{row.audience}</span>
+                                <span className="col-span-3 text-[10px] font-bold text-slate-700 truncate" title={row.body}>{row.title}</span>
+                                <span className="col-span-2 text-[10px] font-bold text-slate-700">
+                                  {row.email
+                                    ? `${row.delivery?.delivered || 0}/${row.delivery?.attempted || 0} (${row.delivery?.failed || 0} fail)`
+                                    : 'N/A'}
+                                  {Boolean(row.delivery?.failed) && (
+                                    <span className="block text-[9px] font-bold text-red-500 truncate" title={(row.delivery?.logs || []).filter((l: any) => l.status === 'FAILED').map((l: any) => `${l.email}: ${l.reason || 'unknown error'}`).join('\n')}>
+                                      {(row.delivery?.logs || []).find((l: any) => l.status === 'FAILED')?.reason || 'Delivery error'}
+                                    </span>
+                                  )}
+                                </span>
+                                <span className="col-span-1 text-[10px] font-bold text-slate-700">{row.inApp ? 'Y' : 'N'}</span>
+                                <span className="col-span-1 text-[10px] font-bold text-slate-700">{row.email ? 'Y' : 'N'}</span>
+                                <span className="col-span-1 text-[10px] font-bold">
+                                  {row.status === 'ARCHIVED' ? (
+                                    <span className="text-slate-400 uppercase">Done</span>
+                                  ) : (
+                                    <button onClick={() => handleArchiveBroadcast(row.id)} className="text-brand-600 uppercase">Archive</button>
+                                  )}
+                                </span>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="px-3 py-3 border-t border-slate-100 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                              No broadcasts sent yet.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm xl:col-span-2">
+                  <button onClick={() => toggleGeneralSection('desktopRelease')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">Desktop Release Manager</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.desktopRelease ? 'rotate-180' : ''}`} />
+                  </button>
+                  {!collapsedGeneral.desktopRelease && (
+                    <div className="mt-4 space-y-3">
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                        Admin-only metadata for website download card.
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <input
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold uppercase tracking-widest outline-none focus:border-brand-500"
+                          placeholder="Latest version e.g. 0.1.0-beta"
+                          value={desktopReleaseDraft.latestVersion}
+                          onChange={(e) => setDesktopReleaseDraft((prev) => ({ ...prev, latestVersion: e.target.value }))}
+                        />
+                        <input
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold uppercase tracking-widest outline-none focus:border-brand-500"
+                          placeholder="Installer file name"
+                          value={desktopReleaseDraft.fileName}
+                          onChange={(e) => setDesktopReleaseDraft((prev) => ({ ...prev, fileName: e.target.value }))}
+                        />
+                        <input
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold uppercase tracking-widest outline-none focus:border-brand-500 md:col-span-2"
+                          placeholder="Windows download URL"
+                          value={desktopReleaseDraft.windowsDownloadUrl}
+                          onChange={(e) => setDesktopReleaseDraft((prev) => ({ ...prev, windowsDownloadUrl: e.target.value }))}
+                        />
+                        <input
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold uppercase tracking-widest outline-none focus:border-brand-500"
+                          placeholder="Release notes URL"
+                          value={desktopReleaseDraft.releaseNotesUrl}
+                          onChange={(e) => setDesktopReleaseDraft((prev) => ({ ...prev, releaseNotesUrl: e.target.value }))}
+                        />
+                        <input
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold uppercase tracking-widest outline-none focus:border-brand-500"
+                          placeholder="All releases URL"
+                          value={desktopReleaseDraft.releasesPageUrl}
+                          onChange={(e) => setDesktopReleaseDraft((prev) => ({ ...prev, releasesPageUrl: e.target.value }))}
+                        />
+                        <input
+                          type="date"
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold uppercase tracking-widest outline-none focus:border-brand-500"
+                          value={desktopReleaseDraft.publishedAt}
+                          onChange={(e) => setDesktopReleaseDraft((prev) => ({ ...prev, publishedAt: e.target.value }))}
+                        />
+                        <input
+                          className="w-full bg-slate-50 rounded-xl border border-slate-200 text-[11px] font-bold uppercase tracking-widest outline-none focus:border-brand-500"
+                          placeholder="Size label e.g. 121 MB"
+                          value={desktopReleaseDraft.fileSizeLabel}
+                          onChange={(e) => setDesktopReleaseDraft((prev) => ({ ...prev, fileSizeLabel: e.target.value }))}
+                        />
+                      </div>
+                      <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100">
+                        Unsigned Beta Warning
+                        <input
+                          type="checkbox"
+                          checked={desktopReleaseDraft.unsignedBeta}
+                          onChange={(e) => setDesktopReleaseDraft((prev) => ({ ...prev, unsignedBeta: e.target.checked }))}
+                          className="h-4 w-4 rounded border-slate-300"
+                        />
+                      </label>
+                      <div className="flex gap-2">
+                        <button
+                          disabled={desktopReleaseSaving}
+                          onClick={handleSaveDesktopRelease}
+                          className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase ${desktopReleaseSaving ? 'bg-slate-300 text-slate-600 cursor-not-allowed' : 'bg-slate-900 text-white'}`}
+                        >
+                          {desktopReleaseSaving ? 'Saving...' : 'Save Desktop Release'}
+                        </button>
+                        {desktopReleaseDraft.windowsDownloadUrl ? (
+                          <a href={desktopReleaseDraft.windowsDownloadUrl} target="_blank" rel="noreferrer" className="px-4 py-2 rounded-lg border border-slate-200 text-[10px] font-black uppercase text-slate-600 inline-flex items-center gap-1">
+                            Verify Link <ExternalLink size={12} />
+                          </a>
+                        ) : null}
                       </div>
                     </div>
                   )}
@@ -1105,8 +1466,20 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                   <div className="absolute top-0 right-0 w-48 h-48 bg-white/5 blur-[60px] -mr-24 -mt-24"></div>
                   <p className="text-[9px] font-black uppercase tracking-[0.3em] text-brand-300 mb-6">Wallet</p>
                   <div className="flex items-end gap-2 mb-8">
-                    <span className="text-4xl font-black italic tracking-tighter">${settings.subscription.balance.toFixed(2)}</span>
-                    <span className="text-brand-300 font-bold uppercase text-[9px] mb-2">USD</span>
+                    <span className="text-4xl font-black italic tracking-tighter">{formatMoney(settings.subscription.balance, currency)}</span>
+                    <span className="text-brand-300 font-bold uppercase text-[9px] mb-2">{currency}</span>
+                  </div>
+                  <div className="mb-4">
+                    <label className="block text-[9px] font-black uppercase tracking-[0.2em] text-brand-300 mb-2">Currency</label>
+                    <select
+                      value={currency}
+                      onChange={(e) => handleCurrencyChange(e.target.value as 'USD' | 'GBP' | 'NGN')}
+                      className="w-full bg-white/10 border border-white/20 rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white"
+                    >
+                      <option value="GBP" className="text-slate-800">GBP • British Pound</option>
+                      <option value="NGN" className="text-slate-800">NGN • Nigerian Naira</option>
+                      <option value="USD" className="text-slate-800">USD • US Dollar</option>
+                    </select>
                   </div>
                   <button onClick={() => setShowWalletModal(true)} className="w-full py-4 bg-white text-brand-900 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg hover:bg-brand-50 transition-all">Add Credits</button>
                 </div>
@@ -1115,8 +1488,14 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                     <p className="text-[9px] font-black uppercase tracking-[0.3em] text-slate-400 mb-6">Subscription</p>
                     <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">{settings.subscription.plan} Plan</h3>
                     <p className="text-xs font-medium text-slate-500">Billed monthly • Next cycle: {settings.subscription.nextBillingDate}</p>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-2">Base currency: {currencyLabel[currency]} ({currency})</p>
                   </div>
-                  <button onClick={() => setShowScaleModal(true)} className="mt-6 py-4 border-2 border-slate-100 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:border-slate-200 transition-all flex items-center justify-center gap-2"><Zap size={14} className="text-brand-600"/> Scale Plan</button>
+                  <div className="mt-6 grid grid-cols-1 gap-2">
+                    <button onClick={() => setShowScaleModal(true)} className="py-4 border-2 border-slate-100 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:border-slate-200 transition-all flex items-center justify-center gap-2"><Zap size={14} className="text-brand-600"/> Scale Plan</button>
+                    <button onClick={() => handleStripeCheckout('subscription')} disabled={billingProcessing} className={`py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all ${billingProcessing ? 'bg-slate-300 text-white cursor-not-allowed' : 'bg-slate-900 text-white hover:bg-slate-800'}`}>
+                      {billingProcessing ? 'Opening checkout...' : 'Pay Subscription (Stripe)'}
+                    </button>
+                  </div>
                 </div>
              </div>
           </div>
@@ -1388,14 +1767,17 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
           <div className="bg-white rounded-[2.2rem] shadow-2xl w-full max-w-md p-8 border border-white/20 relative">
             <button onClick={() => setShowWalletModal(false)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600"><X size={18} /></button>
             <h3 className="text-xl font-black italic uppercase tracking-tighter text-slate-800 mb-2">Add Credits</h3>
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-6">Wallet top-up</p>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-6">Wallet top-up • {currency}</p>
             <div className="grid grid-cols-3 gap-2 mb-5">
-              {[50, 100, 250].map((amount) => (
+              {topUpPresets[currency].map((amount) => (
                 <button key={amount} onClick={() => handleTopUp(amount)} className="py-3 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest hover:bg-slate-800">
-                  +${amount}
+                  +{currencySymbols[currency]}{amount}
                 </button>
               ))}
             </div>
+            <button onClick={() => handleStripeCheckout('topup', topUpPresets[currency][0])} disabled={billingProcessing} className={`w-full mb-3 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest ${billingProcessing ? 'bg-slate-300 text-white cursor-not-allowed' : 'bg-brand-600 text-white hover:bg-brand-700'}`}>
+              {billingProcessing ? 'Opening checkout...' : `Top up via Stripe (${currencySymbols[currency]}${topUpPresets[currency][0]})`}
+            </button>
             <button onClick={() => setShowWalletModal(false)} className="w-full py-3 rounded-xl border border-slate-200 text-[10px] font-black uppercase tracking-widest text-slate-600">Close</button>
           </div>
         </div>

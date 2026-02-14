@@ -1,0 +1,48 @@
+name: Desktop Release (Windows)
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build desktop installer
+        run: npm run desktop:build
+
+      - name: Package release artifacts
+        run: npm run desktop:artifacts -- --tag ${{ github.ref_name }} --repo ${{ github.repository }}
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          prerelease: true
+          body: |
+            ConnectAI Desktop beta release (unsigned installer).
+            
+            - Platform: Windows x64
+            - Signing: Unsigned (beta)
+            - Known issues: See CHANGELOG.md
+          files: |
+            release/desktop/${{ github.ref_name }}/*

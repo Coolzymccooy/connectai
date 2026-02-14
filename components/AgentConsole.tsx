@@ -800,12 +800,14 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     if (isFirebaseConfigured) {
       await dbService.upsertConversation(seededConversation);
       setConversations(prev => {
+        const existing = prev.find((c) => c.id === convId);
+        const focused = existing ? { ...existing, teammateId: member.id, participantIds: [user.id, member.id], contactName: member.name, contactPhone: `EXT ${member.extension}` } : seededConversation;
         const rest = prev.filter(c => c.id !== convId);
-        return [seededConversation, ...rest];
+        return [focused, ...rest];
       });
       setMessageMap(prev => ({ ...prev, [convId]: prev[convId]?.length ? prev[convId] : [bootMessage] }));
-      setSelectedConvId(convId);
       setActiveTab('omnichannel');
+      setTimeout(() => setSelectedConvId(convId), 0);
       return;
     }
 
@@ -821,8 +823,8 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         return [focus, ...rest];
       });
     }
-    setSelectedConvId(conv.id);
     setActiveTab('omnichannel');
+    setTimeout(() => setSelectedConvId(conv.id), 0);
   };
 
   const handleLeadCall = () => {
@@ -1024,6 +1026,22 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     const updated = { ...meeting, status: 'active' as const };
     updateMeeting(updated);
     onJoinMeeting?.(updated);
+  };
+
+  const getMeetingLink = (meeting: Meeting) => {
+    const room = meeting.roomId || `room_${meeting.id}`;
+    if (typeof window === 'undefined') return `/#/app?room=${encodeURIComponent(room)}`;
+    return `${window.location.origin}/#/app?room=${encodeURIComponent(room)}`;
+  };
+
+  const copyMeetingLink = async (meeting: Meeting) => {
+    const link = getMeetingLink(meeting);
+    try {
+      await navigator.clipboard.writeText(link);
+      addNotification('success', 'Meeting link copied. Share it with participants.');
+    } catch {
+      addNotification('error', 'Unable to copy meeting link. Copy manually from meeting details.');
+    }
   };
 
   const completeWrapUp = async () => {
@@ -1307,40 +1325,40 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                     <input value={teamSearch} onChange={(e) => setTeamSearch(e.target.value)} type="text" placeholder="Search roster..." className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-12 pr-4 text-xs font-bold outline-none focus:border-brand-500 shadow-lg transition-all" />
                  </div>
               </div>
-                <div className="flex-1 bg-white/95 backdrop-blur-md rounded-[2rem] border border-slate-200 shadow-xl p-4 md:p-5 overflow-y-auto scrollbar-hide">
+                <div className="flex-1 bg-white/95 backdrop-blur-md rounded-[1.6rem] border border-slate-200 shadow-xl p-2.5 md:p-3 overflow-y-auto scrollbar-hide">
                    {teamViewMode === 'cards' ? (
-                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 md:gap-5">
+                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6 gap-2.5 md:gap-3">
                     {filteredTeamDirectory.map(member => (
-                         <div key={member.id} className="bg-white border border-slate-100 p-4 rounded-[1.8rem] group hover:border-brand-500/30 hover:shadow-lg transition-all relative overflow-hidden">
-                          <div className="flex items-center gap-3 mb-4 relative z-10">
+                         <div key={member.id} className="bg-white border border-slate-100 p-2.5 rounded-[1rem] group hover:border-brand-500/30 hover:shadow-lg transition-all relative overflow-hidden">
+                          <div className="flex items-center gap-2 mb-2 relative z-10">
                              <div className="relative">
-                                <img src={member.avatarUrl} className="w-12 h-12 rounded-xl border-2 border-white shadow" />
-                                <div className={`absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2 border-slate-50 ${
+                                <img src={member.avatarUrl} className="w-9 h-9 rounded-lg border border-white shadow" />
+                                <div className={`absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full border-2 border-slate-50 ${
                                   member.currentPresence === AgentStatus.AVAILABLE ? 'bg-green-500' :
                                   member.currentPresence === AgentStatus.BUSY ? 'bg-red-500' : 'bg-slate-400'
                                 } shadow-sm`}></div>
                              </div>
-                             <div>
-                                <h4 className="text-base font-black uppercase italic tracking-tight text-slate-800 leading-tight line-clamp-1">{member.name}</h4>
-                                <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">{member.role}</p>
+                             <div className="min-w-0 flex-1">
+                                <h4 className="text-[13px] font-black uppercase italic tracking-tight text-slate-800 leading-tight whitespace-normal break-words">{member.name}</h4>
+                                <p className="text-[8px] font-black text-slate-400 uppercase tracking-widest mt-0.5">{member.role}</p>
                              </div>
-                             <span className="ml-auto text-[8px] font-black uppercase tracking-widest text-slate-400 px-2 py-1 rounded-full bg-slate-50 border border-slate-100">
-                               {member.currentPresence === AgentStatus.AVAILABLE ? 'Online' : member.currentPresence === AgentStatus.BUSY ? 'Busy' : 'Offline'}
+                             <span className="ml-auto text-[7px] font-black uppercase tracking-widest text-slate-400 px-1.5 py-1 rounded-full bg-slate-50 border border-slate-100">
+                               {member.currentPresence === AgentStatus.AVAILABLE ? 'Online' : member.currentPresence === AgentStatus.BUSY ? 'On Call' : 'Offline'}
                              </span>
                           </div>
-                          <div className="grid grid-cols-1 gap-2 relative z-10">
-                             <div className="grid grid-cols-2 gap-2">
+                          <div className="grid grid-cols-1 gap-1.5 relative z-10">
+                             <div className="grid grid-cols-2 gap-1.5">
                                 <button 
                                   onClick={() => handleInternalLink(member, false)}
                                   disabled={member.id === user.id}
-                                  className="flex items-center justify-center gap-1.5 py-2.5 bg-white border border-slate-200 rounded-xl text-[8px] font-black uppercase tracking-widest text-slate-600 hover:bg-brand-50 hover:border-brand-500/20 hover:text-brand-600 transition-all disabled:opacity-30"
+                                  className="flex items-center justify-center gap-1 py-1.5 bg-white border border-slate-200 rounded-lg text-[8px] font-black uppercase tracking-widest text-slate-600 hover:bg-brand-50 hover:border-brand-500/20 hover:text-brand-600 transition-all disabled:opacity-30"
                                 >
                                      <Phone size={12}/> Call
                                 </button>
                                 <button 
                                   onClick={() => handleInternalLink(member, true)}
                                   disabled={member.id === user.id}
-                                  className="flex items-center justify-center gap-1.5 py-2.5 bg-brand-600 text-white rounded-xl text-[8px] font-black uppercase tracking-widest hover:bg-brand-700 transition-all disabled:opacity-30 shadow"
+                                  className="flex items-center justify-center gap-1 py-1.5 bg-brand-600 text-white rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-brand-700 transition-all disabled:opacity-30 shadow"
                                 >
                                      <Video size={12}/> Video Call
                                 </button>
@@ -1348,12 +1366,12 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                              <button 
                                onClick={() => handleMessageTeammate(member)}
                                disabled={member.id === user.id}
-                               className="flex items-center justify-center gap-1.5 py-2.5 bg-white border border-slate-200 rounded-xl text-[8px] font-black uppercase tracking-widest text-slate-600 hover:bg-brand-50 hover:border-brand-500/20 hover:text-brand-600 transition-all disabled:opacity-30"
+                               className="flex items-center justify-center gap-1 py-1.5 bg-white border border-slate-200 rounded-lg text-[8px] font-black uppercase tracking-widest text-slate-600 hover:bg-brand-50 hover:border-brand-500/20 hover:text-brand-600 transition-all disabled:opacity-30"
                              >
                                   <MessageCircle size={12}/> Message
                              </button>
                           </div>
-                          <div className="mt-4 pt-4 border-t border-slate-200/50 flex justify-between items-center text-[8px] font-black uppercase tracking-widest text-slate-400 relative z-10 italic">
+                          <div className="mt-2 pt-2 border-t border-slate-200/50 flex justify-between items-center text-[7px] font-black uppercase tracking-widest text-slate-400 relative z-10 italic">
                              <span>Extension: {member.extension}</span>
                                <span className="opacity-40">Team member</span>
                           </div>
@@ -1374,12 +1392,12 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                              <div className="flex items-center gap-3 min-w-0">
                                <img src={member.avatarUrl} className="w-9 h-9 rounded-lg border border-slate-100" />
                                <div className="min-w-0">
-                                 <p className="text-sm font-black uppercase italic text-slate-800 truncate">{member.name}</p>
+                                 <p className="text-sm font-black uppercase italic text-slate-800 whitespace-normal break-words leading-tight">{member.name}</p>
                                  <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">{member.role}</p>
                                </div>
                              </div>
                              <span className="text-[9px] font-black uppercase tracking-widest text-slate-500">
-                               {member.currentPresence === AgentStatus.AVAILABLE ? 'Online' : member.currentPresence === AgentStatus.BUSY ? 'Busy' : 'Offline'}
+                               {member.currentPresence === AgentStatus.AVAILABLE ? 'Online' : member.currentPresence === AgentStatus.BUSY ? 'On Call' : 'Offline'}
                              </span>
                              <span className="text-[10px] font-black text-slate-600">{member.extension || '-'}</span>
                              <div className="flex items-center justify-end gap-2">
@@ -2126,6 +2144,13 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                     Join
                                   </button>
                                 )}
+                                <button
+                                  onClick={() => copyMeetingLink(event)}
+                                  className="px-2.5 py-1 rounded-lg bg-white/10 text-[8px] font-black uppercase tracking-widest"
+                                  title={getMeetingLink(event)}
+                                >
+                                  Copy Link
+                                </button>
                               </div>
                             </div>
                           )}
@@ -2156,6 +2181,11 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                         <div className="mt-2 text-sm font-black text-slate-800 uppercase italic line-clamp-2">{meeting.title}</div>
                         <div className="text-[10px] text-slate-500 mt-1">
                           {Math.round(meeting.duration)} min • {meeting.attendees.length} attendees
+                        </div>
+                        <div className="mt-2">
+                          <button onClick={() => copyMeetingLink(meeting)} className="px-3 py-1.5 rounded-lg border border-slate-200 text-[9px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-100">
+                            Copy Link
+                          </button>
                         </div>
                       </div>
                     ))

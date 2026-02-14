@@ -4,10 +4,18 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, '.', '');
+  const tauriDev = process.env.TAURI_DEV === 'true';
+  const isWindows = process.platform === 'win32';
+  const usePollingWatcher = tauriDev || isWindows;
   return {
     server: {
       port: 3090,
       host: '0.0.0.0',
+      watch: {
+        usePolling: usePollingWatcher,
+        interval: 300,
+        ignored: ['**/node_modules/**', '**/.git/**', '**/src-tauri/target/**'],
+      },
       proxy: {
         '/api': {
           target: 'http://localhost:8787',

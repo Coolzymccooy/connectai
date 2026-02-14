@@ -14,6 +14,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import twilio from 'twilio';
+import Stripe from 'stripe';
 import { authenticate, authorize, UserRole } from './rbacMiddleware.js';
 import { globalQueue } from './services/queueManager.js';
 import { startDialer } from './services/dialerEngine.js';
@@ -355,6 +356,19 @@ const jobStats = {
 };
 
 const normalizeSettingsShape = (input = {}) => {
+  const fallbackBroadcastCenter = {
+    messages: [],
+  };
+  const fallbackDesktopRelease = {
+    latestVersion: '0.0.0-beta',
+    windowsDownloadUrl: 'https://github.com/Coolzymccooy/connectai/releases/latest/download/ConnectAI-Desktop-windows-x64.msi',
+    releaseNotesUrl: 'https://github.com/Coolzymccooy/connectai/blob/master/CHANGELOG.md',
+    releasesPageUrl: 'https://github.com/Coolzymccooy/connectai/releases',
+    publishedAt: new Date('2026-02-14T00:00:00.000Z').toISOString(),
+    fileName: 'ConnectAI-Desktop-windows-x64.msi',
+    fileSizeLabel: 'Coming soon',
+    unsignedBeta: true,
+  };
   const fallbackIvr = {
     phoneNumber: '',
     welcomeMessage: 'Welcome to ConnectAI. For sales, press 1. For support, press 2.',
@@ -374,8 +388,34 @@ const normalizeSettingsShape = (input = {}) => {
     autoTenantByDomain: false,
     domainTenantMap: [],
   };
+  const fallbackSubscription = {
+    plan: 'Growth',
+    seats: 20,
+    balance: 420.5,
+    currency: 'GBP',
+    autoTopUp: true,
+    usage: {
+      aiTokens: 450000,
+      aiTokenLimit: 1000000,
+      voiceMinutes: 1250,
+      voiceMinuteLimit: 5000,
+    },
+    nextBillingDate: 'Nov 01, 2025',
+    paymentMethod: 'Mastercard •••• 9921',
+  };
+  const sourceCurrency = String(input?.subscription?.currency || fallbackSubscription.currency).toUpperCase();
+  const normalizedCurrency = SUPPORTED_CURRENCIES.includes(sourceCurrency) ? sourceCurrency : fallbackSubscription.currency;
   return {
     ...input,
+    broadcastCenter: {
+      ...fallbackBroadcastCenter,
+      ...(input?.broadcastCenter || {}),
+      messages: Array.isArray(input?.broadcastCenter?.messages) ? input.broadcastCenter.messages : fallbackBroadcastCenter.messages,
+    },
+    desktopRelease: {
+      ...fallbackDesktopRelease,
+      ...(input?.desktopRelease || {}),
+    },
     ivr: {
       ...fallbackIvr,
       ...(input?.ivr || {}),
@@ -385,6 +425,15 @@ const normalizeSettingsShape = (input = {}) => {
     auth: {
       ...fallbackAuth,
       ...(input?.auth || {}),
+    },
+    subscription: {
+      ...fallbackSubscription,
+      ...(input?.subscription || {}),
+      currency: normalizedCurrency,
+      usage: {
+        ...fallbackSubscription.usage,
+        ...(input?.subscription?.usage || {}),
+      },
     },
   };
 };
@@ -396,6 +445,87 @@ const getSettingsForTenant = async (tenantId) => {
   }
   const stored = stores.settingsByTenant.find(s => s.tenantId === tenantId);
   return normalizeSettingsShape(stored?.data || {});
+};
+
+const saveSettingsForTenant = async (tenantId, incoming = {}) => {
+  if (isMongoReady()) {
+    const existing = await Setting.findOne({ tenantId });
+    const data = normalizeSettingsShape({ ...(existing?.data || {}), ...incoming });
+    await Setting.findOneAndUpdate(
+      { tenantId },
+      { tenantId, data, updatedAt: Date.now() },
+      { upsert: true, new: true }
+    );
+    return data;
+  }
+  const idx = stores.settingsByTenant.findIndex(s => s.tenantId === tenantId);
+  const merged = normalizeSettingsShape({ ...((stores.settingsByTenant[idx]?.data) || {}), ...incoming });
+  if (idx >= 0) stores.settingsByTenant[idx] = { tenantId, data: merged };
+  else stores.settingsByTenant.push({ tenantId, data: merged });
+  await saveStore('settings', stores.settingsByTenant);
+  return merged;
+};
+
+const resolveBroadcastRoles = (audience) => {
+  if (audience === 'AGENT') return [UserRole.AGENT];
+  if (audience === 'SUPERVISOR') return [UserRole.SUPERVISOR];
+  if (audience === 'ADMIN') return [UserRole.ADMIN];
+  return [UserRole.AGENT, UserRole.SUPERVISOR, UserRole.ADMIN];
+};
+
+const sanitizeRecipient = (value) => String(value || '').trim().toLowerCase();
+
+const collectBroadcastRecipients = (settings, audience) => {
+  const allowedRoles = resolveBroadcastRoles(audience);
+  const team = Array.isArray(settings?.team) ? settings.team : [];
+  const seen = new Set();
+  const out = [];
+  for (const member of team) {
+    if (!allowedRoles.includes(member?.role)) continue;
+    const email = sanitizeRecipient(member?.email);
+    if (!email || seen.has(email)) continue;
+    seen.add(email);
+    out.push({
+      email,
+      name: member?.name || email,
+      role: member?.role || UserRole.AGENT,
+    });
+  }
+  return out;
+};
+
+const sendBroadcastEmail = async ({ to, title, body, audience, actorName, tenantId }) => {
+  const apiKey = process.env.SENDGRID_API_KEY;
+  const fromEmail = process.env.SENDGRID_FROM_EMAIL;
+  if (!apiKey || !fromEmail) {
+    return { ok: false, status: 0, error: 'SENDGRID_NOT_CONFIGURED' };
+  }
+  const html = `<p>${body.replace(/\n/g, '<br/>')}</p><p><small>Audience: ${audience} • Tenant: ${tenantId} • Sent by: ${actorName}</small></p>`;
+  try {
+    const response = await fetch('https://api.sendgrid.com/v3/mail/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        personalizations: [{ to: [{ email: to }] }],
+        from: { email: fromEmail },
+        subject: `[ConnectAI Broadcast] ${title}`,
+        content: [
+          { type: 'text/plain', value: `${body}\n\nAudience: ${audience}\nTenant: ${tenantId}\nSent by: ${actorName}` },
+          { type: 'text/html', value: html },
+        ],
+      }),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      return { ok: false, status: response.status, error: text || `SENDGRID_HTTP_${response.status}` };
+    }
+    return { ok: true, status: response.status };
+  } catch (error) {
+    return { ok: false, status: 0, error: error?.message || 'SENDGRID_REQUEST_FAILED' };
+  }
 };
 
 const DEFAULT_AUTH_SETTINGS = {
@@ -1297,6 +1427,15 @@ const HUBSPOT_OAUTH = {
 
 const AccessToken = twilio.jwt.AccessToken;
 const { VoiceGrant } = AccessToken;
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY || '';
+const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null;
+const STRIPE_PRICE_IDS = {
+  Starter: process.env.STRIPE_PRICE_STARTER || '',
+  Growth: process.env.STRIPE_PRICE_GROWTH || '',
+  Enterprise: process.env.STRIPE_PRICE_ENTERPRISE || '',
+};
+const SUPPORTED_CURRENCIES = ['USD', 'GBP', 'NGN'];
+const CURRENCY_SYMBOLS = { USD: '$', GBP: '£', NGN: '₦' };
 const getTwilioAuthToken = () => process.env.TWILIO_AUTH_TOKEN || readEnvFileValue('TWILIO_AUTH_TOKEN') || '';
 const getTwilioAccountSid = () => process.env.TWILIO_ACCOUNT_SID || readEnvFileValue('TWILIO_ACCOUNT_SID') || '';
 const getTwilioApiKey = () => process.env.TWILIO_API_KEY || readEnvFileValue('TWILIO_API_KEY') || '';
@@ -1358,6 +1497,14 @@ const extractRecordingIdFromUrl = (url = '') => {
   const token = tokenMatch[1];
   const parts = token.split('.');
   return parts.length >= 2 ? parts[1] : '';
+};
+
+const detectAudioMimeFromBuffer = (buffer) => {
+  if (!buffer || buffer.length < 4) return 'application/octet-stream';
+  const header = buffer.subarray(0, 4).toString('ascii');
+  if (header === 'RIFF') return 'audio/wav';
+  if (header.startsWith('ID3') || (buffer[0] === 0xff && (buffer[1] & 0xe0) === 0xe0)) return 'audio/mpeg';
+  return 'application/octet-stream';
 };
 
 const canAccessRecordings = async (req) => {
@@ -1653,6 +1800,58 @@ app.get('/', (_req, res) => {
   });
 });
 
+const getPublicDesktopReleaseFallback = () => {
+  try {
+    const releasePath = path.resolve(__dirname, '../public/desktop-release.json');
+    const raw = readFileSync(releasePath, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return {
+      productName: 'ConnectAI Desktop',
+      channel: 'beta',
+      unsigned: true,
+      latestVersion: '0.0.0-beta',
+      publishedAt: new Date('2026-02-14T00:00:00.000Z').toISOString(),
+      releasesUrl: 'https://github.com/Coolzymccooy/connectai/releases',
+      notesUrl: 'https://github.com/Coolzymccooy/connectai/blob/master/CHANGELOG.md',
+      downloads: {
+        windows: {
+          label: 'Windows x64',
+          fileName: 'ConnectAI-Desktop-windows-x64.msi',
+          url: 'https://github.com/Coolzymccooy/connectai/releases/latest/download/ConnectAI-Desktop-windows-x64.msi',
+          size: 'Coming soon',
+        },
+      },
+    };
+  }
+};
+
+app.get('/api/public/desktop-release', async (_req, res) => {
+  try {
+    const fallback = getPublicDesktopReleaseFallback();
+    const settings = await getSettingsForTenant(DEFAULT_TENANT_ID).catch(() => null);
+    const desktop = settings?.desktopRelease || {};
+    res.json({
+      ...fallback,
+      latestVersion: desktop.latestVersion || fallback.latestVersion,
+      publishedAt: desktop.publishedAt || fallback.publishedAt,
+      unsigned: desktop.unsignedBeta ?? fallback.unsigned,
+      releasesUrl: desktop.releasesPageUrl || fallback.releasesUrl,
+      notesUrl: desktop.releaseNotesUrl || fallback.notesUrl,
+      downloads: {
+        windows: {
+          label: 'Windows x64',
+          fileName: desktop.fileName || fallback.downloads?.windows?.fileName || 'ConnectAI-Desktop-windows-x64.msi',
+          url: desktop.windowsDownloadUrl || fallback.downloads?.windows?.url || '',
+          size: desktop.fileSizeLabel || fallback.downloads?.windows?.size || 'N/A',
+        },
+      },
+    });
+  } catch {
+    res.status(500).json({ error: 'desktop release unavailable' });
+  }
+});
+
 app.get('/api/health/deps', async (req, res) => {
   const mongo = isMongoReady();
   const firebase = Boolean(await getFirestore().catch(() => null));
@@ -1695,6 +1894,7 @@ app.post('/api/jobs/process', async (req, res) => {
 app.use('/api', (req, res, next) => {
   if (
     req.path === '/health' ||
+    req.path === '/public/desktop-release' ||
     req.path === '/recordings/download' ||
     /^\/oauth\/[^/]+\/callback$/.test(req.path)
   ) return next();
@@ -1957,25 +2157,161 @@ app.get('/api/settings', (req, res) => {
 app.put('/api/settings', async (req, res) => {
   const incoming = req.body || {};
   const tenantId = req.tenantId;
-  if (isMongoReady()) {
-    const existing = await Setting.findOne({ tenantId });
-    const data = normalizeSettingsShape({ ...(existing?.data || {}), ...incoming });
-    await Setting.findOneAndUpdate(
-      { tenantId },
-      { tenantId, data, updatedAt: Date.now() },
-      { upsert: true, new: true }
-    );
-    await writeAuditLog(req, 'SETTINGS_UPDATE', 'settings', { keys: Object.keys(incoming) });
-    res.json(data);
-    return;
-  }
-  const idx = stores.settingsByTenant.findIndex(s => s.tenantId === tenantId);
-  const merged = normalizeSettingsShape({ ...((stores.settingsByTenant[idx]?.data) || {}), ...incoming });
-  if (idx >= 0) stores.settingsByTenant[idx] = { tenantId, data: merged };
-  else stores.settingsByTenant.push({ tenantId, data: merged });
-  await saveStore('settings', stores.settingsByTenant);
+  const merged = await saveSettingsForTenant(tenantId, incoming);
   await writeAuditLog(req, 'SETTINGS_UPDATE', 'settings', { keys: Object.keys(incoming) });
   res.json(merged);
+});
+
+app.post('/api/broadcasts/send', authorize([UserRole.ADMIN]), async (req, res) => {
+  const tenantId = req.tenantId;
+  const payload = req.body || {};
+  const title = String(payload.title || '').trim();
+  const body = String(payload.body || '').trim();
+  const audience = String(payload.audience || 'ALL').toUpperCase();
+  const inApp = Boolean(payload.inApp);
+  const emailEnabled = Boolean(payload.email);
+  if (!title || !body) return res.status(400).json({ error: 'title and body are required' });
+  if (!['ALL', 'AGENT', 'SUPERVISOR', 'ADMIN'].includes(audience)) return res.status(400).json({ error: 'invalid audience' });
+
+  const settings = await getSettingsForTenant(tenantId);
+  const recipients = emailEnabled ? collectBroadcastRecipients(settings, audience) : [];
+  const deliveryLogs = [];
+  let delivered = 0;
+  let failed = 0;
+
+  if (emailEnabled) {
+    for (const recipient of recipients) {
+      const sent = await sendBroadcastEmail({
+        to: recipient.email,
+        title,
+        body,
+        audience,
+        actorName: req.user?.name || req.user?.email || 'Admin',
+        tenantId,
+      });
+      if (sent.ok) delivered += 1;
+      else failed += 1;
+      deliveryLogs.push({
+        email: recipient.email,
+        status: sent.ok ? 'DELIVERED' : 'FAILED',
+        reason: sent.ok ? '' : String(sent.error || ''),
+        at: new Date().toISOString(),
+      });
+    }
+  }
+
+  const entry = {
+    id: `bc_${Date.now()}`,
+    title,
+    body,
+    audience,
+    inApp,
+    email: emailEnabled,
+    status: 'SENT',
+    createdAt: new Date().toISOString(),
+    sentAt: new Date().toISOString(),
+    createdByName: req.user?.name || req.user?.email || 'Admin',
+    delivery: {
+      attempted: recipients.length,
+      delivered,
+      failed,
+      provider: emailEnabled ? 'sendgrid' : 'none',
+      logs: deliveryLogs,
+    },
+  };
+  const messages = [entry, ...((settings.broadcastCenter?.messages || []))].slice(0, 150);
+  const merged = await saveSettingsForTenant(tenantId, {
+    broadcastCenter: { messages },
+  });
+  await writeAuditLog(req, 'BROADCAST_SEND', entry.id, {
+    audience,
+    inApp,
+    email: emailEnabled,
+    attempted: recipients.length,
+    delivered,
+    failed,
+  });
+  return res.json({ broadcast: entry, settings: merged });
+});
+
+app.post('/api/broadcasts/:id/archive', authorize([UserRole.ADMIN]), async (req, res) => {
+  const tenantId = req.tenantId;
+  const id = String(req.params.id || '');
+  const settings = await getSettingsForTenant(tenantId);
+  const messages = (settings.broadcastCenter?.messages || []).map((item) =>
+    item.id === id ? { ...item, status: 'ARCHIVED' } : item
+  );
+  const merged = await saveSettingsForTenant(tenantId, { broadcastCenter: { messages } });
+  await writeAuditLog(req, 'BROADCAST_ARCHIVE', id, {});
+  res.json({ ok: true, settings: merged });
+});
+
+app.get('/api/billing/stripe/config', authorize([UserRole.ADMIN]), async (req, res) => {
+  const tenantId = req.tenantId;
+  const settings = await getSettingsForTenant(tenantId);
+  const currency = String(settings?.subscription?.currency || 'GBP').toUpperCase();
+  res.json({
+    configured: Boolean(stripe),
+    publishableKeyConfigured: Boolean(process.env.STRIPE_PUBLISHABLE_KEY),
+    currency,
+    pricesConfigured: {
+      Starter: Boolean(STRIPE_PRICE_IDS.Starter),
+      Growth: Boolean(STRIPE_PRICE_IDS.Growth),
+      Enterprise: Boolean(STRIPE_PRICE_IDS.Enterprise),
+    },
+    billingPortalConfigured: Boolean(process.env.STRIPE_BILLING_PORTAL_URL),
+  });
+});
+
+app.post('/api/billing/stripe/checkout', authorize([UserRole.ADMIN]), async (req, res) => {
+  if (!stripe) return res.status(400).json({ error: 'Stripe not configured (missing STRIPE_SECRET_KEY)' });
+  const tenantId = req.tenantId;
+  const settings = await getSettingsForTenant(tenantId);
+  const { mode = 'subscription', amount, plan, successUrl, cancelUrl } = req.body || {};
+  const currentCurrency = String(settings?.subscription?.currency || 'GBP').toUpperCase();
+  const currency = SUPPORTED_CURRENCIES.includes(currentCurrency) ? currentCurrency : 'GBP';
+  const appBaseUrl = process.env.CLIENT_URL || process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+  const resolvedSuccess = String(successUrl || `${appBaseUrl}/#/app?billing=success`);
+  const resolvedCancel = String(cancelUrl || `${appBaseUrl}/#/app?billing=cancelled`);
+
+  if (mode === 'subscription') {
+    const selectedPlan = String(plan || settings?.subscription?.plan || 'Growth');
+    const priceId = STRIPE_PRICE_IDS[selectedPlan] || '';
+    if (!priceId) {
+      return res.status(400).json({ error: `Missing Stripe price for plan ${selectedPlan}. Set STRIPE_PRICE_${selectedPlan.toUpperCase()} env.` });
+    }
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: resolvedSuccess,
+      cancel_url: resolvedCancel,
+      metadata: { tenantId, plan: selectedPlan, mode: 'subscription' },
+    });
+    return res.json({ url: session.url, id: session.id });
+  }
+
+  const numericAmount = Number(amount);
+  if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+    return res.status(400).json({ error: 'Valid top-up amount is required' });
+  }
+  const unitAmount = Math.round(numericAmount * 100);
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    line_items: [
+      {
+        quantity: 1,
+        price_data: {
+          currency: currency.toLowerCase(),
+          unit_amount: unitAmount,
+          product_data: { name: `ConnectAI Wallet Top-up (${CURRENCY_SYMBOLS[currency] || ''}${numericAmount})` },
+        },
+      },
+    ],
+    success_url: resolvedSuccess,
+    cancel_url: resolvedCancel,
+    metadata: { tenantId, mode: 'topup', amount: String(numericAmount), currency },
+  });
+  return res.json({ url: session.url, id: session.id });
 });
 
 // --- TENANTS & USERS (Admin) ---
@@ -2544,10 +2880,17 @@ app.get('/api/recordings/download', async (req, res) => {
         data = await fs.readFile(rec.storagePath || rec.filePath);
       }
       if (!data) return res.status(404).send('file missing');
-      const isMp3 = format === 'mp3';
-      res.setHeader('Content-Type', isMp3 ? 'audio/mpeg' : (rec.mimeType || 'audio/wav'));
-      const filename = isMp3 ? `${externalId}.mp3` : (rec.filename || `${externalId}.wav`);
+      const detectedMime = detectAudioMimeFromBuffer(data);
+      const requestedMp3 = format === 'mp3';
+      const resolvedMime = requestedMp3 && detectedMime === 'audio/mpeg' ? 'audio/mpeg' : (detectedMime !== 'application/octet-stream' ? detectedMime : (rec.mimeType || 'audio/wav'));
+      const extension = resolvedMime === 'audio/mpeg' ? 'mp3' : 'wav';
+      const filename = rec.filename || `${externalId}.${extension}`;
       res.setHeader('Content-Disposition', `${download ? 'attachment' : 'inline'}; filename=\"${filename}\"`);
+      res.setHeader('X-Recording-Detected-Mime', resolvedMime);
+      if (requestedMp3 && resolvedMime !== 'audio/mpeg') {
+        res.setHeader('X-Recording-Format-Warning', 'Requested mp3 but stored file is not mp3; returning original audio stream.');
+      }
+      res.setHeader('Content-Type', resolvedMime);
       res.setHeader('Content-Length', data.length);
       res.send(data);
     } catch {

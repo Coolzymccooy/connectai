@@ -67,6 +67,7 @@ export interface Call {
   agentEmail?: string;
   agentExtension?: string;
   targetAgentId?: string;
+  targetAgentEmail?: string;
   participants?: string[];
   extension?: string;
   qaEvaluation?: QaEvaluation;
@@ -75,6 +76,11 @@ export interface Call {
   riskFlag?: string;
   isVideo?: boolean;
   isScreenSharing?: boolean;
+  screenShareOwnerId?: string;
+  hostId?: string;
+  lobbyEnabled?: boolean;
+  meetingLocked?: boolean;
+  waitingRoom?: string[];
   isMigrated?: boolean;
   legacyProvider?: string;
   emailSynced?: boolean;
@@ -137,6 +143,19 @@ export interface Meeting {
 }
 
 export interface AppSettings {
+  broadcastCenter?: {
+    messages: BroadcastMessage[];
+  };
+  desktopRelease?: {
+    latestVersion: string;
+    windowsDownloadUrl: string;
+    releaseNotesUrl: string;
+    releasesPageUrl: string;
+    publishedAt: string;
+    fileName?: string;
+    fileSizeLabel?: string;
+    unsignedBeta: boolean;
+  };
   integrations: {
     hubSpot: {
       enabled: boolean;
@@ -164,6 +183,7 @@ export interface AppSettings {
     plan: 'Starter' | 'Growth' | 'Enterprise';
     seats: number;
     balance: number;
+    currency?: CurrencyCode;
     autoTopUp: boolean;
     usage: {
       aiTokens: number;
@@ -187,6 +207,36 @@ export interface AppSettings {
   };
   team: User[];
   workflows: WorkflowRule[];
+}
+
+export type BroadcastAudience = 'ALL' | 'AGENT' | 'SUPERVISOR' | 'ADMIN';
+export type CurrencyCode = 'USD' | 'GBP' | 'NGN';
+
+export interface BroadcastDeliveryLog {
+  email: string;
+  status: 'DELIVERED' | 'FAILED' | 'SKIPPED';
+  reason?: string;
+  at: string;
+}
+
+export interface BroadcastMessage {
+  id: string;
+  title: string;
+  body: string;
+  audience: BroadcastAudience;
+  inApp: boolean;
+  email: boolean;
+  status: 'SENT' | 'ARCHIVED';
+  createdAt: string;
+  sentAt?: string;
+  createdByName?: string;
+  delivery?: {
+    attempted: number;
+    delivered: number;
+    failed: number;
+    provider?: 'sendgrid' | 'none';
+    logs: BroadcastDeliveryLog[];
+  };
 }
 
 export interface User {

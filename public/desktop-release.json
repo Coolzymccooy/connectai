@@ -1,0 +1,17 @@
+{
+  "productName": "ConnectAI Desktop",
+  "channel": "beta",
+  "unsigned": true,
+  "latestVersion": "0.0.0-beta",
+  "publishedAt": "2026-02-14T00:00:00.000Z",
+  "releasesUrl": "https://github.com/Coolzymccooy/connectai/releases",
+  "notesUrl": "https://github.com/Coolzymccooy/connectai/blob/master/CHANGELOG.md",
+  "downloads": {
+    "windows": {
+      "label": "Windows x64",
+      "fileName": "ConnectAI-Desktop-windows-x64.msi",
+      "url": "https://github.com/Coolzymccooy/connectai/releases/latest/download/ConnectAI-Desktop-windows-x64.msi",
+      "size": "Coming soon"
+    }
+  }
+}

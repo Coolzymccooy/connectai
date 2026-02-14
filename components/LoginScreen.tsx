@@ -3,6 +3,7 @@ import { User, Shield, Lock, Headset, LayoutDashboard, Settings, Mail, KeyRound,
 import { Role } from '../types';
 import { auth, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, signOut, updateProfile, GoogleAuthProvider, signInWithPopup } from '../services/firebase';
 import { acceptInvite, fetchAuthPolicy } from '../services/authPolicyService';
+import { BrandLogo } from './BrandLogo';
 
 interface LoginScreenProps {
   onLogin: (role: Role, profile?: { uid: string; email?: string | null; displayName?: string | null }) => void;
@@ -256,9 +257,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
           </div>
 
             <button className="z-10 text-left" onClick={() => window.location.assign('/')}>
-              <div className="w-12 h-12 bg-brand-500 rounded-xl flex items-center justify-center text-white font-bold text-2xl shadow-lg mb-6 hover:scale-105 transition-transform">
-                C
-              </div>
+              <BrandLogo size={48} roundedClassName="rounded-xl" className="mb-6 hover:scale-105 transition-transform" />
               <h1 className="text-3xl font-bold mb-2">ConnectAI</h1>
               <p className="text-brand-200">The AI-native contact center for modern SMBs.</p>
             </button>
@@ -286,7 +285,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
           
           {/* Mobile Header (Visible only on mobile) */}
            <button className="md:hidden flex items-center gap-3 mb-8 text-left" onClick={() => window.location.assign('/')}>
-             <div className="w-10 h-10 bg-brand-600 rounded-lg flex items-center justify-center text-white font-bold text-xl">C</div>
+             <BrandLogo size={40} roundedClassName="rounded-lg" />
              <h1 className="text-xl font-bold text-slate-900">ConnectAI</h1>
            </button>
 

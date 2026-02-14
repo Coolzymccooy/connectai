@@ -1,5 +1,6 @@
-import React, { useMemo } from 'react';
-import { ArrowRight, CheckCircle2, Sparkles, PhoneCall, MessageSquare, ShieldCheck, BarChart3, Users, CalendarClock } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { ArrowRight, CheckCircle2, Sparkles, PhoneCall, MessageSquare, ShieldCheck, BarChart3, Users, CalendarClock, Download, Monitor } from 'lucide-react';
+import { BrandLogo } from './BrandLogo';
 
 const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/80 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500 shadow-sm">
@@ -9,9 +10,41 @@ const SectionLabel: React.FC<{ children: React.ReactNode }> = ({ children }) => 
 );
 
 export const LandingPage: React.FC = () => {
+  const [desktopRelease, setDesktopRelease] = useState<any | null>(null);
   const hasSession = useMemo(() => {
     if (typeof window === 'undefined') return false;
     return Boolean(localStorage.getItem('connectai_auth_token'));
+  }, []);
+
+  const isWindows = useMemo(() => {
+    if (typeof navigator === 'undefined') return true;
+    return /Win/i.test(navigator.userAgent || navigator.platform || '');
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const live = await fetch('/api/public/desktop-release', { cache: 'no-store' });
+        if (live.ok) {
+          const data = await live.json();
+          if (!cancelled) setDesktopRelease(data);
+          return;
+        }
+      } catch {
+        // fallback below
+      }
+      try {
+        const fallback = await fetch('/desktop-release.json', { cache: 'no-store' });
+        const data = fallback.ok ? await fallback.json() : null;
+        if (!cancelled) setDesktopRelease(data);
+      } catch {
+        if (!cancelled) setDesktopRelease(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const goApp = () => {
@@ -25,6 +58,13 @@ export const LandingPage: React.FC = () => {
     window.history.replaceState(null, '', '/');
   };
 
+  const desktopDownload = desktopRelease?.downloads?.windows;
+  const hasDownloadUrl = Boolean(desktopDownload?.url);
+  const desktopVersion = desktopRelease?.latestVersion || 'N/A';
+  const desktopDate = desktopRelease?.publishedAt ? new Date(desktopRelease.publishedAt).toLocaleDateString() : 'N/A';
+  const releasesUrl = desktopRelease?.releasesUrl || 'https://github.com/Coolzymccooy/connectai/releases';
+  const notesUrl = desktopRelease?.notesUrl || 'https://github.com/Coolzymccooy/connectai/blob/master/CHANGELOG.md';
+
   return (
     <div className="landing-page h-screen min-h-screen overflow-y-auto bg-slate-950 text-slate-900">
       <div className="relative">
@@ -36,7 +76,7 @@ export const LandingPage: React.FC = () => {
 
         <header className="relative z-10 mx-auto flex w-full max-w-none items-center justify-between px-6 pb-8 pt-10 text-white md:px-10 xl:px-16 2xl:px-24">
           <button onClick={goLanding} className="flex items-center gap-3 text-left focus:outline-none">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/10 text-xl font-black italic tracking-tight">C</div>
+            <BrandLogo size={44} roundedClassName="rounded-2xl" className="bg-white/10" />
             <div>
               <p className="text-xs uppercase tracking-[0.35em] text-white/60">ConnectAI</p>
               <div className="flex items-center gap-3">
@@ -54,6 +94,7 @@ export const LandingPage: React.FC = () => {
                 Return to App
               </button>
             )}
+            <a href="#desktop-download" className="rounded-full border border-cyan-300/60 bg-cyan-300/10 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-cyan-100 transition hover:border-cyan-200 hover:text-white">Download Desktop</a>
             <button onClick={goApp} className="rounded-full border border-white/20 px-4 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-white/80 transition hover:border-white/60 hover:text-white">Launch App</button>
             <a href="#demo" className="rounded-full bg-white px-5 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-900 transition hover:translate-y-[-1px] hover:shadow-lg">Book a Demo</a>
           </div>
@@ -74,6 +115,10 @@ export const LandingPage: React.FC = () => {
                   Start a Demo
                   <ArrowRight size={16} />
                 </button>
+                <a href="#desktop-download" className="inline-flex items-center gap-2 rounded-full bg-cyan-300 px-6 py-3 text-sm font-semibold text-slate-900 transition hover:bg-cyan-200">
+                  <Download size={16} />
+                  Download Desktop
+                </a>
                 <a href="#features" className="inline-flex items-center gap-2 rounded-full border border-white/30 px-6 py-3 text-sm font-semibold text-white/90 transition hover:border-white/70">
                   See Features
                 </a>
@@ -118,6 +163,65 @@ export const LandingPage: React.FC = () => {
                     Tech by Tiwaton
                   </span>
                   <span className="text-[10px] tracking-[0.4em] text-emerald-200/80">Trusted Build</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section id="desktop-download" className="mx-auto w-full max-w-none px-6 pb-24 md:px-10 xl:px-16 2xl:px-24">
+            <div className="rounded-[36px] border border-cyan-300/20 bg-slate-950/70 px-8 py-12 text-white shadow-2xl">
+              <div className="flex flex-col gap-8 lg:flex-row lg:items-start lg:justify-between">
+                <div className="max-w-2xl">
+                  <SectionLabel>Desktop App Beta</SectionLabel>
+                  <h3 className="mt-4 text-3xl font-black" style={{ fontFamily: "'Space Grotesk', 'Inter', sans-serif" }}>
+                    Download ConnectAI Desktop for stable calling workflows.
+                  </h3>
+                  <p className="mt-4 text-white/70">
+                    Desktop gives better media-device reliability, native notifications, and a dedicated workspace window while keeping the same login and backend as web.
+                  </p>
+                  <div className="mt-6 grid gap-3 text-sm text-white/70 sm:grid-cols-2">
+                    <div className="flex items-start gap-2"><CheckCircle2 size={16} className="mt-0.5 text-cyan-300" /> Better call + mic/camera stability</div>
+                    <div className="flex items-start gap-2"><CheckCircle2 size={16} className="mt-0.5 text-cyan-300" /> Native ringing and desktop notifications</div>
+                    <div className="flex items-start gap-2"><CheckCircle2 size={16} className="mt-0.5 text-cyan-300" /> Dedicated app window for agents</div>
+                    <div className="flex items-start gap-2"><CheckCircle2 size={16} className="mt-0.5 text-cyan-300" /> Same credentials and API stack</div>
+                  </div>
+                </div>
+                <div className="w-full max-w-xl rounded-3xl border border-white/10 bg-white/5 p-6">
+                  <p className="text-xs uppercase tracking-[0.3em] text-white/50">Latest Release</p>
+                  <div className="mt-4 space-y-2 text-sm">
+                    <p className="font-semibold text-white">{desktopRelease?.productName || 'ConnectAI Desktop'}</p>
+                    <p className="text-white/70">Version: <span className="font-semibold text-white">{desktopVersion}</span></p>
+                    <p className="text-white/70">Published: <span className="font-semibold text-white">{desktopDate}</span></p>
+                    <p className="text-white/70">Platform: <span className="font-semibold text-white">{desktopDownload?.label || 'Windows x64'}</span></p>
+                    <p className="text-white/70">Size: <span className="font-semibold text-white">{desktopDownload?.size || 'N/A'}</span></p>
+                  </div>
+                  <div className="mt-6 flex flex-wrap gap-3">
+                    {hasDownloadUrl ? (
+                      <a
+                        href={desktopDownload.url}
+                        className="inline-flex items-center gap-2 rounded-full bg-cyan-300 px-5 py-2.5 text-sm font-semibold text-slate-900 transition hover:bg-cyan-200"
+                      >
+                        <Download size={15} />
+                        Download for {isWindows ? 'Windows' : 'Desktop'}
+                      </a>
+                    ) : (
+                      <a
+                        href={releasesUrl}
+                        className="inline-flex items-center gap-2 rounded-full bg-cyan-300 px-5 py-2.5 text-sm font-semibold text-slate-900 transition hover:bg-cyan-200"
+                      >
+                        <Download size={15} />
+                        View Releases
+                      </a>
+                    )}
+                    <a href={releasesUrl} className="rounded-full border border-white/25 px-5 py-2.5 text-sm font-semibold text-white/90 transition hover:border-white/60">View All Releases</a>
+                    <a href={notesUrl} className="rounded-full border border-white/25 px-5 py-2.5 text-sm font-semibold text-white/90 transition hover:border-white/60">Release Notes</a>
+                  </div>
+                  <div className="mt-6 rounded-2xl border border-amber-300/30 bg-amber-300/10 p-4 text-xs text-amber-100">
+                    <p className="font-semibold uppercase tracking-[0.2em]">Beta Unsigned Installer Notice</p>
+                    <p className="mt-2 leading-relaxed text-amber-100/90">
+                      Windows SmartScreen may show a warning while this beta is unsigned. Click <span className="font-semibold">More info</span> then <span className="font-semibold">Run anyway</span> if downloaded from our official GitHub Releases page.
+                    </p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -174,6 +278,32 @@ export const LandingPage: React.FC = () => {
                   <li className="flex gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-400/20 text-emerald-200">2</span> Invite your team and assign roles</li>
                   <li className="flex gap-3"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-400/20 text-emerald-200">3</span> Call, track, and optimize conversations</li>
                 </ol>
+              </div>
+            </div>
+          </section>
+
+          <section className="mx-auto w-full max-w-none px-6 pb-24 text-white md:px-10 xl:px-16 2xl:px-24">
+            <div className="rounded-[36px] border border-white/10 bg-white/5 p-10">
+              <SectionLabel>Web vs Desktop</SectionLabel>
+              <div className="mt-6 grid gap-6 md:grid-cols-2">
+                <div className="rounded-3xl border border-white/10 bg-slate-900/50 p-6">
+                  <p className="text-xs uppercase tracking-[0.3em] text-white/50">Web App</p>
+                  <h4 className="mt-3 text-2xl font-black">Fast browser access</h4>
+                  <ul className="mt-4 space-y-2 text-sm text-white/70">
+                    <li className="flex items-start gap-2"><Monitor size={14} className="mt-1 text-emerald-300" /> No install required</li>
+                    <li className="flex items-start gap-2"><Monitor size={14} className="mt-1 text-emerald-300" /> Best for quick onboarding</li>
+                    <li className="flex items-start gap-2"><Monitor size={14} className="mt-1 text-emerald-300" /> Same account and features</li>
+                  </ul>
+                </div>
+                <div className="rounded-3xl border border-cyan-300/30 bg-cyan-300/10 p-6">
+                  <p className="text-xs uppercase tracking-[0.3em] text-cyan-100/70">Desktop App</p>
+                  <h4 className="mt-3 text-2xl font-black text-cyan-100">Optimized call operations</h4>
+                  <ul className="mt-4 space-y-2 text-sm text-cyan-50/90">
+                    <li className="flex items-start gap-2"><Download size={14} className="mt-1 text-cyan-100" /> Better voice/video device handling</li>
+                    <li className="flex items-start gap-2"><Download size={14} className="mt-1 text-cyan-100" /> Native notifications and ring behavior</li>
+                    <li className="flex items-start gap-2"><Download size={14} className="mt-1 text-cyan-100" /> Focused full-time agent workspace</li>
+                  </ul>
+                </div>
               </div>
             </div>
           </section>

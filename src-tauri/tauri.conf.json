@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ConnectAI Desktop",
+  "version": "0.1.0",
+  "identifier": "com.connectai.desktop",
+  "build": {
+    "beforeDevCommand": "set CHOKIDAR_USEPOLLING=1&& set CHOKIDAR_INTERVAL=300&& npm run dev",
+    "devUrl": "http://localhost:3090",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ConnectAI Desktop",
+        "width": 1600,
+        "height": 960,
+        "minWidth": 1200,
+        "minHeight": 700,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "createUpdaterArtifacts": false
+  }
+}

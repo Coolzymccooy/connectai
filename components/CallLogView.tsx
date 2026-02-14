@@ -85,14 +85,14 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
         }
     };
 
-    const handleDownload = async (call: Call, format: 'csv' | 'mp3' = 'mp3') => {
+    const handleDownload = async (call: Call) => {
         try {
             const url = await resolveRecordingUrl(call);
             if (!url) {
                 alert("No recording available for this call.");
                 return;
             }
-            const downloadUrl = `${url}${url.includes('?') ? '&' : '?'}download=1${format === 'mp3' ? '&format=mp3' : ''}`;
+            const downloadUrl = `${url}${url.includes('?') ? '&' : '?'}download=1`;
             const anchor = document.createElement('a');
             anchor.href = downloadUrl;
             anchor.download = '';
@@ -327,10 +327,10 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                                                     <Play size={16} fill={hasRecording(call) ? "currentColor" : "none"} />
                                                 </button>
                                                 <button
-                                                    onClick={() => handleDownload(call, 'mp3')}
+                                                    onClick={() => handleDownload(call)}
                                                     disabled={!hasRecording(call)}
                                                     className={`p-2 rounded-xl transition-all ${hasRecording(call) ? 'bg-slate-100 text-slate-600 hover:bg-slate-200' : 'bg-slate-100 text-slate-300 cursor-not-allowed'}`}
-                                                    title="Download MP3"
+                                                    title="Download Recording"
                                                 >
                                                     <Download size={16} />
                                                 </button>
