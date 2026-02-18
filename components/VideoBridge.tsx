@@ -568,6 +568,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       setScreenStream(stream);
       replaceOutgoingVideoTrack(videoTrack);
       
+      // Ensure we explicitly set active state
+      if (!activeCall.isScreenSharing) {
+        onToggleMedia('screen');
+      }
+
     } catch (err) {
       console.error('Screen share rejected:', err);
       // Avoid re-prompt loops when user cancels browser picker.
@@ -731,29 +736,44 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     if (!peer || peer.destroyed || peer.disconnected || !peer.id) return;
     const identityKey = String(targetIdentityKey || '').trim();
     if (!identityKey || identityKey === currentIdentityKey) return;
+    
+    // Prevent duplicate calls
     if (connectionsRef.current.has(identityKey)) return;
     if (dialingPeersRef.current.has(identityKey)) return;
     dialingPeersRef.current.add(identityKey);
+    
     let stream: MediaStream;
     try {
-      stream = localStream ?? await getUserMediaSafe(
-        isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
-      );
+      // FIX 1: Robust Stream Initialization
+      // Ensure we have a valid local stream before calling.
+      if (localStream && localStream.active && localStream.getTracks().length > 0) {
+        stream = localStream;
+      } else {
+        stream = await getUserMediaSafe(
+           isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
+        );
+        setLocalStream(stream);
+      }
     } catch {
       dialingPeersRef.current.delete(identityKey);
       return;
     }
+    
+    // FIX 2: Audio Persistence
+    // Ensure audio tracks are enabled before sending
     stream.getAudioTracks().forEach((track) => {
       track.enabled = !isMuted;
     });
-    if (!localStream) setLocalStream(stream);
+
     const identityIdFallback = identityKey.startsWith('id:') ? identityKey.slice(3).trim() : '';
     const candidatePeerIds = Array.from(new Set([
       buildPeerId(identityKey),
       legacyUserId ? `connectai-user-${legacyUserId}` : '',
       identityIdFallback ? `connectai-user-${identityIdFallback}` : '',
     ].filter(Boolean)));
+    
     debugRouting('peer.dialCandidates', { targetIdentityKey: identityKey, candidatePeerIds });
+    
     let attemptIndex = 0;
     const attemptDial = () => {
       const currentPeer = peerRef.current;
@@ -764,6 +784,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       const targetPeerId = candidatePeerIds[attemptIndex];
       attemptIndex += 1;
       debugRouting('peer.dialAttempt', { targetIdentityKey: identityKey, targetPeerId });
+      
       let connected = false;
       let call: MediaConnection;
       try {
@@ -773,30 +794,42 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         attemptDial();
         return;
       }
+      
       if (!call || !call.peerConnection) {
         debugRouting('peer.dialNullConnection', { targetIdentityKey: identityKey, targetPeerId });
         attemptDial();
         return;
       }
+      
+      // FIX 3: Connection Keep-Alive
+      // Don't close connection aggressively on timeout. Wait longer for ICE.
       const fallbackTimer = window.setTimeout(() => {
         if (connected || connectionsRef.current.has(identityKey)) return;
-        try { call.close(); } catch {}
-        attemptDial();
-      }, 2600);
-      call.on('stream', () => {
+        attemptDial(); 
+      }, 5000); 
+      
+      call.on('stream', (remoteStream) => {
         connected = true;
         window.clearTimeout(fallbackTimer);
+        // Ensure remote tracks are active
+        remoteStream.getTracks().forEach(t => t.enabled = true);
+        registerConnection(call, identityKey); 
       });
+      
       call.on('close', () => {
         window.clearTimeout(fallbackTimer);
         if (!connected && !connectionsRef.current.has(identityKey)) attemptDial();
       });
-      call.on('error', () => {
+      
+      call.on('error', (err) => {
+        console.warn('Call error:', err);
         window.clearTimeout(fallbackTimer);
         if (!connected && !connectionsRef.current.has(identityKey)) attemptDial();
       });
-      registerConnection(call, identityKey);
+      
+      connectionsRef.current.set(identityKey, call);
     };
+    
     attemptDial();
   }, [localStream, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe, currentIdentityKey]);
 
@@ -886,16 +919,6 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       window.removeEventListener('keydown', unlock);
     };
   }, [remoteStreams.size, unlockRemoteAudio]);
-
-  const handleTerminate = () => {
-    stopScreenShare();
-    connectionsRef.current.forEach(c => c.close());
-    connectionsRef.current.clear();
-    setRemoteStreams(new Map());
-    localStream?.getTracks().forEach(t => t.stop());
-    setLocalStream(null);
-    onHangup();
-  };
 
   const roster = useMemo(() => {
     const base = [...team];
@@ -1240,44 +1263,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
            <button onClick={() => setShowSidebar(!showSidebar)} className={`p-2 rounded-md hover:bg-[#333] transition-colors ${showSidebar ? 'bg-[#4f46e5] text-white' : 'text-gray-400'}`}>
              <Users size={18}/>
            </button>
-           {isPresentationMode && (
-             <>
-               <div className="h-6 w-[1px] bg-[#333] mx-1"></div>
-               <button onClick={() => setParticipantRailDock('top')} className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${participantRailDock === 'top' ? 'bg-indigo-600 text-white' : 'bg-[#2b2b2b] text-gray-300 hover:bg-[#3a3a3a]'}`}>Top</button>
-               <button onClick={() => setParticipantRailDock('left')} className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${participantRailDock === 'left' ? 'bg-indigo-600 text-white' : 'bg-[#2b2b2b] text-gray-300 hover:bg-[#3a3a3a]'}`}>Left</button>
-               <button onClick={() => setParticipantRailDock('right')} className={`px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider ${participantRailDock === 'right' ? 'bg-indigo-600 text-white' : 'bg-[#2b2b2b] text-gray-300 hover:bg-[#3a3a3a]'}`}>Right</button>
-             </>
-           )}
         </div>
-      </div>
-      <div className="h-12 bg-[#171717] border-b border-[#2c2c2c] flex items-center gap-2 px-3 text-[10px] font-black uppercase tracking-wider text-slate-300 overflow-x-auto scrollbar-hide">
-        <button onClick={() => setRaisedHand((v) => !v)} className={`px-3 py-1.5 rounded-md border ${raisedHand ? 'bg-amber-500/20 border-amber-400/40 text-amber-200' : 'bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]'}`}>Take Control</button>
-        <button onClick={handlePopOutMeeting} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">Pop Out</button>
-        <button onClick={() => setActiveTab('chat')} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">Chat</button>
-        <button onClick={() => { setActiveTab('participants'); setShowSidebar(true); }} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">People</button>
-        <button onClick={() => setShowReactions((v) => !v)} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">React</button>
-        <button onClick={() => setViewMode((v) => (v === 'gallery' ? 'speaker' : 'gallery'))} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">View</button>
-        <button onClick={() => setShowSettings(true)} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">Camera</button>
-        <button onClick={toggleMute} className="px-3 py-1.5 rounded-md border bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]">Mic</button>
-        <button onClick={handleCopyMeetingLink} className="px-3 py-1.5 rounded-md border bg-indigo-600 border-indigo-500 hover:bg-indigo-500 text-white">Share Link</button>
-        <button onClick={() => setShowDiagnostics((v) => !v)} className={`px-3 py-1.5 rounded-md border ${showDiagnostics ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]'}`}>Reconnect</button>
-        {isHost && (
-          <>
-            <button onClick={handleToggleLobby} className={`px-3 py-1.5 rounded-md border ${activeCall.lobbyEnabled ? 'bg-amber-600/20 border-amber-400/40 text-amber-200' : 'bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]'}`}>
-              {activeCall.lobbyEnabled ? 'Lobby On' : 'Lobby Off'}
-            </button>
-            <button onClick={handleToggleMeetingLock} className={`px-3 py-1.5 rounded-md border ${activeCall.meetingLocked ? 'bg-rose-600/20 border-rose-400/40 text-rose-200' : 'bg-[#232323] border-[#3b3b3b] hover:bg-[#2f2f2f]'}`}>
-              {activeCall.meetingLocked ? 'Meeting Locked' : 'Lock Meeting'}
-            </button>
-            {waitingRoom.length > 0 && (
-              <button onClick={admitAllFromLobby} className="px-3 py-1.5 rounded-md border bg-emerald-600 border-emerald-500 hover:bg-emerald-500 text-white">
-                Admit {waitingRoom.length}
-              </button>
-            )}
-          </>
-        )}
-        <span className={`text-[9px] ${copyFeedback ? 'text-emerald-300' : 'text-slate-500'}`}>{copyFeedback ? 'Link Copied' : 'Invite participants with link'}</span>
-        {reconnectNote && <span className="text-[9px] text-emerald-300">{reconnectNote}</span>}
       </div>
 
       {/* 2. Main Stage */}
@@ -1287,37 +1273,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         {activeCall.isScreenSharing && (
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-red-600/90 backdrop-blur-md px-6 py-2 rounded-full flex items-center gap-3 shadow-2xl border border-red-400/30">
                 <Monitor size={16} className="animate-pulse"/>
-                <span className="text-xs font-bold uppercase tracking-wider">
-                  {activeCall.screenShareOwnerId === currentUser.id ? 'You are presenting' : 'Screen share live'}
-                </span>
-                {activeCall.screenShareOwnerId === currentUser.id && (
-                  <button onClick={stopScreenShare} className="bg-white text-red-600 px-3 py-1 rounded-full text-[10px] font-black hover:bg-gray-100 transition-colors">STOP</button>
-                )}
+                <span className="text-xs font-bold uppercase tracking-wider">You are presenting</span>
+                <button onClick={stopScreenShare} className="bg-white text-red-600 px-3 py-1 rounded-full text-[10px] font-black hover:bg-gray-100 transition-colors">STOP</button>
             </div>
-        )}
-
-        {showDiagnostics && (
-          <div className="absolute top-4 right-4 z-40 w-[300px] rounded-xl border border-emerald-400/30 bg-black/75 backdrop-blur-md p-3">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-[10px] font-black uppercase tracking-widest text-emerald-300">Reconnect Diagnostics</p>
-              <button
-                onClick={runReconnectSweep}
-                disabled={reconnectRunning}
-                className="px-2 py-1 rounded-md text-[10px] font-black uppercase tracking-wider bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60"
-              >
-                {reconnectRunning ? 'Running...' : 'Run Sweep'}
-              </button>
-            </div>
-            <div className="space-y-1 text-[10px] text-slate-200">
-              <p>Peer: {reconnectDiagnostics.peerReady ? 'Ready' : 'Not Ready'}</p>
-              <p>Remote Connected: {reconnectDiagnostics.connected}/{reconnectDiagnostics.expected}</p>
-              <p>Local Tracks: audio {reconnectDiagnostics.localAudioTracks} / video {reconnectDiagnostics.localVideoTracks}</p>
-              <p>Audio Unlock: {reconnectDiagnostics.needsRemoteAudioUnlock ? 'Required' : 'OK'}</p>
-              {reconnectDiagnostics.missing.length > 0 && (
-                <p className="text-amber-300">Missing: {reconnectDiagnostics.missing.join(', ')}</p>
-              )}
-            </div>
-          </div>
         )}
 
         {/* Flying Reactions Layer */}
@@ -1330,96 +1288,51 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         </div>
 
         <div className={`flex-1 p-4 transition-all duration-300 flex items-center justify-center ${showSidebar ? 'mr-[320px]' : ''}`}>
-          {isPresentationMode ? (
-            <div className={`w-full h-full grid gap-3 ${participantRailDock === 'top' ? 'grid-rows-[120px_1fr]' : participantRailDock === 'left' ? 'grid-cols-[220px_1fr]' : 'grid-cols-[1fr_220px]'}`}>
-              <div className={`rounded-xl border border-[#333] bg-[#0d1117] overflow-hidden ${participantRailDock === 'right' ? 'order-2' : participantRailDock === 'left' ? 'order-1' : 'order-1'}`}>
-                <div className={`${participantRailDock === 'top' ? 'h-full flex overflow-x-auto gap-2 p-2' : 'h-full overflow-y-auto p-2 space-y-2'}`}>
-                  {renderedParticipants.map((p) => {
-                    const isLocal = p.identityKey === currentIdentityKey;
-                    const stream = isLocal ? activeVideoStream : remoteStreams.get(p.identityKey);
-                    return (
-                      <button
-                        key={`rail-${p.identityKey}`}
-                        onClick={() => setFocusedParticipantId(p.identityKey)}
-                        className={`${participantRailDock === 'top' ? 'min-w-[160px] w-[160px]' : 'w-full h-[104px]'} rounded-lg overflow-hidden border ${focusedParticipant?.identityKey === p.identityKey ? 'border-indigo-500' : 'border-[#2b313c]'} bg-[#111827] relative`}
-                        title={`Focus ${p.name}`}
-                      >
+          <div className={`grid gap-3 w-full h-full max-h-full transition-all duration-500
+             ${participants.length === 1 ? 'grid-cols-1' : ''}
+             ${participants.length === 2 ? 'grid-cols-1 md:grid-cols-2' : ''}
+             ${participants.length >= 3 && participants.length <= 4 ? 'grid-cols-2' : ''}
+             ${participants.length > 4 ? 'grid-cols-2 md:grid-cols-3' : ''}
+          `}>
+             {participants.map(p => {
+                 const isLocal = p.id === currentUser.id;
+                 const stream = isLocal ? activeVideoStream : remoteStreams.get(p.identityKey);
+                 
+                 return (
+                    <div key={p.id} className="relative bg-[#1a1a1a] rounded-xl overflow-hidden border border-[#333] shadow-lg group">
                         {stream || (isLocal && activeCall.isVideo) ? (
-                          <NeuralVideoSlot
-                            stream={stream || null}
-                            mirrored={isLocal && !activeCall.isScreenSharing && mirrorVideo}
-                            effect="none"
-                            isLocal={isLocal}
-                            label={p.name}
-                            isMuted={isLocal ? isMuted : false}
-                          />
+                            <NeuralVideoSlot 
+                                stream={stream || null} 
+                                mirrored={isLocal && !activeCall.isScreenSharing && mirrorVideo} 
+                                effect={isLocal ? backgroundEffect : 'none'}
+                                isLocal={isLocal}
+                                label={p.name}
+                                isMuted={isLocal ? isMuted : false} 
+                            />
                         ) : (
-                          <div className="w-full h-full flex flex-col items-center justify-center gap-2">
-                            <div className="w-9 h-9 rounded-full bg-indigo-600 flex items-center justify-center text-sm font-bold text-white">{p.name.charAt(0)}</div>
-                            <p className="text-[10px] text-gray-300">{p.name}</p>
-                          </div>
+                            <div className="w-full h-full flex flex-col items-center justify-center gap-4">
+                                <div className="w-20 h-20 rounded-full bg-indigo-600 flex items-center justify-center text-2xl font-bold text-white shadow-xl">
+                                    {p.name.charAt(0)}
+                                </div>
+                                <p className="text-sm font-medium text-gray-400">{p.name} {isLocal && '(You)'}</p>
+                            </div>
                         )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className={`relative rounded-xl border border-[#333] overflow-hidden bg-[#070b13] ${participantRailDock === 'right' ? 'order-1' : participantRailDock === 'left' ? 'order-2' : 'order-2'}`}>
-                {(screenStream || activeVideoStream) ? (
-                  <NeuralVideoSlot
-                    stream={screenStream || activeVideoStream}
-                    mirrored={false}
-                    effect="none"
-                    isLocal={Boolean(screenStream)}
-                    label={screenStream ? `${currentUser.name} (Presenting)` : (focusedParticipant?.name || currentUser.name)}
-                    isMuted={screenStream ? isMuted : Boolean(focusedParticipant?.identityKey === currentIdentityKey ? isMuted : false)}
-                  />
-                ) : (
-                  <div className="w-full h-full flex flex-col items-center justify-center gap-3">
-                    <Monitor size={38} className="text-slate-500" />
-                    <p className="text-xs uppercase tracking-widest text-slate-400 font-black">Presentation Starting...</p>
-                  </div>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className={`grid gap-3 w-full h-full max-h-full transition-all duration-500
-               ${renderedParticipants.length === 1 ? 'grid-cols-1' : ''}
-               ${renderedParticipants.length === 2 ? 'grid-cols-1 md:grid-cols-2' : ''}
-               ${renderedParticipants.length >= 3 && renderedParticipants.length <= 4 ? 'grid-cols-2' : ''}
-               ${renderedParticipants.length > 4 ? 'grid-cols-2 md:grid-cols-3' : ''}
-            `}>
-              {renderedParticipants.map(p => {
-                const isLocal = p.identityKey === currentIdentityKey;
-                const stream = isLocal ? activeVideoStream : remoteStreams.get(p.identityKey);
-
-                return (
-                  <div key={p.identityKey} className="relative bg-[#1a1a1a] rounded-xl overflow-hidden border border-[#333] shadow-lg group">
-                    {stream || (isLocal && activeCall.isVideo) ? (
-                      <NeuralVideoSlot
-                        stream={stream || null}
-                        mirrored={isLocal && !activeCall.isScreenSharing && mirrorVideo}
-                        effect={isLocal ? backgroundEffect : 'none'}
-                        isLocal={isLocal}
-                        label={p.name}
-                        isMuted={isLocal ? isMuted : false}
-                      />
-                    ) : (
-                      <div className="w-full h-full flex flex-col items-center justify-center gap-4">
-                        <div className="w-20 h-20 rounded-full bg-indigo-600 flex items-center justify-center text-2xl font-bold text-white shadow-xl">
-                          {p.name.charAt(0)}
+                        <div className="absolute top-3 right-3 flex gap-2">
+                            {isLocal && isMuted && <div className="p-1.5 bg-black/60 rounded-md backdrop-blur-sm"><MicOff size={14} className="text-red-500"/></div>}
                         </div>
-                        <p className="text-sm font-medium text-gray-400">{p.name} {isLocal && '(You)'}</p>
-                      </div>
-                    )}
-                    <div className="absolute top-3 right-3 flex gap-2">
-                      {isLocal && isMuted && <div className="p-1.5 bg-black/60 rounded-md backdrop-blur-sm"><MicOff size={14} className="text-red-500"/></div>}
+                        {/* Invisible Audio Element for Remote Peers */}
+                        {!isLocal && (
+                           <audio
+                              ref={(el) => bindRemoteAudioEl(p.identityKey, el)}
+                              autoPlay
+                              playsInline
+                              onError={() => setRemoteAudioDiagnostic('blocked')}
+                           />
+                        )}
                     </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
+                 );
+             })}
+          </div>
         </div>
 
         {/* 3. Sidebar */}
@@ -1427,7 +1340,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
           <div className="w-[320px] bg-[#1f1f1f] border-l border-[#333] flex flex-col absolute top-0 bottom-0 right-0 z-40 shadow-2xl">
              <div className="flex border-b border-[#333]">
                 <button onClick={() => setActiveTab('chat')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'chat' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>Chat</button>
-                <button onClick={() => setActiveTab('participants')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'participants' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>People ({renderedParticipants.length})</button>
+                <button onClick={() => setActiveTab('participants')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'participants' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>People ({participants.length})</button>
                 <button onClick={() => setActiveTab('intelligence')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'intelligence' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>AI Intel</button>
              </div>
              <div className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-gray-700">
@@ -1457,46 +1370,18 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                 )}
                 {activeTab === 'participants' && (
                   <div className="space-y-4">
-                     {isHost && (
-                       <div className="p-3 rounded-xl border border-amber-500/30 bg-amber-500/10">
-                          <div className="flex items-center justify-between mb-2">
-                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-300">Lobby</p>
-                            <span className="text-[10px] text-amber-200">{waitingRoom.length} waiting</span>
-                          </div>
-                          {waitingRoom.length === 0 ? (
-                            <p className="text-[10px] text-slate-400">No one is waiting right now.</p>
-                          ) : (
-                            <div className="space-y-2">
-                              {waitingRoom.map((waitingId) => {
-                                const user = team.find((u) => u.id === waitingId);
-                                return (
-                                  <div key={`waiting-${waitingId}`} className="flex items-center justify-between gap-2 text-[10px] text-slate-200">
-                                    <span>{user?.name || waitingId}</span>
-                                    <button
-                                      onClick={() => admitOneFromLobby(waitingId)}
-                                      className="px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-black uppercase tracking-wider"
-                                    >
-                                      Admit
-                                    </button>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                       </div>
-                     )}
                      <button onClick={() => setShowInviteModal(true)} className="w-full py-2 bg-[#2a2a2a] rounded-lg text-xs font-bold uppercase tracking-wider text-white hover:bg-[#333] transition-colors border border-[#333] flex items-center justify-center gap-2">
                         <UserPlus size={14}/> Invite Someone
                      </button>
                      <div className="space-y-2">
-                        {renderedParticipants.map(p => (
-                          <div key={p.identityKey} className="flex items-center gap-3 p-2 hover:bg-[#2a2a2a] rounded-lg transition-colors">
+                        {participants.map(p => (
+                          <div key={p.id} className="flex items-center gap-3 p-2 hover:bg-[#2a2a2a] rounded-lg transition-colors">
                              <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white">{p.name.charAt(0)}</div>
                              <div className="flex-1">
                                 <p className="text-xs font-semibold text-gray-200">{p.name}</p>
                                 <p className="text-[10px] text-gray-500 uppercase">{p.role}</p>
                              </div>
-                             {p.identityKey === currentIdentityKey && <span className="text-[10px] text-gray-500">(You)</span>}
+                             {p.id === currentUser.id && <span className="text-[10px] text-gray-500">(You)</span>}
                           </div>
                         ))}
                      </div>
@@ -1511,7 +1396,6 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                         </div>
                         <p className="text-xs font-medium text-gray-300 leading-relaxed italic">{intelligence?.text || "Synchronizing with neural cluster..."}</p>
                      </div>
-
                      <div>
                         <h4 className="text-[10px] font-black uppercase tracking-widest text-indigo-400 mb-3">Suggested Actions</h4>
                         <div className="space-y-3">
@@ -1537,93 +1421,41 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         )}
       </div>
 
-            {/* 4. Floating Control Bar */}
-      <div
-        ref={controlBarRef}
-        className={`absolute z-50 flex items-center py-3 bg-[#222]/90 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl overflow-visible transition-all duration-300 ${controlBarPosition ? '' : 'bottom-8 right-6'} ${isBottomBarCollapsed ? 'w-[210px] px-3 gap-2' : 'w-[min(96vw,900px)] px-6 gap-3'}`}
-        style={controlBarPosition ? { left: `${controlBarPosition.x}px`, top: `${controlBarPosition.y}px` } : undefined}
-      >
-        {isBottomBarCollapsed ? (
-          <>
-            <button
-              onPointerDown={beginControlBarDrag}
-              className="p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white transition-all"
-              title="Move controls"
-            >
-              <GripHorizontal size={16} />
-            </button>
-            <div className="flex items-center gap-1 pr-2 border-r border-white/10">
-              <span className="text-xs font-bold text-gray-400 tabular-nums">{formatTime(duration)}</span>
-            </div>
-            <button
-              onClick={() => setIsBottomBarCollapsed(false)}
-              className="ml-auto p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white transition-all"
-              title="Expand controls"
-            >
-              <ChevronRight size={16} className="rotate-180" />
-            </button>
-          </>
-        ) : (
-          <>
-            <button
-              onPointerDown={beginControlBarDrag}
-              className="p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white transition-all"
-              title="Move controls"
-            >
-              <GripHorizontal size={16} />
-            </button>
-            <div className="flex items-center gap-1 pr-4 border-r border-white/10">
-              <span className="text-xs font-bold text-gray-400 tabular-nums">{formatTime(duration)}</span>
-            </div>
-            <button onClick={toggleMute} className={`p-3 rounded-xl transition-all ${!isMuted ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Mute">
-              {!isMuted ? <Mic size={20}/> : <MicOff size={20}/>}
-            </button>
-            <button onClick={() => onToggleMedia('video')} className={`p-3 rounded-xl transition-all ${activeCall.isVideo ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Camera">
-              {activeCall.isVideo ? <Video size={20}/> : <VideoOff size={20}/>}
-            </button>
-            <button onClick={() => onToggleMedia('screen')} className={`p-3 rounded-xl transition-all ${activeCall.isScreenSharing ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-[#333] text-white'}`} title="Share Screen">
-              {activeCall.isScreenSharing ? <MonitorOff size={20}/> : <Monitor size={20}/>}
-            </button>
-            <div className="relative">
-              <button onClick={() => setShowReactions(!showReactions)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Reactions">
+      {/* 4. Floating Control Bar */}
+      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-6 py-3 bg-[#222]/90 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl">
+         <div className="flex items-center gap-1 pr-4 border-r border-white/10">
+             <span className="text-xs font-bold text-gray-400 tabular-nums">{formatTime(duration)}</span>
+         </div>
+         <button onClick={toggleMute} className={`p-3 rounded-xl transition-all ${!isMuted ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Mute">
+            {!isMuted ? <Mic size={20}/> : <MicOff size={20}/>}
+         </button>
+         <button onClick={() => onToggleMedia('video')} className={`p-3 rounded-xl transition-all ${activeCall.isVideo ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Camera">
+            {activeCall.isVideo ? <Video size={20}/> : <VideoOff size={20}/>}
+         </button>
+         <button onClick={() => onToggleMedia('screen')} className={`p-3 rounded-xl transition-all ${activeCall.isScreenSharing ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-[#333] text-white'}`} title="Share Screen">
+            {activeCall.isScreenSharing ? <MonitorOff size={20}/> : <Monitor size={20}/>}
+         </button>
+         <div className="relative">
+             <button onClick={() => setShowReactions(!showReactions)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Reactions">
                 <Smile size={20}/>
-              </button>
-              {showReactions && (
-                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 bg-[#222] border border-[#333] p-2 rounded-full flex gap-2 shadow-xl animate-in slide-in-from-bottom-2">
-                  {[':+1:', '<3', ':D', 'clap', 'wave'].map(emoji => (
-                    <button key={emoji} onClick={() => triggerReaction(emoji)} className="w-8 h-8 flex items-center justify-center hover:bg-[#333] rounded-full text-xl transition-transform hover:scale-125">
-                      {emoji}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <button onClick={() => setShowSettings(true)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Device Settings"><Settings size={20}/></button>
-            <button onClick={() => setRaisedHand(!raisedHand)} className={`p-3 rounded-xl transition-all ${raisedHand ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'hover:bg-[#333] text-white'}`} title="Raise Hand">
-              <Hand size={20}/>
-            </button>
-            <div className="w-[1px] h-6 bg-white/10 mx-2"></div>
-            <button onClick={handleTerminate} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-all active:scale-95">{isMeetingSession ? 'End Meeting' : 'Leave'}</button>
-            <button
-              onClick={() => setIsBottomBarCollapsed(true)}
-              className="p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white transition-all"
-              title="Collapse controls"
-            >
-              <ChevronRight size={16} />
-            </button>
-          </>
-        )}
+             </button>
+             {showReactions && (
+                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 bg-[#222] border border-[#333] p-2 rounded-full flex gap-2 shadow-xl animate-in slide-in-from-bottom-2">
+                     {['👍','❤️','😂','👏','👋'].map(emoji => (
+                         <button key={emoji} onClick={() => triggerReaction(emoji)} className="w-8 h-8 flex items-center justify-center hover:bg-[#333] rounded-full text-xl transition-transform hover:scale-125">
+                             {emoji}
+                         </button>
+                     ))}
+                 </div>
+             )}
+         </div>
+         <button onClick={() => setShowSettings(true)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Device Settings"><Settings size={20}/></button>
+         <button onClick={() => setRaisedHand(!raisedHand)} className={`p-3 rounded-xl transition-all ${raisedHand ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'hover:bg-[#333] text-white'}`} title="Raise Hand">
+            <Hand size={20}/>
+         </button>
+         <div className="w-[1px] h-6 bg-white/10 mx-2"></div>
+         <button onClick={handleTerminate} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-all active:scale-95">Leave</button>
       </div>
-
-      {Array.from(remoteStreams.entries()).map(([userId, stream]) => (
-        <audio
-          key={`remote-audio-${userId}-${stream.id}`}
-          ref={(el) => bindRemoteAudioEl(userId, el)}
-          autoPlay
-          playsInline
-          className="hidden"
-        />
-      ))}
 
       {/* Settings Modal */}
       {showSettings && (
@@ -1680,7 +1512,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
               <h3 className="text-lg font-bold text-white mb-4">Invite Participants</h3>
               <div className="space-y-2 max-h-[300px] overflow-y-auto">
                  {team.filter(t => !activeCall.participants?.includes(t.id) && t.id !== currentUser.id).map(user => (
-                    <button key={user.id} onClick={() => { onInviteParticipant(user.id); callUser(buildIdentityKey(user), user.id); setShowInviteModal(false); }} className="w-full p-3 bg-[#2a2a2a] rounded-lg flex items-center gap-3 hover:bg-indigo-600 transition-colors group">
+                    <button key={user.id} onClick={() => { onInviteParticipant(user.id); callUser(user.id); setShowInviteModal(false); }} className="w-full p-3 bg-[#2a2a2a] rounded-lg flex items-center gap-3 hover:bg-indigo-600 transition-colors group">
                        <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-xs font-bold text-white">{user.name.charAt(0)}</div>
                        <div className="text-left"><p className="text-sm font-bold text-white">{user.name}</p><p className="text-[10px] text-gray-400 group-hover:text-indigo-200">{user.role}</p></div>
                        <Plus size={16} className="ml-auto text-gray-400 group-hover:text-white"/>
@@ -1704,4 +1536,3 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     </div>
   );
 };
-
