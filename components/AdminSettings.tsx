@@ -94,6 +94,9 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const [domainTenantMap, setDomainTenantMap] = useState(
     settings.auth.domainTenantMap.map((m) => `${m.domain}=${m.tenantId}`).join('\n')
   );
+  const [authDirty, setAuthDirty] = useState(false);
+  const [authSaving, setAuthSaving] = useState(false);
+  const [authLastSavedAt, setAuthLastSavedAt] = useState<number | null>(null);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<Role>(Role.AGENT);
   const [inviteTenantId, setInviteTenantId] = useState('');
@@ -137,6 +140,11 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     unsignedBeta: settings.desktopRelease?.unsignedBeta ?? true,
   });
   const [desktopReleaseSaving, setDesktopReleaseSaving] = useState(false);
+  const activeTenantId =
+    (typeof window !== 'undefined' ? localStorage.getItem('connectai_tenant_id') : null) ||
+    (import.meta.env as any).VITE_TENANT_ID ||
+    (import.meta.env as any).VITE_DEFAULT_TENANT_ID ||
+    'default-tenant';
   const toggleGeneralSection = (key: string) => {
     setCollapsedGeneral((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -243,6 +251,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     setAuthSettings(settings.auth);
     setAuthDomains(settings.auth.allowedDomains.join('\n'));
     setDomainTenantMap(settings.auth.domainTenantMap.map((m) => `${m.domain}=${m.tenantId}`).join('\n'));
+    setAuthDirty(false);
   }, [settings.auth]);
 
   useEffect(() => {
@@ -374,7 +383,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     addNotification('success', 'Call Routing Architecture Deployed.');
   };
 
-  const handleSaveAuth = () => {
+  const handleSaveAuth = async () => {
     const allowedDomains = authDomains
       .split('\n')
       .map((d) => d.trim().toLowerCase())
@@ -396,9 +405,19 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
         domainTenantMap: domainTenantMapParsed,
       },
     };
-    onUpdateSettings(nextSettings);
-    saveSettingsApi(nextSettings).catch(() => {});
-    addNotification('success', 'Access policy updated.');
+    setAuthSaving(true);
+    try {
+      const saved = await saveSettingsApi(nextSettings);
+      onUpdateSettings(saved);
+      setAuthLastSavedAt(Number((saved as any)?._meta?.savedAt || Date.now()));
+      setAuthDirty(false);
+      addNotification('success', 'Access policy updated.');
+    } catch {
+      setAuthDirty(true);
+      addNotification('error', 'Access policy save failed. Check rate limit and retry.');
+    } finally {
+      setAuthSaving(false);
+    }
   };
 
   const handleCreateInvite = async () => {
@@ -837,18 +856,22 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100">
                           Invite-Only
-                          <input type="checkbox" checked={Boolean(authSettings.inviteOnly)} onChange={(e) => setAuthSettings({ ...authSettings, inviteOnly: e.target.checked })} className="h-4 w-4 rounded border-slate-300" />
+                          <input type="checkbox" checked={Boolean(authSettings.inviteOnly)} onChange={(e) => { setAuthSettings({ ...authSettings, inviteOnly: e.target.checked }); setAuthDirty(true); }} className="h-4 w-4 rounded border-slate-300" />
                         </label>
                         <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100">
                           Auto-Tenant Domain
-                          <input type="checkbox" checked={Boolean(authSettings.autoTenantByDomain)} onChange={(e) => setAuthSettings({ ...authSettings, autoTenantByDomain: e.target.checked })} className="h-4 w-4 rounded border-slate-300" />
+                          <input type="checkbox" checked={Boolean(authSettings.autoTenantByDomain)} onChange={(e) => { setAuthSettings({ ...authSettings, autoTenantByDomain: e.target.checked }); setAuthDirty(true); }} className="h-4 w-4 rounded border-slate-300" />
                         </label>
                       </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder="Allowed domains&#10;company.com" value={authDomains} onChange={(e) => setAuthDomains(e.target.value)} />
-                        <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder="domain=tenantId&#10;company.com=connectai-main" value={domainTenantMap} onChange={(e) => setDomainTenantMap(e.target.value)} />
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] font-black uppercase tracking-widest text-slate-500">
+                        <span>Tenant: {activeTenantId}</span>
+                        <span>{authDirty ? 'Unsaved changes' : authLastSavedAt ? `Saved ${new Date(authLastSavedAt).toLocaleTimeString()}` : 'No saves in this session'}</span>
                       </div>
-                      <button onClick={handleSaveAuth} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[10px] font-black uppercase">Save Policy</button>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder="Allowed domains&#10;company.com" value={authDomains} onChange={(e) => { setAuthDomains(e.target.value); setAuthDirty(true); }} />
+                        <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder="domain=tenantId&#10;company.com=default-tenant" value={domainTenantMap} onChange={(e) => { setDomainTenantMap(e.target.value); setAuthDirty(true); }} />
+                      </div>
+                      <button onClick={handleSaveAuth} disabled={authSaving} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[10px] font-black uppercase disabled:opacity-60 disabled:cursor-not-allowed">{authSaving ? 'Saving...' : 'Save Policy'}</button>
                     </div>
                   )}
                 </div>

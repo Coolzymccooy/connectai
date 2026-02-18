@@ -14,6 +14,7 @@ import { upsertCrmContact, fetchCrmContacts, fetchCrmDeals, createCrmTask } from
 import { updateCall as updateCallLog } from '../services/callLogService';
 import * as dbService from '../services/dbService';
 import { buildInternalConversationId } from '../utils/chat';
+import { buildIdentityKey, normalizeEmail, normalizeName } from '../utils/identity';
 
 interface AgentConsoleProps {
   activeCall: Call | null;
@@ -36,6 +37,7 @@ interface AgentConsoleProps {
   onUpdateMeetings: (m: Meeting[]) => void;
   user: User;
   isFirebaseConfigured?: boolean;
+  chatHealth?: { chatHealthy: boolean; callsHealthy?: boolean; offline?: boolean; lastError?: string };
 }
 
 const HOURS = Array.from({ length: 14 }, (_, i) => i + 8); 
@@ -77,35 +79,43 @@ const CAMPAIGN_TEMPLATES = [
     sms: 'Reminder: your ConnectAI session. Reply to reschedule if needed.',
   },
 ];
-const DEFAULT_CONVERSATIONS: Conversation[] = [
-  {
-    id: 'c1',
-    contactName: 'John Smith',
-    contactPhone: '+1 555-012-3456',
-    channel: 'sms',
-    lastMessage: 'Can we move the demo to 4pm?',
-    lastMessageTime: Date.now() - 3600000,
-    unreadCount: 1,
-    status: 'open',
-    messages: [{ id: 'm1', channel: 'sms', sender: 'customer', text: 'Can we move the demo to 4pm?', timestamp: Date.now() - 3600000 }]
-  },
-  {
-    id: 'c2',
-    contactName: 'Linda Core',
-    contactPhone: '+1 555-998-1122',
-    channel: 'whatsapp',
-    lastMessage: 'Is the API bridge active?',
-    lastMessageTime: Date.now() - 7200000,
-    unreadCount: 0,
-    status: 'open',
-    messages: [{ id: 'm2', channel: 'whatsapp', sender: 'customer', text: 'Is the API bridge active?', timestamp: Date.now() - 7200000 }]
-  }
-];
+const SHOW_DEMO_INBOX = (import.meta.env as any).VITE_ENABLE_DEMO_INBOX === 'true';
+const DEFAULT_CONVERSATIONS: Conversation[] = SHOW_DEMO_INBOX
+  ? [
+      {
+        id: 'c1',
+        contactName: 'John Smith',
+        contactPhone: '+1 555-012-3456',
+        channel: 'sms',
+        lastMessage: 'Can we move the demo to 4pm?',
+        lastMessageTime: Date.now() - 3600000,
+        unreadCount: 1,
+        status: 'open',
+        messages: [{ id: 'm1', channel: 'sms', sender: 'customer', text: 'Can we move the demo to 4pm?', timestamp: Date.now() - 3600000 }]
+      },
+      {
+        id: 'c2',
+        contactName: 'Linda Core',
+        contactPhone: '+1 555-998-1122',
+        channel: 'whatsapp',
+        lastMessage: 'Is the API bridge active?',
+        lastMessageTime: Date.now() - 7200000,
+        unreadCount: 0,
+        status: 'open',
+        messages: [{ id: 'm2', channel: 'whatsapp', sender: 'customer', text: 'Is the API bridge active?', timestamp: Date.now() - 7200000 }]
+      }
+    ]
+  : [];
+
+const ROUTING_DEBUG = (import.meta.env as any).VITE_DEBUG_ROUTING === 'true';
+const debugRouting = (...args: any[]) => {
+  if (ROUTING_DEBUG) console.info('[routing][inbox]', ...args);
+};
 
 export const AgentConsole: React.FC<AgentConsoleProps> = ({ 
   activeCall, agentStatus, onCompleteWrapUp, onEndActiveCall, settings, addNotification,
   leads = [], onOutboundCall, onInternalCall, onAddParticipant, history = [],
-  campaigns, onUpdateCampaigns, onUpdateCampaign, onCreateLead, meetings, onUpdateMeetings, user, onJoinMeeting, isFirebaseConfigured = false
+  campaigns, onUpdateCampaigns, onUpdateCampaign, onCreateLead, meetings, onUpdateMeetings, user, onJoinMeeting, isFirebaseConfigured = false, chatHealth
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -129,6 +139,8 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const [conversations, setConversations] = useState<Conversation[]>(DEFAULT_CONVERSATIONS);
   const [messageMap, setMessageMap] = useState<Record<string, Message[]>>({});
   const seededRef = useRef(false);
+  const convoLastSeenRef = useRef<Record<string, number>>({});
+  const convoRepairRef = useRef<Record<string, boolean>>({});
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
   const selectedConvIdRef = useRef<string | null>(null);
   const [messageInput, setMessageInput] = useState('');
@@ -226,11 +238,25 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     if (teamDirectory.length >= 50) setTeamViewMode('list');
   }, [teamDirectory.length]);
 
+  const chatHealthNotifiedRef = useRef(false);
+
   useEffect(() => {
     if (!activeCall) return;
     if (activeCall.status === CallStatus.ENDED) return;
     setActiveTab('voice');
   }, [activeCall?.id, activeCall?.status]);
+
+  useEffect(() => {
+    if (!chatHealth) return;
+    if (!chatHealth.chatHealthy) {
+      if (!chatHealthNotifiedRef.current) {
+        addNotification('error', chatHealth.lastError || 'Chat channel degraded. Messages may not deliver.');
+        chatHealthNotifiedRef.current = true;
+      }
+    } else {
+      chatHealthNotifiedRef.current = false;
+    }
+  }, [chatHealth?.chatHealthy, chatHealth?.lastError]);
 
   // Calendar States
   const [showScheduleModal, setShowScheduleModal] = useState(false);
@@ -243,6 +269,157 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     selectedConvIdRef.current = selectedConvId;
   }, [selectedConvId]);
   const normalizePhone = (value?: string) => (value || '').replace(/\D/g, '');
+  const buildMemberIdentityKey = (member?: Partial<User> | null) => buildIdentityKey({
+    id: member?.id,
+    email: member?.email,
+    name: member?.name,
+  });
+  const buildCanonicalThreadId = (left?: Partial<User> | null, right?: Partial<User> | null) =>
+    buildInternalConversationId(buildMemberIdentityKey(left), buildMemberIdentityKey(right));
+  const collectIdsByEmail = (email?: string) => {
+    const normalized = normalizeEmail(email);
+    if (!normalized) return [] as string[];
+    return (settings.team || [])
+      .filter((member) => normalizeEmail(member.email) === normalized)
+      .map((member) => member.id)
+      .filter(Boolean);
+  };
+  const collectIdsByName = (name?: string) => {
+    const normalized = normalizeName(name);
+    if (!normalized) return [] as string[];
+    return (settings.team || [])
+      .filter((member) => normalizeName(member.name) === normalized)
+      .map((member) => member.id)
+      .filter(Boolean);
+  };
+  const collectEmailsByName = (name?: string) => {
+    const normalized = normalizeName(name);
+    if (!normalized) return [] as string[];
+    return Array.from(new Set(
+      (settings.team || [])
+        .filter((member) => normalizeName(member.name) === normalized)
+        .map((member) => normalizeEmail(member.email))
+        .filter(Boolean)
+    ));
+  };
+  const collectIdentityKeysByName = (name?: string) => {
+    const normalized = normalizeName(name);
+    if (!normalized) return [] as string[];
+    return Array.from(new Set(
+      (settings.team || [])
+        .filter((member) => normalizeName(member.name) === normalized)
+        .map((member) => buildMemberIdentityKey(member))
+        .filter((key) => key && key !== 'unknown')
+    ));
+  };
+  const resolveTeammate = (member?: Partial<User> | null) => {
+    if (!member) return null;
+    const normalizedMemberEmail = normalizeEmail(member.email);
+    const normalizedMemberName = normalizeName(member.name);
+    const team = settings.team || [];
+    return (
+      team.find((candidate) => candidate.id === member.id && normalizeEmail(candidate.email)) ||
+      (normalizedMemberEmail ? team.find((candidate) => normalizeEmail(candidate.email) === normalizedMemberEmail) : undefined) ||
+      (normalizedMemberName ? team.find((candidate) => normalizeName(candidate.name) === normalizedMemberName && normalizeEmail(candidate.email)) : undefined) ||
+      team.find((candidate) => candidate.id === member.id) ||
+      (normalizedMemberName ? team.find((candidate) => normalizeName(candidate.name) === normalizedMemberName) : undefined) ||
+      (member as User)
+    );
+  };
+  const resolveMemberByIdentityKey = (identityKey?: string | null): User | undefined => {
+    const raw = String(identityKey || '').trim();
+    if (!raw) return undefined;
+    if (raw.startsWith('email:')) {
+      const email = normalizeEmail(raw.slice(6));
+      return (settings.team || []).find((member) => normalizeEmail(member.email) === email);
+    }
+    if (raw.startsWith('id:')) {
+      const id = raw.slice(3).trim();
+      return (settings.team || []).find((member) => member.id === id);
+    }
+    if (raw.startsWith('name:')) {
+      const key = normalizeName(raw.slice(5));
+      return (settings.team || []).find((member) => normalizeName(member.name) === key);
+    }
+    return undefined;
+  };
+  const getConversationIdentityKeySet = (conversation?: Conversation | null) => {
+    const identityKeys = Array.isArray(conversation?.participantIdentityKeys) ? conversation!.participantIdentityKeys! : [];
+    const emails = Array.isArray(conversation?.participantEmails) ? conversation!.participantEmails! : [];
+    const ids = Array.isArray(conversation?.participantIds) ? conversation!.participantIds! : [];
+    const nameKey = normalizeName(conversation?.contactName);
+    const set = new Set<string>();
+    identityKeys.forEach((key) => {
+      const value = String(key || '').trim();
+      if (value) set.add(value);
+    });
+    emails.map((email) => normalizeEmail(email)).filter(Boolean).forEach((email) => set.add(`email:${email}`));
+    ids.filter(Boolean).forEach((id) => set.add(`id:${id}`));
+    if (conversation?.teammateId) set.add(`id:${conversation.teammateId}`);
+    if (nameKey) set.add(`name:${nameKey}`);
+    return set;
+  };
+  const getPeerIdentityCandidates = (conversation?: Conversation | null) => {
+    const myIdentityKey = buildMemberIdentityKey(user);
+    const myEmail = normalizeEmail(user.email);
+    const myNameKey = normalizeName(user.name);
+    const myIdToken = `id:${user.id}`;
+    const peerKeys = Array.from(getConversationIdentityKeySet(conversation)).filter((key) => (
+      key !== myIdentityKey &&
+      key !== myIdToken &&
+      key !== `email:${myEmail}` &&
+      key !== `name:${myNameKey}`
+    ));
+    return peerKeys;
+  };
+  const findAliasThreadIdsForPeer = (peerIdentityCandidates: string[]) => {
+    if (!peerIdentityCandidates.length) return [] as string[];
+    const myIdentityKey = buildMemberIdentityKey(user);
+    const myEmail = normalizeEmail(user.email);
+    return conversations
+      .filter((conversation) => {
+        if (conversation.channel !== 'chat') return false;
+        const identitySet = getConversationIdentityKeySet(conversation);
+        const hasMe = identitySet.has(myIdentityKey) || identitySet.has(`id:${user.id}`) || (myEmail ? identitySet.has(`email:${myEmail}`) : false);
+        if (!hasMe) return false;
+        return peerIdentityCandidates.some((key) => identitySet.has(key));
+      })
+      .map((conversation) => conversation.id)
+      .filter(Boolean);
+  };
+  const normalizeConversationForUser = (conversation: Conversation): Conversation => {
+    const participantIds = Array.from(new Set(conversation.participantIds || []));
+    const participantEmails = Array.from(new Set((conversation.participantEmails || []).map(normalizeEmail).filter(Boolean)));
+    const participantIdentityKeys = Array.from(
+      new Set((conversation.participantIdentityKeys || []).map((key) => String(key || '').trim()).filter(Boolean))
+    );
+    const myIdentityKey = buildMemberIdentityKey(user);
+    const myEmail = normalizeEmail(user.email);
+    const otherEmail = participantEmails.find((email) => email !== myEmail);
+    const memberByEmail = otherEmail
+      ? (settings.team || []).find((member) => normalizeEmail(member.email) === otherEmail)
+      : undefined;
+    const otherId = participantIds.find((id) => id !== user.id);
+    const memberById = otherId ? (settings.team || []).find((member) => member.id === otherId) : undefined;
+    const peerIdentity = participantIdentityKeys.find((key) => key !== myIdentityKey && key !== `id:${user.id}` && key !== `email:${myEmail}`);
+    const memberByIdentity = peerIdentity ? resolveMemberByIdentityKey(peerIdentity) : undefined;
+    const peer = memberByIdentity || memberByEmail || memberById;
+    if (!peer) {
+      const fallbackName = normalizeName(conversation.contactName) === normalizeName(user.name) && conversation.lastSenderName && conversation.lastSenderId !== user.id
+        ? conversation.lastSenderName
+        : conversation.contactName;
+      return { ...conversation, contactName: fallbackName, participantIds, participantEmails, participantIdentityKeys };
+    }
+    return {
+      ...conversation,
+      contactName: peer.name || conversation.contactName,
+      contactPhone: peer.extension ? `EXT ${peer.extension}` : conversation.contactPhone,
+      teammateId: peer.id,
+      participantIds,
+      participantEmails,
+      participantIdentityKeys,
+    };
+  };
 
   const refreshCrmData = async () => {
     setCrmLoading(true);
@@ -301,13 +478,17 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       setConversations(DEFAULT_CONVERSATIONS);
       return;
     }
-    const unsubscribe = dbService.fetchConversations(user.id, async (convos) => {
-      if (convos.length === 0 && !seededRef.current) {
+    const normalizedUserEmail = (user.email || '').trim().toLowerCase();
+    const unsubscribe = dbService.fetchConversations(user.id, normalizedUserEmail || undefined, user.name, async (convos) => {
+      if (convos.length === 0 && !seededRef.current && DEFAULT_CONVERSATIONS.length > 0) {
         seededRef.current = true;
         await Promise.all(DEFAULT_CONVERSATIONS.map(async (conv) => {
           await dbService.upsertConversation({
             ...conv,
             participantIds: [user.id],
+            participantEmails: normalizedUserEmail ? [normalizedUserEmail] : [],
+            participantIdentityKeys: [buildMemberIdentityKey(user)].filter((key) => key && key !== 'unknown'),
+            participantNameKeys: [normalizeName(user.name)].filter(Boolean),
             messages: [],
           });
           if (conv.messages[0]) {
@@ -316,22 +497,75 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         }));
         return;
       }
-      setConversations(convos);
+      const sanitizedConversations = SHOW_DEMO_INBOX
+        ? convos
+        : convos.filter((conversation) => !['c1', 'c2'].includes(conversation.id));
+      setConversations(sanitizedConversations.map(normalizeConversationForUser));
       const currentSelected = selectedConvIdRef.current;
-      if (currentSelected && convos.some((c) => c.id === currentSelected)) {
+      if (currentSelected && sanitizedConversations.some((c) => c.id === currentSelected)) {
         return;
       }
-      if (convos[0]) setSelectedConvId(convos[0].id);
+      if (sanitizedConversations[0]) setSelectedConvId(sanitizedConversations[0].id);
+    }, (error) => {
+      const msg = String(error?.message || '').toLowerCase();
+      if (msg.includes('permission')) {
+        addNotification('error', 'Realtime chat permissions blocked. Falling back to local inbox.');
+        setConversations(DEFAULT_CONVERSATIONS);
+      }
     });
     return () => unsubscribe();
-  }, [isFirebaseConfigured, user.id]);
+  }, [isFirebaseConfigured, user.id, user.email, user.name]);
 
   useEffect(() => {
     if (!isFirebaseConfigured || !selectedConvId) return;
-    return dbService.fetchConversationMessages(selectedConvId, (msgs) => {
-      setMessageMap(prev => ({ ...prev, [selectedConvId]: msgs }));
+    const selectedConversation = conversations.find((conversation) => conversation.id === selectedConvId);
+    const teammate = resolveTeammate(
+      (selectedConversation?.teammateId
+        ? (settings.team || []).find((member) => member.id === selectedConversation.teammateId)
+        : undefined) ||
+      (selectedConversation?.contactName ? { name: selectedConversation.contactName, email: selectedConversation.participantEmails?.find((email) => normalizeEmail(email) !== normalizeEmail(user.email)) } : undefined)
+    );
+    const canonicalThreadId = selectedConversation?.channel === 'chat'
+      ? buildCanonicalThreadId(user, teammate || { id: selectedConversation?.teammateId, name: selectedConversation?.contactName, email: selectedConversation?.participantEmails?.find((email) => normalizeEmail(email) !== normalizeEmail(user.email)) })
+      : selectedConvId;
+    const peerIdentityCandidates = getPeerIdentityCandidates(selectedConversation || undefined);
+    const threadIds = Array.from(new Set([selectedConvId, canonicalThreadId].filter(Boolean)));
+    const buckets = new Map<string, Message[]>();
+    const emit = () => {
+      const dedupe = new Map<string, Message>();
+      buckets.forEach((messages) => {
+        messages.forEach((message) => {
+          const key = `${String(message.id || '').trim()}::${String(message.senderId || '').trim()}::${Number(message.timestamp || 0)}`;
+          if (!dedupe.has(key)) dedupe.set(key, message);
+        });
+      });
+      const merged = Array.from(dedupe.values()).sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0)).slice(-500);
+      setMessageMap(prev => ({ ...prev, [selectedConvId]: merged }));
+    };
+    debugRouting('listenConversationMessages', {
+      selectedConvId,
+      canonicalThreadId,
+      peerIdentityCandidates,
+      threadIds,
     });
-  }, [isFirebaseConfigured, selectedConvId]);
+    const unsubscribers = threadIds.map((threadId) =>
+      dbService.fetchConversationMessages(threadId, (msgs) => {
+        buckets.set(threadId, msgs);
+        emit();
+      })
+    );
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe && unsubscribe());
+  }, [isFirebaseConfigured, selectedConvId, conversations, settings.team, user.id, user.email, user.name]);
+
+  useEffect(() => {
+    if (!conversations.length) {
+      if (selectedConvId) setSelectedConvId(null);
+      return;
+    }
+    if (!selectedConvId || !conversations.some((c) => c.id === selectedConvId)) {
+      setSelectedConvId(conversations[0].id);
+    }
+  }, [conversations, selectedConvId]);
 
   // Scroll logic
   useEffect(() => {
@@ -432,12 +666,160 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
   const handleSendMessage = (text: string = messageInput, files: Attachment[] = []) => {
     if ((!text.trim() && files.length === 0) || !selectedConvId) return;
-    const msg: Message = { id: `m_${Date.now()}`, channel: activeConversation?.channel || 'chat', sender: 'agent', text, timestamp: Date.now(), attachments: files };
-    if (isFirebaseConfigured) {
-      dbService.sendConversationMessage(selectedConvId, msg).catch(() => {});
-    } else {
-      setConversations(prev => prev.map(c => c.id === selectedConvId ? { ...c, messages: [...c.messages, msg], lastMessage: text || "Attachment Packet", lastMessageTime: Date.now() } : c));
-    }
+    const timestamp = Date.now();
+    const msg: Message = {
+      id: `m_${timestamp}_${Math.random().toString(36).slice(2, 9)}`,
+      channel: activeConversation?.channel || 'chat',
+      sender: 'agent',
+      senderId: user.id,
+      text,
+      timestamp,
+      attachments: files,
+    };
+    const teammate = resolveTeammate(
+      (activeConversation?.teammateId
+        ? (settings.team || []).find((member) => member.id === activeConversation.teammateId)
+        : undefined) ||
+      (activeConversation?.contactName ? { name: activeConversation.contactName } as Partial<User> : undefined)
+    );
+    const teammateName = teammate?.name || activeConversation?.contactName || 'Teammate';
+    const fallbackTeammate: Partial<User> = {
+      id: teammate?.id || activeConversation?.teammateId,
+      email: teammate?.email || (activeConversation?.participantEmails || []).find((email) => normalizeEmail(email) !== normalizeEmail(user.email)),
+      name: teammateName,
+      extension: teammate?.extension,
+    };
+    const participantNameKeys = Array.from(new Set([
+      ...(activeConversation?.participantNameKeys || []),
+      normalizeName(user.name),
+      normalizeName(teammateName),
+      normalizeName(activeConversation?.contactName),
+    ].filter(Boolean)));
+    const participantIds = Array.from(new Set([
+      ...(activeConversation?.participantIds || []),
+      user.id,
+      ...(teammate?.id ? [teammate.id] : []),
+      ...collectIdsByEmail(user.email),
+      ...collectIdsByEmail(teammate?.email),
+      ...collectIdsByName(user.name),
+      ...collectIdsByName(teammateName),
+    ].filter(Boolean)));
+    const participantEmails = Array.from(new Set([
+      ...(activeConversation?.participantEmails || []),
+      normalizeEmail(user.email),
+      normalizeEmail(teammate?.email || fallbackTeammate.email),
+      ...collectEmailsByName(teammateName),
+      ...collectEmailsByName(user.name),
+    ].filter(Boolean)));
+    const participantIdentityKeys = Array.from(new Set([
+      ...(activeConversation?.participantIdentityKeys || []),
+      buildMemberIdentityKey(user),
+      buildMemberIdentityKey(teammate || fallbackTeammate),
+      ...participantIds.map((id) => `id:${id}`),
+      ...participantEmails.map((email) => `email:${email}`),
+      ...participantNameKeys.map((name) => `name:${name}`),
+      ...collectIdentityKeysByName(teammateName),
+      ...collectIdentityKeysByName(user.name),
+    ].filter((key) => key && key !== 'unknown')));
+    const canonicalThreadId = buildCanonicalThreadId(user, teammate || fallbackTeammate);
+    const peerIdentityCandidates = getPeerIdentityCandidates(activeConversation || undefined);
+    const writeThreadId = canonicalThreadId || selectedConvId;
+    const routeThreadIds = Array.from(new Set([
+      writeThreadId,
+      selectedConvId,
+    ].filter(Boolean)));
+    debugRouting('handleSendMessage', {
+      selectedConvId,
+      canonicalThreadId,
+      writeThreadId,
+      peerIdentityCandidates,
+      routeThreadIds,
+      participantIdentityKeys,
+      senderIdentity: buildMemberIdentityKey(user),
+      targetIdentity: buildMemberIdentityKey(teammate || fallbackTeammate),
+    });
+    const optimisticMessageId = msg.id;
+    setMessageMap(prev => ({
+      ...prev,
+      [selectedConvId]: [...(prev[selectedConvId] || activeConversation?.messages || []), msg].slice(-250),
+    }));
+    setConversations(prev => prev.map(c => c.id === selectedConvId
+      ? {
+          ...c,
+          messages: [...(c.messages || []), msg].slice(-250),
+          lastMessage: text || "Attachment Packet",
+          lastMessageTime: msg.timestamp,
+          lastSenderId: user.id,
+          lastSenderName: user.name,
+          participantIds,
+          participantEmails,
+          participantIdentityKeys,
+          participantNameKeys,
+          aliases: Array.from(new Set([...(c.aliases || []), ...routeThreadIds])),
+        }
+      : c));
+    const metadataPayload = {
+      participantIds,
+      participantEmails,
+      participantIdentityKeys,
+      participantNameKeys,
+      teammateId: teammate?.id || activeConversation?.teammateId,
+      contactName: teammateName,
+      contactPhone: teammate?.extension ? `EXT ${teammate.extension}` : activeConversation?.contactPhone,
+      lastSenderName: user.name,
+      messages: [...(activeConversation?.messages || []), msg].slice(-250),
+      aliases: routeThreadIds,
+      bootstrapSent: activeConversation?.bootstrapSent,
+      bootstrapSentAt: activeConversation?.bootstrapSentAt,
+    };
+    const sendAll = async () => {
+      if (!isFirebaseConfigured) return { ok: true };
+      const sendThreadIds = Array.from(new Set([writeThreadId, selectedConvId].filter(Boolean)));
+      const results = await Promise.all(sendThreadIds.map((threadId) =>
+        dbService.sendConversationMessage(threadId, msg, metadataPayload)
+      ));
+      const failure = results.find((result: any) => !result?.ok);
+      if (failure) throw new Error((failure as any)?.error || 'Message failed to send');
+      if (activeConversation?.channel === 'chat') {
+        await Promise.all(routeThreadIds.map((threadId) =>
+          dbService.upsertConversation({
+            participantIds,
+            participantEmails,
+            participantIdentityKeys,
+            participantNameKeys,
+            teammateId: teammate?.id || activeConversation?.teammateId,
+            contactName: teammateName,
+            contactPhone: teammate?.extension ? `EXT ${teammate.extension}` : activeConversation?.contactPhone,
+            messages: [],
+            id: threadId,
+            channel: activeConversation.channel,
+            lastMessage: text || "Attachment Packet",
+            lastMessageTime: msg.timestamp,
+            lastSenderId: user.id,
+            lastSenderName: user.name,
+            unreadCount: activeConversation.unreadCount || 0,
+            status: activeConversation.status || 'open',
+            aliases: routeThreadIds,
+            bootstrapSent: activeConversation.bootstrapSent,
+            bootstrapSentAt: activeConversation.bootstrapSentAt,
+          })
+        ));
+      }
+    };
+    sendAll().catch((error: any) => {
+      addNotification('error', error?.message || 'Message failed to deliver.');
+      debugRouting('handleSendMessage.fail', { error: String(error?.message || error), writeThreadId, routeThreadIds });
+      setMessageMap(prev => {
+        const next = { ...prev };
+        next[selectedConvId] = (prev[selectedConvId] || activeConversation?.messages || []).filter((m) => m.id !== optimisticMessageId);
+        return next;
+      });
+      setConversations(prev => prev.map((c) => {
+        if (c.id !== selectedConvId) return c;
+        const filtered = (c.messages || []).filter((m) => m.id !== optimisticMessageId);
+        return { ...c, messages: filtered };
+      }));
+    });
     setMessageInput('');
     setAiDraftText(null);
   };
@@ -776,55 +1158,185 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   };
 
   const handleMessageTeammate = async (member: User) => {
-    const convId = buildInternalConversationId(user.id, member.id);
-    const bootMessage: Message = {
-      id: `m_boot_${Date.now()}`,
-      channel: 'chat',
-      sender: 'teammate',
-      text: `Hi ${user.name}, direct secure thread with ${member.name} is active.`,
-      timestamp: Date.now(),
-    };
+    const resolvedMember = resolveTeammate(member) || member;
+    const teammateName = resolvedMember.name || member.name;
+    const teammateIdentityKey = buildMemberIdentityKey(resolvedMember);
+    const convId = buildCanonicalThreadId(user, resolvedMember);
+    const resolvedTeammateEmail = normalizeEmail(resolvedMember.email || member.email);
+    const existingConversation = conversations.find((conversation) => {
+      if (conversation.channel !== 'chat') return false;
+      if (conversation.id === convId) return true;
+      if (resolvedMember.id && conversation.teammateId === resolvedMember.id) return true;
+      if (resolvedTeammateEmail) {
+        const participantEmails = (conversation.participantEmails || []).map(normalizeEmail);
+        if (participantEmails.includes(resolvedTeammateEmail)) return true;
+      }
+      return false;
+    });
+    const participantNameKeys = Array.from(new Set([
+      normalizeName(user.name),
+      normalizeName(teammateName),
+    ].filter(Boolean)));
+    const participantIds = Array.from(new Set([
+      user.id,
+      resolvedMember.id || member.id,
+      ...collectIdsByEmail(user.email),
+      ...collectIdsByEmail(resolvedMember.email || member.email),
+      ...collectIdsByName(user.name),
+      ...collectIdsByName(teammateName),
+    ].filter(Boolean)));
+    const participantEmails = Array.from(new Set([
+      normalizeEmail(user.email),
+      normalizeEmail(resolvedMember.email || member.email),
+      ...collectEmailsByName(user.name),
+      ...collectEmailsByName(teammateName),
+    ].filter(Boolean)));
+    const participantIdentityKeys = Array.from(new Set([
+      buildMemberIdentityKey(user),
+      teammateIdentityKey,
+      ...participantIds.map((id) => `id:${id}`),
+      ...participantEmails.map((email) => `email:${email}`),
+      ...participantNameKeys.map((name) => `name:${name}`),
+      ...collectIdentityKeysByName(user.name),
+      ...collectIdentityKeysByName(teammateName),
+    ].filter((key) => key && key !== 'unknown')));
+    const introText = `Hi ${user.name}, direct secure thread with ${teammateName} is active.`;
+    const bootstrapSeenInAnyConversation = conversations.some((conversation) => {
+      if (conversation.channel !== 'chat') return false;
+      const textMatch = String(conversation.lastMessage || '').trim() === introText;
+      const flagMatch = Boolean(conversation.bootstrapSent || conversation.bootstrapSentAt);
+      const embeddedMatch = (conversation.messages || []).some((message) => String(message.text || '').trim() === introText);
+      const participantMatch = resolvedTeammateEmail
+        ? (conversation.participantEmails || []).map(normalizeEmail).includes(resolvedTeammateEmail)
+        : false;
+      const contactMatch = normalizeName(conversation.contactName) === normalizeName(teammateName);
+      return textMatch || flagMatch || embeddedMatch || participantMatch || contactMatch;
+    });
+    const bootstrapSeenInMessageMaps = Object.values(messageMap).some((messages) =>
+      (messages || []).some((message) => String(message.text || '').trim() === introText)
+    );
+    const existingMessages = [
+      ...(existingConversation?.messages || []),
+      ...(messageMap[existingConversation?.id || convId] || []),
+      ...(messageMap[convId] || []),
+    ];
+    const hasIntroMessage = existingMessages.some((message) => String(message.text || '').trim() === introText);
+    const bootstrapAlreadySent = Boolean(
+      existingConversation?.bootstrapSent ||
+      existingConversation?.bootstrapSentAt ||
+      bootstrapSeenInAnyConversation ||
+      bootstrapSeenInMessageMaps ||
+      hasIntroMessage ||
+      String(existingConversation?.lastMessage || '').toLowerCase().includes('direct secure thread with')
+    );
+    const shouldSendBootstrap = !existingConversation && !bootstrapAlreadySent;
+    const now = Date.now();
+    const bootMessage: Message | null = shouldSendBootstrap
+      ? {
+          id: `m_boot_${now}`,
+          channel: 'chat',
+          sender: 'teammate',
+          senderId: resolvedMember.id || member.id,
+          text: introText,
+          timestamp: now,
+        }
+      : null;
+    const routeThreadIds = [convId];
     const seededConversation: Conversation = {
       id: convId,
-      contactName: member.name,
-      contactPhone: `EXT ${member.extension}`,
+      contactName: teammateName,
+      contactPhone: `EXT ${resolvedMember.extension || member.extension}`,
       channel: 'chat',
-      lastMessage: 'Connection Established',
-      lastMessageTime: Date.now(),
-      unreadCount: 0,
-      status: 'open',
-      teammateId: member.id,
-      participantIds: [user.id, member.id],
-      messages: [bootMessage],
+      lastMessage: shouldSendBootstrap
+        ? 'Connection Established'
+        : (existingConversation?.lastMessage || 'Thread Ready'),
+      lastMessageTime: shouldSendBootstrap
+        ? now
+        : (existingConversation?.lastMessageTime || now),
+      lastSenderId: shouldSendBootstrap
+        ? (resolvedMember.id || member.id)
+        : existingConversation?.lastSenderId,
+      lastSenderName: shouldSendBootstrap
+        ? teammateName
+        : existingConversation?.lastSenderName,
+      unreadCount: existingConversation?.unreadCount || 0,
+      status: existingConversation?.status || 'open',
+      teammateId: resolvedMember.id || member.id,
+      participantIds,
+      participantEmails,
+      participantIdentityKeys,
+      participantNameKeys,
+      messages: bootMessage ? [bootMessage] : (existingConversation?.messages || []),
+      aliases: routeThreadIds,
+      bootstrapSent: Boolean(existingConversation?.bootstrapSent || shouldSendBootstrap),
+      bootstrapSentAt: existingConversation?.bootstrapSentAt || (shouldSendBootstrap ? now : undefined),
     };
-    if (isFirebaseConfigured) {
-      await dbService.upsertConversation(seededConversation);
-      setConversations(prev => {
-        const existing = prev.find((c) => c.id === convId);
-        const focused = existing ? { ...existing, teammateId: member.id, participantIds: [user.id, member.id], contactName: member.name, contactPhone: `EXT ${member.extension}` } : seededConversation;
-        const rest = prev.filter(c => c.id !== convId);
-        return [focused, ...rest];
+    debugRouting('handleMessageTeammate', {
+      convId,
+      teammateIdentityKey,
+      participantIdentityKeys,
+      routeThreadIds,
+      shouldSendBootstrap,
+    });
+    setConversations(prev => {
+      const existing = prev.find((c) => c.id === convId) || existingConversation;
+      const focused = existing
+        ? {
+            ...existing,
+            teammateId: resolvedMember.id || member.id,
+            participantIds,
+            participantEmails,
+            participantIdentityKeys,
+            participantNameKeys,
+            contactName: teammateName,
+            contactPhone: `EXT ${resolvedMember.extension || member.extension}`,
+            aliases: routeThreadIds,
+            bootstrapSent: Boolean(existing.bootstrapSent || shouldSendBootstrap),
+            bootstrapSentAt: existing.bootstrapSentAt || (shouldSendBootstrap ? now : undefined),
+            ...(shouldSendBootstrap
+              ? {
+                  lastMessage: 'Connection Established',
+                  lastMessageTime: now,
+                  lastSenderId: resolvedMember.id || member.id,
+                  lastSenderName: teammateName,
+                }
+              : {}),
+          }
+        : seededConversation;
+      const rest = prev.filter(c => c.id !== convId);
+      return [focused, ...rest];
+    });
+    if (bootMessage) {
+      setMessageMap((prev) => {
+        const existingThread = prev[convId] || prev[existingConversation?.id || ''] || [];
+        const exists = existingThread.some((message) => String(message.text || '').trim() === introText);
+        if (exists) return { ...prev, [convId]: existingThread };
+        return { ...prev, [convId]: [...existingThread, bootMessage].slice(-250) };
       });
-      setMessageMap(prev => ({ ...prev, [convId]: prev[convId]?.length ? prev[convId] : [bootMessage] }));
-      setActiveTab('omnichannel');
-      setTimeout(() => setSelectedConvId(convId), 0);
-      return;
-    }
-
-    let conv = conversations.find(c => c.teammateId === member.id);
-    if (!conv) {
-      conv = seededConversation;
-      setConversations(prev => [conv!, ...prev.filter(c => c.id !== conv!.id)]);
-      setMessageMap(prev => ({ ...prev, [convId]: [bootMessage] }));
-    } else {
-      setConversations(prev => {
-        const focus = prev.find(c => c.id === conv!.id) || conv!;
-        const rest = prev.filter(c => c.id !== conv!.id);
-        return [focus, ...rest];
-      });
+    } else if (existingConversation?.id && existingConversation.id !== convId) {
+      setMessageMap((prev) => ({ ...prev, [convId]: prev[convId] || prev[existingConversation.id] || [] }));
     }
     setActiveTab('omnichannel');
-    setTimeout(() => setSelectedConvId(conv.id), 0);
+    setSelectedConvId(convId);
+
+    if (isFirebaseConfigured) {
+      await Promise.all(
+        routeThreadIds.map((threadId) =>
+          dbService.upsertConversation({ ...seededConversation, id: threadId, messages: [] })
+        )
+      );
+      if (bootMessage) {
+        await dbService.sendConversationMessage(convId, bootMessage, {
+          ...seededConversation,
+          id: convId,
+          messages: [],
+          aliases: routeThreadIds,
+          bootstrapSent: true,
+          bootstrapSentAt: now,
+        });
+      }
+      return;
+    }
   };
 
   const handleLeadCall = () => {
@@ -866,10 +1378,117 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       await dbService.upsertConversation({
         ...next,
         participantIds: next.participantIds || [user.id],
+        participantEmails: next.participantEmails || [normalizeEmail(user.email)].filter(Boolean),
+        participantIdentityKeys: next.participantIdentityKeys || [buildMemberIdentityKey(user)].filter((key) => key && key !== 'unknown'),
+        participantNameKeys: next.participantNameKeys || [normalizeName(user.name)].filter(Boolean),
+        aliases: Array.from(new Set([...(next.aliases || []), convId])),
         messages: [],
       });
     }
   };
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) return;
+    if (conversations.length === 0) return;
+    const seen = convoLastSeenRef.current;
+    const isInitial = Object.keys(seen).length === 0;
+    const nextSeen: Record<string, number> = {};
+    conversations.forEach((conversation) => {
+      const lastTime = conversation.lastMessageTime || 0;
+      nextSeen[conversation.id] = lastTime;
+      if (isInitial) return;
+      const previous = seen[conversation.id] || 0;
+      const incoming = lastTime > previous && conversation.lastSenderId && conversation.lastSenderId !== user.id;
+      if (!incoming) return;
+      if (activeTab === 'omnichannel' && selectedConvId === conversation.id) return;
+      addNotification('info', `New message from ${conversation.contactName}.`);
+    });
+    convoLastSeenRef.current = nextSeen;
+  }, [conversations, isFirebaseConfigured, user.id, activeTab, selectedConvId, addNotification]);
+
+  useEffect(() => {
+    if (!isFirebaseConfigured) return;
+    const meEmail = normalizeEmail(user.email);
+    const myIdentityKey = buildMemberIdentityKey(user);
+    conversations.forEach((conversation) => {
+      if (conversation.channel !== 'chat') return;
+      if (convoRepairRef.current[conversation.id]) return;
+      const teammate = (settings.team || []).find((member) =>
+        member.id === conversation.teammateId ||
+        normalizeEmail(member.email) === (conversation.participantEmails || []).map(normalizeEmail).find((e) => e && e !== meEmail)
+      );
+      const peerFallback: Partial<User> = {
+        id: teammate?.id || conversation.teammateId,
+        email: teammate?.email || (conversation.participantEmails || []).find((email) => normalizeEmail(email) !== meEmail),
+        name: teammate?.name || conversation.contactName,
+      };
+      const canonicalThreadId = buildCanonicalThreadId(user, teammate || peerFallback);
+      const participantIds = Array.from(new Set([
+        ...(conversation.participantIds || []),
+        user.id,
+        ...(conversation.teammateId ? [conversation.teammateId] : []),
+        ...(teammate?.id ? [teammate.id] : []),
+        ...collectIdsByEmail(user.email),
+        ...collectIdsByEmail(teammate?.email),
+      ].filter(Boolean)));
+      const participantEmails = Array.from(new Set([
+        ...(conversation.participantEmails || []),
+        normalizeEmail(user.email),
+        normalizeEmail(teammate?.email),
+      ].filter(Boolean)));
+      const participantNameKeys = Array.from(new Set([
+        ...(conversation.participantNameKeys || []),
+        normalizeName(user.name),
+        normalizeName(teammate?.name || conversation.contactName),
+      ].filter(Boolean)));
+      const participantIdentityKeys = Array.from(new Set([
+        ...(conversation.participantIdentityKeys || []),
+        myIdentityKey,
+        buildMemberIdentityKey(teammate || peerFallback),
+        ...participantIds.map((id) => `id:${id}`),
+        ...participantEmails.map((email) => `email:${email}`),
+        ...participantNameKeys.map((name) => `name:${name}`),
+        ...collectIdentityKeysByName(user.name),
+        ...collectIdentityKeysByName(teammate?.name || conversation.contactName),
+      ].filter((key) => key && key !== 'unknown')));
+      const hasEmailIdentityCoverage = participantIdentityKeys.some((key) => key.startsWith('email:'));
+      const broken =
+        !conversation.participantIds?.includes(user.id) ||
+        participantIds.length !== (conversation.participantIds || []).length ||
+        participantEmails.length !== (conversation.participantEmails || []).filter(Boolean).length ||
+        participantNameKeys.length !== (conversation.participantNameKeys || []).filter(Boolean).length ||
+        participantIdentityKeys.length !== (conversation.participantIdentityKeys || []).filter(Boolean).length ||
+        !hasEmailIdentityCoverage;
+      const needsCanonicalMirror = Boolean(canonicalThreadId && canonicalThreadId !== conversation.id);
+      if (!broken && !needsCanonicalMirror) return;
+      debugRouting('repairConversation', {
+        sourceConversationId: conversation.id,
+        canonicalThreadId,
+        broken,
+        needsCanonicalMirror,
+        participantIdentityKeys,
+      });
+      convoRepairRef.current[conversation.id] = true;
+      const repairedConversation: Conversation = {
+        ...conversation,
+        participantIds,
+        participantEmails,
+        participantIdentityKeys,
+        participantNameKeys,
+        teammateId: teammate?.id || conversation.teammateId,
+        messages: conversation.messages || [],
+      };
+      dbService.upsertConversation(repairedConversation).catch(() => {
+        delete convoRepairRef.current[conversation.id];
+      });
+      if (needsCanonicalMirror) {
+        dbService.upsertConversation({
+          ...repairedConversation,
+          id: canonicalThreadId,
+        }).catch(() => {});
+      }
+    });
+  }, [conversations, isFirebaseConfigured, user.id, user.email, user.name, settings.team]);
 
   const markConsentGranted = async () => {
     if (!activeConversation) return;
@@ -931,6 +1550,32 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const handleInternalLink = (member: User, video: boolean) => {
      setActiveTab('voice');
      onInternalCall?.({ ...member, isVideo: video } as any);
+  };
+
+  const handleActiveConversationCall = () => {
+    if (!activeConversation) return;
+    const teammateEmail = (activeConversation.participantEmails || [])
+      .map(normalizeEmail)
+      .find((email) => email && email !== normalizeEmail(user.email));
+    const teammateFromIdentity =
+      (activeConversation.participantIdentityKeys || [])
+        .map((identityKey) => resolveMemberByIdentityKey(identityKey))
+        .find((member) => member && member.id !== user.id) || null;
+    const resolvedTeammate = resolveTeammate({
+      id: activeConversation.teammateId,
+      name: activeConversation.contactName,
+      email: teammateEmail,
+    }) || teammateFromIdentity;
+    if (activeConversation.channel === 'chat' && onInternalCall) {
+      const target = resolvedTeammate as User | null;
+      if (!target || !target.id || target.id === user.id || String(target.id).startsWith('peer_')) {
+        addNotification('error', 'This thread is not mapped to a real teammate yet. Open from Team roster or run Team Sync.');
+        return;
+      }
+      handleInternalLink(target, false);
+      return;
+    }
+    onOutboundCall?.(activeConversation.contactPhone);
   };
 
   const persistWrapUpCall = async (updated: Call) => {
@@ -1687,11 +2332,17 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         {/* OMNICHANNEL / UNIFIED INBOX */}
         {activeTab === 'omnichannel' && (
            <div className="h-full flex flex-col lg:flex-row gap-6 animate-in slide-in-from-right">
-              <div className="w-full lg:w-80 bg-white rounded-[2.2rem] border border-slate-200 shadow-xl flex flex-col overflow-hidden">
-                 <div className="p-5 border-b bg-slate-50 flex items-center justify-between">
-                    <h3 className="text-lg font-black uppercase italic tracking-tighter text-slate-800">Inbox</h3>
-                    <div className="w-8 h-8 bg-brand-600 rounded-lg flex items-center justify-center text-white text-[10px] font-black">{conversations.filter(c => c.unreadCount > 0).length}</div>
-                 </div>
+               <div className="w-full lg:w-80 bg-white rounded-[2.2rem] border border-slate-200 shadow-xl flex flex-col overflow-hidden">
+                  <div className="p-5 border-b bg-slate-50 flex items-center justify-between">
+                     <div className="flex items-center gap-2">
+                       <h3 className="text-lg font-black uppercase italic tracking-tighter text-slate-800">Inbox</h3>
+                       <span
+                         className={`w-3 h-3 rounded-full ${chatHealth?.chatHealthy ? 'bg-emerald-500' : chatHealth?.offline ? 'bg-amber-500' : 'bg-rose-500'}`}
+                         title={chatHealth?.chatHealthy ? 'Chat healthy' : (chatHealth?.lastError || 'Chat channel degraded')}
+                       />
+                     </div>
+                     <div className="w-8 h-8 bg-brand-600 rounded-lg flex items-center justify-center text-white text-[10px] font-black">{conversations.filter(c => c.unreadCount > 0).length}</div>
+                  </div>
                  <div className="flex-1 overflow-y-auto scrollbar-hide p-4 space-y-3">
                     {conversations.map(conv => {
                       const isClosed = conv.status === 'closed';
@@ -1727,7 +2378,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                             </div>
                          </div>
                          <div className="flex gap-4 items-center">
-                            <button onClick={() => onOutboundCall?.(activeConversation.contactPhone)} className="p-4 bg-white/10 rounded-2xl hover:bg-white/20 transition-all text-white shadow-lg"><Phone size={18}/></button>
+                            <button onClick={handleActiveConversationCall} className="p-4 bg-white/10 rounded-2xl hover:bg-white/20 transition-all text-white shadow-lg"><Phone size={18}/></button>
                             <div className="relative">
                                <button onClick={() => setShowInboxMenu(!showInboxMenu)} className="p-4 bg-white/10 rounded-2xl hover:bg-white/20 transition-all"><MoreVertical size={20}/></button>
                                {showInboxMenu && (
@@ -1756,8 +2407,8 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                       
                       <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-slate-50/50">
                         {activeMessages.map(m => (
-                          <div key={m.id} className={`flex ${m.sender === 'agent' ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`max-w-[70%] p-5 rounded-[1.8rem] text-sm leading-relaxed shadow-sm ${m.sender === 'agent' ? 'bg-brand-600 text-white rounded-br-none' : 'bg-white border border-slate-100 text-slate-800 rounded-bl-none'}`}>
+                          <div key={m.id} className={`flex ${((m.senderId && m.senderId === user.id) || (!m.senderId && m.sender === 'agent')) ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[70%] p-5 rounded-[1.8rem] text-sm leading-relaxed shadow-sm ${((m.senderId && m.senderId === user.id) || (!m.senderId && m.sender === 'agent')) ? 'bg-brand-600 text-white rounded-br-none' : 'bg-white border border-slate-100 text-slate-800 rounded-bl-none'}`}>
                               {m.text && <p className="font-medium italic">"{m.text}"</p>}
                               {m.attachments?.map((att, i) => (
                                 <div key={i} className="mt-4 p-4 bg-black/10 rounded-2xl flex items-center gap-4 border border-white/5 group/file cursor-pointer hover:bg-black/20 transition-all">

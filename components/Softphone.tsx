@@ -55,6 +55,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
   const activeHistoryIdRef = useRef<string | null>(null);
   const activeHistoryStartRef = useRef<number | null>(null);
   const activeHistoryRef = useRef<AppCall | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const refreshHistory = async () => {
     if (!enableServerLogs) return;
     const agentKey = agentId || userExtension || '';
@@ -475,6 +476,44 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
     }
   };
 
+  useEffect(() => {
+    if (!floating || isMinimized) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isEditable = Boolean(
+        activeEl &&
+        (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.isContentEditable)
+      );
+      const isWithinSoftphone = Boolean(activeEl && panelRef.current?.contains(activeEl));
+      if (isEditable && !isWithinSoftphone) return;
+
+      const key = event.key;
+      if (/^\d$/.test(key) || key === '+' || key === '#') {
+        event.preventDefault();
+        handleDigit(key);
+        return;
+      }
+      if (key === 'Backspace') {
+        event.preventDefault();
+        handleDelete();
+        return;
+      }
+      if (key === 'Enter') {
+        event.preventDefault();
+        if (status === 'idle') handleCall();
+        else handleHangup();
+        return;
+      }
+      if (key === 'Escape' && status !== 'idle') {
+        event.preventDefault();
+        handleHangup();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [floating, isMinimized, status, number, handleCall, handleHangup]);
+
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = seconds % 60;
@@ -588,6 +627,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
   if (floating && isMinimized) {
     return (
       <div
+        ref={panelRef}
         className="fixed z-[9999] bg-slate-900/95 border border-white/10 shadow-2xl rounded-2xl px-4 py-3 flex items-center gap-3"
         style={{ transform: `translate3d(${position.x}px, ${position.y}px, 0)` }}
       >
@@ -611,6 +651,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
 
   return (
       <div
+      ref={panelRef}
       className={`${floating ? 'fixed z-[9999]' : 'relative'} w-[286px] bg-slate-900 rounded-[2.2rem] p-5 shadow-2xl border border-white/10 flex flex-col items-center overflow-hidden`}
       style={floating ? { transform: `translate3d(${position.x}px, ${position.y}px, 0)`, top: 0, left: 0 } : undefined}
     >

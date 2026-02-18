@@ -24,7 +24,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingVerificationEmail, setPendingVerificationEmail] = useState<string | null>(null);
+  const [resendBusy, setResendBusy] = useState(false);
+  const [resendCooldownSec, setResendCooldownSec] = useState(0);
   const [policyCache, setPolicyCache] = useState<any>(null);
+  const policyCacheRef = useRef<Map<string, any>>(new Map());
+
+  const ensureTenantFallback = () => {
+    const existing = localStorage.getItem('connectai_tenant_id');
+    if (existing) return existing;
+    const fallback =
+      (import.meta.env as any).VITE_TENANT_ID ||
+      (import.meta.env as any).VITE_DEFAULT_TENANT_ID ||
+      'default-tenant';
+    localStorage.setItem('connectai_tenant_id', fallback);
+    return fallback;
+  };
 
   // Prefetch policy on email blur for faster login
   const handleEmailBlur = async () => {
@@ -45,6 +59,14 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
       if (!email) setEmail(stored);
     }
   }, []);
+
+  useEffect(() => {
+    if (resendCooldownSec <= 0) return;
+    const timer = window.setInterval(() => {
+      setResendCooldownSec((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendCooldownSec]);
 
   const friendlyError = (err: any) => {
     const message = err?.message || '';
@@ -90,14 +112,25 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
     // Optimistic return if no special chars to avoid blocking UI on simple login
     if (!value) return { policy: null };
 
+    const key = value.toLowerCase().trim();
     // Use cached policy if available
-    let policy = policyCache;
-    
+    let policy = policyCacheRef.current.get(key) || policyCache;
+
     // Only fetch if strictly necessary (invite flows) or if we don't have it
     if (!policy) {
         try {
             policy = await fetchAuthPolicy(value);
-        } catch (e) {
+            policyCacheRef.current.set(key, policy);
+            setPolicyCache(policy);
+        } catch (e: any) {
+            // Treat rate limit as soft fail; proceed with default auth
+            const status = e?.status || e?.code;
+            if (status === 429) {
+              ensureTenantFallback();
+              console.warn("Policy fetch rate-limited; proceeding without enforcement");
+              return { policy: null };
+            }
+            ensureTenantFallback();
             console.warn("Policy fetch failed, proceeding with default auth", e);
             return { policy: null };
         }
@@ -106,8 +139,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
     const domain = extractDomain(value);
     if (policy?.allowedDomains?.length) {
       const allowed = policy.allowedDomains.map((d: string) => d.toLowerCase());
-      if (!domain || !allowed.includes(domain)) {
-        return { error: 'This email domain is not allowed.' };
+      const isDevHost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+      if (!isDevHost) {
+        if (!domain || !allowed.includes(domain)) {
+          return { error: 'This email domain is not allowed.' };
+        }
       }
     }
     if (policy?.inviteOnly) {
@@ -117,8 +153,39 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
     }
     if (policy?.tenantId) {
       localStorage.setItem('connectai_tenant_id', policy.tenantId);
+    } else {
+      ensureTenantFallback();
     }
     return { policy };
+  };
+
+  const handleResendVerification = async () => {
+    if (resendBusy || resendCooldownSec > 0) return;
+    setError(null);
+    setMessage(null);
+    setResendBusy(true);
+    try {
+      const user = auth.currentUser;
+      if (!user) {
+        throw new Error('Sign in first, then resend verification email.');
+      }
+      if (user.emailVerified) {
+        setMessage('This account is already verified.');
+        localStorage.removeItem('connectai_pending_verification_email');
+        setPendingVerificationEmail(null);
+        return;
+      }
+      await sendEmailVerification(user);
+      const destination = user.email || pendingVerificationEmail || 'your inbox';
+      setMessage(`Verification email sent to ${destination}.`);
+      setPendingVerificationEmail(destination);
+      localStorage.setItem('connectai_pending_verification_email', destination);
+      setResendCooldownSec(30);
+    } catch (err: any) {
+      setError(friendlyError(err));
+    } finally {
+      setResendBusy(false);
+    }
   };
 
   const handleLogin = async (e?: React.FormEvent) => {
@@ -407,6 +474,20 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
                   <CheckCircle size={16} className="shrink-0 text-green-500"/>
                   <span className="leading-tight">{message}</span>
                </div>
+            )}
+
+            {pendingVerificationEmail && (
+              <div className="bg-blue-50 border border-blue-100 text-blue-700 p-3 rounded-xl text-xs font-bold flex items-center justify-between gap-3">
+                <span className="leading-tight">Need verification? Resend email for {pendingVerificationEmail}.</span>
+                <button
+                  type="button"
+                  onClick={handleResendVerification}
+                  disabled={resendBusy || resendCooldownSec > 0 || busy}
+                  className="px-3 py-1.5 rounded-lg bg-blue-700 text-white text-[10px] font-black uppercase tracking-widest disabled:opacity-60 disabled:cursor-not-allowed"
+                >
+                  {resendBusy ? 'Sending...' : resendCooldownSec > 0 ? `Retry in ${resendCooldownSec}s` : 'Resend'}
+                </button>
+              </div>
             )}
 
             {externalMessage && (

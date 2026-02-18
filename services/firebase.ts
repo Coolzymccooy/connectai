@@ -17,13 +17,19 @@ import {
   deleteDoc,
   setLogLevel
 } from "firebase/firestore";
-import { getAuth, onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, updateProfile, GoogleAuthProvider, signInWithPopup } from "firebase/auth";
+import { getAuth, onAuthStateChanged, signOut, createUserWithEmailAndPassword, signInWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, updateProfile, GoogleAuthProvider, signInWithPopup, connectAuthEmulator, signInAnonymously } from "firebase/auth";
+import { connectFirestoreEmulator } from "firebase/firestore";
 
 const FIREBASE_DISABLED = (import.meta.env as any).VITE_FIREBASE_DISABLED === 'true';
 const FIREBASE_SILENT = (import.meta.env as any).VITE_FIREBASE_SILENT === 'true';
 if (FIREBASE_DISABLED || FIREBASE_SILENT) {
   setLogLevel('silent');
 }
+
+const USE_EMULATOR = (import.meta.env as any).VITE_FIREBASE_USE_EMULATOR === 'true';
+const EMULATOR_HOST = (import.meta.env as any).VITE_FIREBASE_EMULATOR_HOST || '127.0.0.1';
+const FIRESTORE_EMULATOR_PORT = Number((import.meta.env as any).VITE_FIREBASE_FIRESTORE_EMULATOR_PORT || 8080);
+const AUTH_EMULATOR_PORT = Number((import.meta.env as any).VITE_FIREBASE_AUTH_EMULATOR_PORT || 9099);
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -53,6 +59,16 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 
+if (USE_EMULATOR) {
+  try {
+    connectFirestoreEmulator(db, EMULATOR_HOST, FIRESTORE_EMULATOR_PORT);
+    connectAuthEmulator(auth, `http://${EMULATOR_HOST}:${AUTH_EMULATOR_PORT}`, { disableWarnings: true });
+    console.info(`[firebase] Connected to emulators at ${EMULATOR_HOST} (firestore:${FIRESTORE_EMULATOR_PORT}, auth:${AUTH_EMULATOR_PORT})`);
+  } catch (err) {
+    console.warn('Failed to connect Firebase emulators:', err);
+  }
+}
+
 export { 
   collection, 
   doc, 
@@ -75,5 +91,6 @@ export {
   sendPasswordResetEmail,
   updateProfile,
   GoogleAuthProvider,
-  signInWithPopup
+  signInWithPopup,
+  signInAnonymously
 };

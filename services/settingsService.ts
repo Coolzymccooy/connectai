@@ -2,11 +2,19 @@ import { apiGet, apiPut } from './apiClient';
 import { AppSettings } from '../types';
 
 const getTenantKey = () => {
-  const tenantId =
+  const rawTenantId =
     localStorage.getItem('connectai_tenant_id') ||
     (import.meta.env as any).VITE_TENANT_ID ||
     (import.meta.env as any).VITE_DEFAULT_TENANT_ID ||
-    'connectai-main';
+    'default-tenant';
+  const tenantId = rawTenantId === 'connectai-main' ? 'default-tenant' : rawTenantId;
+  if (tenantId !== rawTenantId) {
+    try {
+      localStorage.setItem('connectai_tenant_id', tenantId);
+    } catch {
+      // ignore
+    }
+  }
   return `connectai_settings_cache_${tenantId}`;
 };
 
@@ -28,9 +36,15 @@ const writeCachedSettings = (settings: AppSettings) => {
   }
 };
 
+const stripSettingsMeta = (settings: AppSettings) => {
+  const { _meta, ...payload } = (settings as any) || {};
+  return payload as AppSettings;
+};
+
 export const saveSettingsApi = async (settings: AppSettings) => {
-  writeCachedSettings(settings);
-  const saved = await apiPut('/api/settings', settings);
+  const payload = stripSettingsMeta(settings);
+  writeCachedSettings(payload);
+  const saved = await apiPut('/api/settings', payload);
   writeCachedSettings(saved);
   return saved;
 };

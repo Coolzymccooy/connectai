@@ -84,9 +84,10 @@ app.use(cors({
 // --- RATE LIMITING (DDoS Protection) ---
 const limiter = rateLimit({
   windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
-  max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 2000 : 300)),
+  max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 300)),
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => req.path && req.path.startsWith('/auth/policy'),
 });
 app.use('/api/', limiter);
 
@@ -1375,6 +1376,17 @@ const stores = {
   rooms: normalizeTenantArray(await loadStore('rooms', [])),
 };
 
+const hasTenantIn = (items = [], tenantId) => Array.isArray(items) && items.some((item) => item?.tenantId === tenantId);
+if (
+  hasTenantIn(stores.settingsByTenant, 'connectai-main') ||
+  hasTenantIn(stores.calls, 'connectai-main') ||
+  hasTenantIn(stores.users, 'connectai-main')
+) {
+  log('warn', 'tenant.split.detected', {
+    message: 'Both connectai-main and default-tenant data detected in local stores. Run `npm run tenant:migrate-local`.',
+  });
+}
+
 const QUEUES = [
   { id: 'q_sales', name: 'Sales', description: 'Inbound sales inquiries', slaTarget: 30 },
   { id: 'q_support', name: 'Support / Billing', description: 'General customer support', slaTarget: 60 },
@@ -2170,12 +2182,18 @@ app.get('/api/settings', (req, res) => {
   const tenantId = req.tenantId;
   if (isMongoReady()) {
     return Setting.findOne({ tenantId })
-      .then((doc) => res.json(normalizeSettingsShape(doc?.data || {})))
-      .catch(() => res.json(normalizeSettingsShape({})));
+      .then((doc) => res.json({
+        ...normalizeSettingsShape(doc?.data || {}),
+        _meta: { tenantId, savedAt: Number(doc?.updatedAt || Date.now()) },
+      }))
+      .catch(() => res.json({
+        ...normalizeSettingsShape({}),
+        _meta: { tenantId, savedAt: Date.now() },
+      }));
   }
   const stored = stores.settingsByTenant.find(s => s.tenantId === tenantId);
   const settings = normalizeSettingsShape(stored?.data || {});
-  res.json(settings);
+  res.json({ ...settings, _meta: { tenantId, savedAt: Date.now() } });
 });
 
 app.put('/api/settings', async (req, res) => {
@@ -2183,7 +2201,7 @@ app.put('/api/settings', async (req, res) => {
   const tenantId = req.tenantId;
   const merged = await saveSettingsForTenant(tenantId, incoming);
   await writeAuditLog(req, 'SETTINGS_UPDATE', 'settings', { keys: Object.keys(incoming) });
-  res.json(merged);
+  res.json({ ...merged, _meta: { tenantId, savedAt: Date.now() } });
 });
 
 app.post('/api/broadcasts/send', authorize([UserRole.ADMIN]), async (req, res) => {

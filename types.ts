@@ -69,6 +69,9 @@ export interface Call {
   targetAgentId?: string;
   targetAgentEmail?: string;
   participants?: string[];
+  participantIdentityKeys?: string[];
+  agentIdentityKey?: string;
+  targetIdentityKey?: string;
   extension?: string;
   qaEvaluation?: QaEvaluation;
   handledByBot?: boolean;
@@ -116,6 +119,8 @@ export interface MeetingMessage {
   text: string;
   timestamp: number;
   attachments?: Attachment[];
+  threadIds?: string[];
+  canonicalRoomId?: string;
 }
 
 export interface Reaction {
@@ -313,6 +318,7 @@ export interface Message {
   id: string;
   channel: ChannelType;
   sender: 'customer' | 'agent' | 'ai' | 'teammate';
+  senderId?: string;
   text: string;
   timestamp: number;
   attachments?: Attachment[];
@@ -325,11 +331,19 @@ export interface Conversation {
   channel: ChannelType;
   lastMessage: string;
   lastMessageTime: number;
+  lastSenderId?: string;
+  lastSenderName?: string;
   unreadCount: number;
   messages: Message[];
   status: 'open' | 'closed';
   teammateId?: string;
   participantIds?: string[];
+  participantEmails?: string[];
+  participantIdentityKeys?: string[];
+  participantNameKeys?: string[];
+  aliases?: string[];
+  bootstrapSent?: boolean;
+  bootstrapSentAt?: number;
   consentStatus?: 'requested' | 'granted' | 'opted_out';
   consentChannel?: 'whatsapp' | 'sms' | 'voice' | 'chat';
   consentRequestedAt?: number;

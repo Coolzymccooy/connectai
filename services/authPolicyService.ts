@@ -13,9 +13,19 @@ export type AuthPolicy = {
   } | null;
 };
 
+const policyCache = new Map<string, { policy: AuthPolicy; at: number }>();
+const CACHE_TTL_MS = 5 * 60 * 1000;
+
 export const fetchAuthPolicy = async (email: string): Promise<AuthPolicy> => {
+  const key = (email || '').toLowerCase().trim();
+  const cached = policyCache.get(key);
+  if (cached && Date.now() - cached.at < CACHE_TTL_MS) {
+    return cached.policy;
+  }
   const params = new URLSearchParams({ email });
-  return await apiGet(`/api/auth/policy?${params.toString()}`);
+  const policy = await apiGet(`/api/auth/policy?${params.toString()}`);
+  policyCache.set(key, { policy, at: Date.now() });
+  return policy;
 };
 
 export const acceptInvite = async (inviteId: string) => {

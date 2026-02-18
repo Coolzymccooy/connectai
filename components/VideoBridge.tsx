@@ -9,12 +9,13 @@ import {
   Globe, Zap, ExternalLink, ClipboardList, TrendingUp, RefreshCw, Camera, AlertTriangle, Cpu, ZapOff,
   Signal, ShieldCheck, Terminal, CheckCircle2, ChevronRight, FileJson, HandMetal, UserPlus,
   Network, Command, Link as LinkIcon, Share2, Paperclip, FileText, ToggleLeft, ToggleRight, Download,
-  ThumbsUp, Heart, Laugh, MonitorOff, MoreHorizontal, StopCircle, ArrowUp
+  ThumbsUp, Heart, Laugh, MonitorOff, MoreHorizontal, StopCircle, ArrowUp, GripHorizontal
 } from 'lucide-react';
 import { Call, User, MeetingMessage, Reaction, ToolAction, CallStatus, Attachment, TranscriptSegment } from '../types';
 import { getStrategicIntelligence, extractToolActions, analyzeCallTranscript } from '../services/geminiService';
 import { apiGet, apiPost } from '../services/apiClient';
 import * as dbService from '../services/dbService';
+import { buildIdentityKey, buildPeerId, normalizeEmail, normalizeName } from '../utils/identity';
 
 // --- SUB-COMPONENT: PRODUCTION-GRADE VIDEO SLOT ---
 const NeuralVideoSlot: React.FC<{ stream: MediaStream | null, mirrored?: boolean, effect?: 'none' | 'blur' | 'virtual', isLocal?: boolean, label?: string, isMuted?: boolean }> = ({ stream, mirrored, effect, isLocal, label, isMuted }) => {
@@ -138,6 +139,20 @@ interface VideoBridgeProps {
 
 type SidebarTab = 'chat' | 'intelligence' | 'actions' | 'participants' | 'transcript';
 type SettingsTab = 'video' | 'audio' | 'visuals' | 'core';
+type SessionParticipant = {
+  id: string;
+  identityKey: string;
+  name: string;
+  role: string;
+  email?: string;
+  extension?: string;
+  isSynthetic?: boolean;
+};
+
+const ROUTING_DEBUG = (import.meta.env as any).VITE_DEBUG_ROUTING === 'true';
+const debugRouting = (...args: any[]) => {
+  if (ROUTING_DEBUG) console.info('[routing][bridge]', ...args);
+};
 
 export const VideoBridge: React.FC<VideoBridgeProps> = ({ 
   activeCall, currentUser, onHangup, onToggleMedia, onInviteParticipant, onUpdateCall, team, isFirebaseConfigured = false
@@ -183,12 +198,15 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteAudioRefs = useRef<Map<string, HTMLAudioElement>>(new Map());
   const [needsRemoteAudioUnlock, setNeedsRemoteAudioUnlock] = useState(false);
+  const [remoteAudioDiagnostic, setRemoteAudioDiagnostic] = useState<'ok' | 'blocked' | 'no-track'>('ok');
   
   // PeerJS
   const peerRef = useRef<Peer | null>(null);
   const [peerId, setPeerId] = useState<string>('');
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const dialingPeersRef = useRef<Set<string>>(new Set());
+  const peerIdentityLookupRef = useRef<Map<string, string>>(new Map());
+  const callParticipantIdentityKeysRef = useRef<string[]>([]);
   const screenShareAttemptingRef = useRef(false);
   const screenSharePromptCooldownRef = useRef(0);
   
@@ -198,8 +216,30 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [actions, setActions] = useState<ToolAction[]>([]);
   const [chatInput, setChatInput] = useState('');
   const [messages, setMessages] = useState<MeetingMessage[]>([]);
+  const messageDedupeRef = useRef<Set<string>>(new Set());
+  const [isBottomBarCollapsed, setIsBottomBarCollapsed] = useState(false);
+  const [controlBarPosition, setControlBarPosition] = useState<{ x: number; y: number } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const bridgeRootRef = useRef<HTMLDivElement>(null);
+  const controlBarRef = useRef<HTMLDivElement>(null);
+  const controlBarDragRef = useRef<{ active: boolean; offsetX: number; offsetY: number } | null>(null);
   const mediaDevicesRef = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
+  const roomId = activeCall.roomId || activeCall.id;
+  const legacyThreadId = activeCall.id !== roomId ? activeCall.id : undefined;
+  const currentIdentityKey = useMemo(
+    () => buildIdentityKey({ id: currentUser.id, email: currentUser.email, name: currentUser.name }),
+    [currentUser.id, currentUser.email, currentUser.name]
+  );
+  const dedupeMeetingMessages = useCallback((input: MeetingMessage[]) => {
+    const dedupe = new Map<string, MeetingMessage>();
+    input.forEach((message) => {
+      const key = `${String(message.id || '').trim()}::${String(message.senderId || '').trim()}::${Number(message.timestamp || 0)}`;
+      if (!dedupe.has(key)) dedupe.set(key, message);
+    });
+    return Array.from(dedupe.values())
+      .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0))
+      .slice(-500);
+  }, []);
 
   const getUserMediaSafe = useCallback(async (constraints: MediaStreamConstraints) => {
     const fn = mediaDevicesRef?.getUserMedia?.bind(mediaDevicesRef);
@@ -245,10 +285,25 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
 
   useEffect(() => {
     if (!isFirebaseConfigured) return;
-    return dbService.fetchMeetingMessages(activeCall.id, setMessages, (error) => {
+    return dbService.fetchMeetingMessages(roomId, (incoming) => {
+      setMessages((prev) => {
+        const merged = dedupeMeetingMessages([...prev, ...incoming]);
+        messageDedupeRef.current = new Set(
+          merged.map((message) => `${String(message.id || '').trim()}::${String(message.senderId || '').trim()}::${Number(message.timestamp || 0)}`)
+        );
+        return merged;
+      });
+    }, (error) => {
       console.warn('Meeting chat sync failed:', error);
+      setMediaError('Meeting chat channel degraded.');
     });
-  }, [isFirebaseConfigured, activeCall.id]);
+  }, [isFirebaseConfigured, roomId, dedupeMeetingMessages]);
+
+  useEffect(() => {
+    setIsBottomBarCollapsed(false);
+    setControlBarPosition(null);
+    messageDedupeRef.current = new Set();
+  }, [activeCall.id]);
 
   useEffect(() => {
     if (localStream) return;
@@ -276,31 +331,50 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     };
   }, [activeCall.id, isVideoEnabled, localStream, isMuted, getUserMediaSafe]);
 
-  const registerConnection = useCallback((call: MediaConnection, remoteUserId: string) => {
-    connectionsRef.current.set(remoteUserId, call);
+  const resolveRemoteIdentityFromPeer = useCallback((peerValue: string): string => {
+    const peerKey = String(peerValue || '').trim();
+    const mapped = peerIdentityLookupRef.current.get(peerKey);
+    if (mapped) return mapped;
+    if (peerKey.startsWith('connectai-user-')) {
+      const legacyId = peerKey.slice('connectai-user-'.length).trim();
+      const member = team.find((candidate) => candidate.id === legacyId);
+      return buildIdentityKey({ id: legacyId, email: member?.email, name: member?.name });
+    }
+    const fallbackTargets = callParticipantIdentityKeysRef.current.filter((identityKey) => identityKey !== currentIdentityKey);
+    if (fallbackTargets.length === 1) return fallbackTargets[0];
+    const notConnected = fallbackTargets.find((identityKey) => !connectionsRef.current.has(identityKey));
+    if (notConnected) return notConnected;
+    return `peer:${peerKey || 'unknown'}`;
+  }, [team, currentIdentityKey]);
+
+  const registerConnection = useCallback((call: MediaConnection, remoteIdentityKey: string) => {
+    connectionsRef.current.set(remoteIdentityKey, call);
     call.on('stream', (remoteStream) => {
-      dialingPeersRef.current.delete(remoteUserId);
+      dialingPeersRef.current.delete(remoteIdentityKey);
       remoteStream.getAudioTracks().forEach((track) => {
         track.enabled = true;
       });
-      setRemoteStreams(prev => new Map(prev).set(remoteUserId, remoteStream));
+      debugRouting('remoteStream.received', {
+        remoteIdentityKey,
+        peer: call.peer,
+        audioTracks: remoteStream.getAudioTracks().length,
+      });
+      setRemoteStreams(prev => new Map(prev).set(remoteIdentityKey, remoteStream));
     });
     call.on('close', () => {
-      connectionsRef.current.delete(remoteUserId);
-      dialingPeersRef.current.delete(remoteUserId);
+      connectionsRef.current.delete(remoteIdentityKey);
+      dialingPeersRef.current.delete(remoteIdentityKey);
       setRemoteStreams(prev => {
         const next = new Map(prev);
-        next.delete(remoteUserId);
+        next.delete(remoteIdentityKey);
         return next;
       });
     });
     call.on('error', (err) => {
       console.warn('PeerJS call error', err);
-      dialingPeersRef.current.delete(remoteUserId);
+      dialingPeersRef.current.delete(remoteIdentityKey);
     });
   }, []);
-
-  const roomId = activeCall.roomId || activeCall.id;
 
   // --- PEERJS INITIALIZATION ---
   useEffect(() => {
@@ -308,11 +382,12 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   }, [localStream]);
 
   useEffect(() => {
-    const id = `connectai-user-${currentUser.id}`;
+    const id = buildPeerId(currentIdentityKey);
     const peer = new Peer(id, { debug: 1 });
 
     peer.on('open', (id) => {
       setPeerId(id);
+      debugRouting('peer.open', { peerId: id, currentIdentityKey });
     });
 
     peer.on('call', async (call) => {
@@ -326,7 +401,12 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         });
         if (!existing) setLocalStream(stream);
         call.answer(stream);
-        registerConnection(call, call.peer.replace('connectai-user-', ''));
+        const remoteIdentityKey = resolveRemoteIdentityFromPeer(call.peer);
+        debugRouting('peer.incomingCall', {
+          peer: call.peer,
+          remoteIdentityKey,
+        });
+        registerConnection(call, remoteIdentityKey);
       } catch (err) {
         console.error('Failed to get local stream', err);
         setMediaError(String((err as any)?.message || 'Failed to access local media.'));
@@ -340,7 +420,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       connectionsRef.current.clear();
       peer.destroy();
     };
-  }, [currentUser.id, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe]);
+  }, [currentIdentityKey, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe, resolveRemoteIdentityFromPeer]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -539,19 +619,84 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const handleSendMessage = (text: string = chatInput, files: Attachment[] = []) => {
     if (!text.trim() && files.length === 0) return;
     const msg: MeetingMessage = { 
-      id: Date.now().toString(), 
+      id: `${currentUser.id}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
       senderId: currentUser.id, 
       text, 
       timestamp: Date.now(),
-      attachments: files 
+      attachments: files,
+      threadIds: Array.from(new Set([roomId, legacyThreadId].filter(Boolean))),
+      canonicalRoomId: roomId,
     };
-    if (isFirebaseConfigured) {
-      dbService.sendMeetingMessage(activeCall.id, msg).catch(() => {});
-    } else {
-      setMessages(prev => [...prev, msg]);
+    const pushLocal = () => {
+      const dedupeKey = `${msg.id}::${msg.senderId}::${msg.timestamp}`;
+      if (!messageDedupeRef.current.has(dedupeKey)) {
+        messageDedupeRef.current.add(dedupeKey);
+        setMessages((prev) => dedupeMeetingMessages([...prev, msg]));
+      }
+    };
+    debugRouting('meetingMessage.send', {
+      roomId,
+      messageId: msg.id,
+      senderId: msg.senderId,
+    });
+    if (!isFirebaseConfigured) {
+      pushLocal();
+      setChatInput('');
+      return;
     }
-    setChatInput('');
+    dbService.sendMeetingMessage(roomId, msg, { roomId: activeCall.roomId, legacyCallId: legacyThreadId })
+      .then((res: any) => {
+        if (res?.ok) {
+          pushLocal();
+        } else {
+          setMediaError(res?.error || 'Meeting chat failed to send.');
+        }
+      })
+      .catch((err: any) => {
+        setMediaError(String(err?.message || 'Meeting chat failed to send.'));
+      })
+      .finally(() => setChatInput(''));
   };
+
+  const beginControlBarDrag = useCallback((event: React.PointerEvent<HTMLButtonElement | HTMLDivElement>) => {
+    const rootRect = bridgeRootRef.current?.getBoundingClientRect();
+    const barRect = controlBarRef.current?.getBoundingClientRect();
+    if (!rootRect || !barRect) return;
+    controlBarDragRef.current = {
+      active: true,
+      offsetX: event.clientX - barRect.left,
+      offsetY: event.clientY - barRect.top,
+    };
+    setControlBarPosition({
+      x: barRect.left - rootRect.left,
+      y: barRect.top - rootRect.top,
+    });
+    event.preventDefault();
+  }, []);
+
+  useEffect(() => {
+    const onMove = (event: PointerEvent) => {
+      const dragState = controlBarDragRef.current;
+      if (!dragState?.active) return;
+      const rootRect = bridgeRootRef.current?.getBoundingClientRect();
+      const barRect = controlBarRef.current?.getBoundingClientRect();
+      if (!rootRect || !barRect) return;
+      const maxX = Math.max(8, rootRect.width - barRect.width - 8);
+      const maxY = Math.max(8, rootRect.height - barRect.height - 8);
+      const nextX = Math.min(Math.max(8, event.clientX - rootRect.left - dragState.offsetX), maxX);
+      const nextY = Math.min(Math.max(8, event.clientY - rootRect.top - dragState.offsetY), maxY);
+      setControlBarPosition({ x: nextX, y: nextY });
+    };
+    const onUp = () => {
+      if (controlBarDragRef.current) controlBarDragRef.current.active = false;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, []);
 
   const formatTime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
@@ -581,42 +726,87 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   }, [meetingShareLink]);
 
   // --- CALL LOGIC ---
-  const callUser = useCallback(async (targetUserId: string) => {
-    if (!peerRef.current) return;
-    if (connectionsRef.current.has(targetUserId)) return;
-    if (dialingPeersRef.current.has(targetUserId)) return;
-    dialingPeersRef.current.add(targetUserId);
-    const stream = localStream ?? await getUserMediaSafe(
-      isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
-    );
+  const callUser = useCallback(async (targetIdentityKey: string, legacyUserId?: string) => {
+    const peer = peerRef.current;
+    if (!peer || peer.destroyed || peer.disconnected || !peer.id) return;
+    const identityKey = String(targetIdentityKey || '').trim();
+    if (!identityKey || identityKey === currentIdentityKey) return;
+    if (connectionsRef.current.has(identityKey)) return;
+    if (dialingPeersRef.current.has(identityKey)) return;
+    dialingPeersRef.current.add(identityKey);
+    let stream: MediaStream;
+    try {
+      stream = localStream ?? await getUserMediaSafe(
+        isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
+      );
+    } catch {
+      dialingPeersRef.current.delete(identityKey);
+      return;
+    }
     stream.getAudioTracks().forEach((track) => {
       track.enabled = !isMuted;
     });
     if (!localStream) setLocalStream(stream);
-    const targetPeerId = `connectai-user-${targetUserId}`;
-    const call = peerRef.current.call(targetPeerId, stream);
-    const dialTimeout = window.setTimeout(() => {
-      dialingPeersRef.current.delete(targetUserId);
-    }, 8000);
-    call.on('stream', () => {
-      window.clearTimeout(dialTimeout);
-    });
-    call.on('close', () => {
-      window.clearTimeout(dialTimeout);
-    });
-    call.on('error', () => {
-      window.clearTimeout(dialTimeout);
-    });
-    registerConnection(call, targetUserId);
-  }, [localStream, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe]);
+    const identityIdFallback = identityKey.startsWith('id:') ? identityKey.slice(3).trim() : '';
+    const candidatePeerIds = Array.from(new Set([
+      buildPeerId(identityKey),
+      legacyUserId ? `connectai-user-${legacyUserId}` : '',
+      identityIdFallback ? `connectai-user-${identityIdFallback}` : '',
+    ].filter(Boolean)));
+    debugRouting('peer.dialCandidates', { targetIdentityKey: identityKey, candidatePeerIds });
+    let attemptIndex = 0;
+    const attemptDial = () => {
+      const currentPeer = peerRef.current;
+      if (!currentPeer || currentPeer.destroyed || currentPeer.disconnected || !currentPeer.id || attemptIndex >= candidatePeerIds.length) {
+        dialingPeersRef.current.delete(identityKey);
+        return;
+      }
+      const targetPeerId = candidatePeerIds[attemptIndex];
+      attemptIndex += 1;
+      debugRouting('peer.dialAttempt', { targetIdentityKey: identityKey, targetPeerId });
+      let connected = false;
+      let call: MediaConnection;
+      try {
+        call = currentPeer.call(targetPeerId, stream);
+      } catch (error) {
+        debugRouting('peer.dialError', { targetIdentityKey: identityKey, targetPeerId, error: String((error as any)?.message || error) });
+        attemptDial();
+        return;
+      }
+      if (!call || !call.peerConnection) {
+        debugRouting('peer.dialNullConnection', { targetIdentityKey: identityKey, targetPeerId });
+        attemptDial();
+        return;
+      }
+      const fallbackTimer = window.setTimeout(() => {
+        if (connected || connectionsRef.current.has(identityKey)) return;
+        try { call.close(); } catch {}
+        attemptDial();
+      }, 2600);
+      call.on('stream', () => {
+        connected = true;
+        window.clearTimeout(fallbackTimer);
+      });
+      call.on('close', () => {
+        window.clearTimeout(fallbackTimer);
+        if (!connected && !connectionsRef.current.has(identityKey)) attemptDial();
+      });
+      call.on('error', () => {
+        window.clearTimeout(fallbackTimer);
+        if (!connected && !connectionsRef.current.has(identityKey)) attemptDial();
+      });
+      registerConnection(call, identityKey);
+    };
+    attemptDial();
+  }, [localStream, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe, currentIdentityKey]);
 
-  const bindRemoteAudioEl = useCallback((userId: string, element: HTMLAudioElement | null) => {
+  const bindRemoteAudioEl = useCallback((remoteIdentityKey: string, element: HTMLAudioElement | null) => {
     if (!element) {
-      remoteAudioRefs.current.delete(userId);
+      remoteAudioRefs.current.delete(remoteIdentityKey);
       return;
     }
-    remoteAudioRefs.current.set(userId, element);
-    const stream = remoteStreams.get(userId);
+    remoteAudioRefs.current.set(remoteIdentityKey, element);
+    const stream = remoteStreams.get(remoteIdentityKey);
     if (!stream) return;
     if (element.srcObject !== stream) {
       element.srcObject = stream;
@@ -634,11 +824,16 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   useEffect(() => {
     const attachAndPlay = async () => {
       let blocked = false;
-      for (const [userId, stream] of remoteStreams.entries()) {
-        const audioEl = remoteAudioRefs.current.get(userId);
+      let missingTracks = false;
+      for (const [identityKey, stream] of remoteStreams.entries()) {
+        const audioEl = remoteAudioRefs.current.get(identityKey);
         if (!audioEl) continue;
         if (audioEl.srcObject !== stream) {
           audioEl.srcObject = stream;
+        }
+        if ((stream.getAudioTracks() || []).length === 0) {
+          missingTracks = true;
+          continue;
         }
         stream.getAudioTracks().forEach((track) => {
           track.enabled = true;
@@ -652,12 +847,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         }
       }
       setNeedsRemoteAudioUnlock(blocked);
+      setRemoteAudioDiagnostic(missingTracks ? 'no-track' : blocked ? 'blocked' : 'ok');
     };
     attachAndPlay();
   }, [remoteStreams]);
 
   const unlockRemoteAudio = useCallback(async () => {
     let blocked = false;
+    let missingTracks = false;
     for (const audioEl of remoteAudioRefs.current.values()) {
       try {
         audioEl.muted = false;
@@ -667,8 +864,15 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         blocked = true;
       }
     }
+    for (const stream of remoteStreams.values()) {
+      if ((stream.getAudioTracks() || []).length === 0) {
+        missingTracks = true;
+        break;
+      }
+    }
     setNeedsRemoteAudioUnlock(blocked);
-  }, []);
+    setRemoteAudioDiagnostic(missingTracks ? 'no-track' : blocked ? 'blocked' : 'ok');
+  }, [remoteStreams]);
 
   useEffect(() => {
     if (!remoteStreams.size) return;
@@ -700,35 +904,184 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     }
     return base;
   }, [team, currentUser]);
-  
-  const safeParticipantIds = useMemo(
-    () => (Array.isArray(activeCall.participants) ? activeCall.participants : [currentUser.id]),
-    [activeCall.participants, currentUser.id]
-  );
-  const participants = useMemo(
-    () => roster.filter((t) => safeParticipantIds.includes(t.id) || t.id === currentUser.id),
-    [roster, safeParticipantIds, currentUser.id]
-  );
+  const resolveMemberByIdentityKey = useCallback((identityKey: string): User | undefined => {
+    const key = String(identityKey || '').trim();
+    if (!key) return undefined;
+    if (key.startsWith('email:')) {
+      const email = normalizeEmail(key.slice(6));
+      if (email && normalizeEmail(currentUser.email) === email) return currentUser;
+      return roster.find((member) => normalizeEmail(member.email) === email);
+    }
+    if (key.startsWith('id:')) {
+      const id = key.slice(3).trim();
+      if (id && id === currentUser.id) return currentUser;
+      return roster.find((member) => member.id === id);
+    }
+    if (key.startsWith('name:')) {
+      const name = normalizeName(key.slice(5));
+      if (name && normalizeName(currentUser.name) === name) return currentUser;
+      return roster.find((member) => normalizeName(member.name) === name);
+    }
+    if (key === currentIdentityKey) return currentUser;
+    return roster.find((member) => buildIdentityKey(member) === key);
+  }, [roster, currentIdentityKey, currentUser]);
+  const parseIdentityLabel = useCallback((identityKey: string) => {
+    if (identityKey.startsWith('email:')) {
+      const email = identityKey.slice(6);
+      return email.split('@')[0] || email;
+    }
+    if (identityKey.startsWith('id:')) return identityKey.slice(3);
+    if (identityKey.startsWith('name:')) return identityKey.slice(5);
+    return identityKey.replace(/^peer:/, '');
+  }, []);
+  const callParticipantIdentityKeys = useMemo(() => {
+    const keys = new Set<string>();
+    const addKey = (value?: string | null) => {
+      const key = String(value || '').trim();
+      if (!key || key === 'unknown') return;
+      keys.add(key);
+    };
+    addKey(currentIdentityKey);
+    addKey(activeCall.agentIdentityKey);
+    addKey(activeCall.targetIdentityKey);
+    addKey(buildIdentityKey({
+      id: activeCall.agentId,
+      email: activeCall.agentEmail,
+      name: activeCall.agentName,
+    }));
+    addKey(buildIdentityKey({
+      id: activeCall.targetAgentId,
+      email: activeCall.targetAgentEmail || activeCall.customerEmail,
+      name: activeCall.customerName,
+    }));
+    (activeCall.participantIdentityKeys || []).forEach((key) => addKey(key));
+    (activeCall.participants || []).forEach((participantId) => {
+      const member = roster.find((teamMember) => teamMember.id === participantId);
+      addKey(buildIdentityKey({ id: participantId, email: member?.email, name: member?.name }));
+    });
+    const filtered = Array.from(keys).filter((key) => {
+      if (!key) return false;
+      if (key === currentIdentityKey) return true;
+      if (key === activeCall.agentIdentityKey || key === activeCall.targetIdentityKey) return true;
+      return Boolean(resolveMemberByIdentityKey(key));
+    });
+    return filtered;
+  }, [
+    activeCall.agentEmail,
+    activeCall.agentId,
+    activeCall.agentIdentityKey,
+    activeCall.agentName,
+    activeCall.customerEmail,
+    activeCall.customerName,
+    activeCall.participantIdentityKeys,
+    activeCall.participants,
+    activeCall.targetAgentEmail,
+    activeCall.targetAgentId,
+    activeCall.targetIdentityKey,
+    currentIdentityKey,
+    roster,
+    resolveMemberByIdentityKey,
+  ]);
+  useEffect(() => {
+    callParticipantIdentityKeysRef.current = callParticipantIdentityKeys;
+  }, [callParticipantIdentityKeys]);
+
+  const callParticipants = useMemo<SessionParticipant[]>(() => {
+    const merged = new Map<string, SessionParticipant>();
+    const resolveCanonicalIdentity = (member: User, fallbackIdentity: string) => {
+      if (member.id === currentUser.id) return currentIdentityKey;
+      const canonical = buildIdentityKey({ id: member.id, email: member.email, name: member.name });
+      return canonical && canonical !== 'unknown' ? canonical : fallbackIdentity;
+    };
+    callParticipantIdentityKeys.forEach((identityKey) => {
+      const member = resolveMemberByIdentityKey(identityKey);
+      if (member) {
+        const canonicalIdentityKey = resolveCanonicalIdentity(member, identityKey);
+        const canonicalParticipantKey = member.id ? `id:${member.id}` : canonicalIdentityKey;
+        merged.set(canonicalParticipantKey, {
+          id: member.id,
+          identityKey: canonicalIdentityKey,
+          name: member.name,
+          role: member.role,
+          email: member.email,
+          extension: member.extension,
+        });
+        return;
+      }
+      const fallbackId = identityKey.startsWith('id:') ? identityKey.slice(3).trim() : identityKey;
+      const fallbackName = parseIdentityLabel(identityKey) || 'Teammate';
+      merged.set(identityKey, {
+        id: fallbackId || identityKey,
+        identityKey,
+        name: fallbackName,
+        role: 'AGENT',
+        isSynthetic: true,
+      });
+    });
+    const currentCanonicalKey = `id:${currentUser.id}`;
+    merged.set(currentCanonicalKey, {
+        id: currentUser.id,
+        identityKey: currentIdentityKey,
+        name: currentUser.name,
+        role: currentUser.role,
+        email: currentUser.email,
+        extension: currentUser.extension,
+      });
+    return Array.from(merged.values());
+  }, [callParticipantIdentityKeys, resolveMemberByIdentityKey, parseIdentityLabel, currentIdentityKey, currentUser]);
+  const renderedParticipants = useMemo<SessionParticipant[]>(() => {
+    const merged = new Map<string, SessionParticipant>();
+    callParticipants.forEach((participant) => merged.set(participant.identityKey, participant));
+    return Array.from(merged.values());
+  }, [callParticipants]);
   const isMeetingSession = Boolean(activeCall.roomId || (activeCall.direction === 'internal' && activeCall.isVideo));
   const isPresentationMode = Boolean(activeCall.isScreenSharing);
-  const hostId = activeCall.hostId || activeCall.agentId || participants[0]?.id || currentUser.id;
+  const hostId = activeCall.hostId || activeCall.agentId || callParticipants[0]?.id || currentUser.id;
   const isHost = hostId === currentUser.id;
   const waitingRoom = useMemo(
     () => (Array.isArray(activeCall.waitingRoom) ? activeCall.waitingRoom : []),
     [activeCall.waitingRoom]
   );
-  const expectedRemoteIds = useMemo(
-    () => participants.filter((p) => p.id !== currentUser.id).map((p) => p.id),
-    [participants, currentUser.id]
+  const expectedRemoteIdentityKeys = useMemo(
+    () => callParticipants.filter((p) => p.identityKey !== currentIdentityKey).map((p) => p.identityKey),
+    [callParticipants, currentIdentityKey]
   );
   const focusedParticipant = useMemo(() => {
-    if (!participants.length) return null;
+    if (!renderedParticipants.length) return null;
     if (focusedParticipantId) {
-      const existing = participants.find((p) => p.id === focusedParticipantId);
+      const existing = renderedParticipants.find((p) => p.identityKey === focusedParticipantId);
       if (existing) return existing;
     }
-    return participants.find((p) => p.id !== currentUser.id) || participants[0] || null;
-  }, [participants, focusedParticipantId, currentUser.id]);
+    return renderedParticipants.find((p) => p.identityKey !== currentIdentityKey) || renderedParticipants[0] || null;
+  }, [renderedParticipants, focusedParticipantId, currentIdentityKey]);
+  const callParticipantMap = useMemo(() => {
+    const map = new Map<string, SessionParticipant>();
+    callParticipants.forEach((participant) => map.set(participant.identityKey, participant));
+    return map;
+  }, [callParticipants]);
+  useEffect(() => {
+    const lookup = new Map<string, string>();
+    callParticipants.forEach((participant) => {
+      lookup.set(buildPeerId(participant.identityKey), participant.identityKey);
+      if (participant.id) lookup.set(`connectai-user-${participant.id}`, participant.identityKey);
+    });
+    peerIdentityLookupRef.current = lookup;
+  }, [callParticipants]);
+
+  useEffect(() => {
+    setRemoteStreams((prev) => {
+      const next = new Map(prev);
+      Array.from(next.keys()).forEach((identityKey) => {
+        if (!expectedRemoteIdentityKeys.includes(identityKey)) {
+          const conn = connectionsRef.current.get(identityKey);
+          try { conn?.close(); } catch {}
+          connectionsRef.current.delete(identityKey);
+          next.delete(identityKey);
+        }
+      });
+      return next;
+    });
+  }, [expectedRemoteIdentityKeys]);
 
   const updateMeetingControls = useCallback((patch: Partial<Call>) => {
     if (!onUpdateCall) return;
@@ -764,35 +1117,43 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
 
   const reconnectDiagnostics = useMemo(() => {
     const connectedRemoteIds = new Set(remoteStreams.keys());
-    const missing = expectedRemoteIds.filter((id) => !connectedRemoteIds.has(id));
+    const missing = expectedRemoteIdentityKeys.filter((identityKey) => !connectedRemoteIds.has(identityKey));
     const localAudioTracks = localStream?.getAudioTracks().length || 0;
     const localVideoTracks = localStream?.getVideoTracks().length || 0;
     return {
       peerReady: Boolean(peerRef.current && !peerRef.current.destroyed),
-      expected: expectedRemoteIds.length,
+      expected: expectedRemoteIdentityKeys.length,
       connected: connectedRemoteIds.size,
       missing,
       localAudioTracks,
       localVideoTracks,
       needsRemoteAudioUnlock,
     };
-  }, [remoteStreams, expectedRemoteIds, localStream, needsRemoteAudioUnlock]);
+  }, [remoteStreams, expectedRemoteIdentityKeys, localStream, needsRemoteAudioUnlock]);
 
   const runReconnectSweep = useCallback(async () => {
     if (reconnectRunning) return;
     setReconnectRunning(true);
     setReconnectNote('Running reconnect sweep...');
     try {
-      const reconnectTargets = expectedRemoteIds.filter((id) => !remoteStreams.has(id));
-      reconnectTargets.forEach((id) => {
-        const existing = connectionsRef.current.get(id);
+      const reconnectTargets = expectedRemoteIdentityKeys
+        .filter((identityKey) => !remoteStreams.has(identityKey))
+        .map((identityKey) => callParticipantMap.get(identityKey) || ({
+          id: identityKey,
+          identityKey,
+          name: parseIdentityLabel(identityKey) || 'Teammate',
+          role: 'AGENT',
+          isSynthetic: true,
+        } as SessionParticipant));
+      reconnectTargets.forEach((participant) => {
+        const existing = connectionsRef.current.get(participant.identityKey);
         if (existing) {
           try { existing.close(); } catch {}
-          connectionsRef.current.delete(id);
+          connectionsRef.current.delete(participant.identityKey);
         }
       });
       for (const target of reconnectTargets) {
-        await callUser(target).catch(() => {});
+        await callUser(target.identityKey, target.id).catch(() => {});
       }
       if (!reconnectTargets.length) {
         setReconnectNote('No missing peers detected. Media state looks healthy.');
@@ -803,38 +1164,38 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       setReconnectRunning(false);
       setTimeout(() => setReconnectNote(''), 2800);
     }
-  }, [reconnectRunning, expectedRemoteIds, remoteStreams, callUser]);
+  }, [reconnectRunning, expectedRemoteIdentityKeys, remoteStreams, callUser, callParticipantMap, parseIdentityLabel]);
 
   useEffect(() => {
     if (!peerId) return;
-    participants
-      .filter((p) => p.id !== currentUser.id)
-      .forEach((p) => {
-        if (remoteStreams.has(p.id)) return;
-        if (connectionsRef.current.has(p.id)) return;
-        if (dialingPeersRef.current.has(p.id)) return;
-        callUser(p.id).catch(() => {
-          dialingPeersRef.current.delete(p.id);
-        });
+    expectedRemoteIdentityKeys.forEach((identityKey) => {
+      if (remoteStreams.has(identityKey)) return;
+      if (connectionsRef.current.has(identityKey)) return;
+      if (dialingPeersRef.current.has(identityKey)) return;
+      const participant = callParticipantMap.get(identityKey);
+      callUser(identityKey, participant?.id).catch(() => {
+        dialingPeersRef.current.delete(identityKey);
       });
-  }, [participants, currentUser.id, peerId, remoteStreams, callUser]);
+    });
+  }, [expectedRemoteIdentityKeys, peerId, remoteStreams, callUser, callParticipantMap]);
 
   useEffect(() => {
     if (!peerId) return;
     if (activeCall.status !== CallStatus.ACTIVE) return;
     const interval = window.setInterval(() => {
-      expectedRemoteIds.forEach((id) => {
-        if (remoteStreams.has(id)) return;
-        const existing = connectionsRef.current.get(id);
+      expectedRemoteIdentityKeys.forEach((identityKey) => {
+        if (remoteStreams.has(identityKey)) return;
+        const existing = connectionsRef.current.get(identityKey);
         if (existing) return;
-        callUser(id).catch(() => {});
+        const participant = callParticipantMap.get(identityKey);
+        callUser(identityKey, participant?.id).catch(() => {});
       });
     }, 2500);
     return () => window.clearInterval(interval);
-  }, [peerId, activeCall.status, expectedRemoteIds, remoteStreams, callUser]);
+  }, [peerId, activeCall.status, expectedRemoteIdentityKeys, remoteStreams, callUser, callParticipantMap]);
 
   return (
-    <div className="fixed inset-0 z-[100] bg-[#111] flex flex-col overflow-hidden text-white font-sans selection:bg-brand-500/30">
+    <div ref={bridgeRootRef} className="relative h-full w-full z-[100] bg-[#111] flex flex-col overflow-hidden text-white font-sans selection:bg-brand-500/30">
       
       {/* 1. Header: Teams Style */}
       <div className="h-14 bg-[#1f1f1f] border-b border-[#333] flex items-center justify-between px-4 z-20 shrink-0 shadow-sm">
@@ -850,6 +1211,16 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
             <button onClick={unlockRemoteAudio} className="ml-3 px-3 py-1.5 rounded-md border border-amber-500/50 bg-amber-500/10 text-[10px] font-black uppercase tracking-wider text-amber-300 hover:bg-amber-500/20">
               Enable Audio
             </button>
+          )}
+          {remoteAudioDiagnostic === 'no-track' && (
+            <span className="ml-3 px-3 py-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 text-[10px] font-black tracking-wide text-rose-200">
+              Remote stream has no audio tracks
+            </span>
+          )}
+          {remoteAudioDiagnostic === 'blocked' && !needsRemoteAudioUnlock && (
+            <span className="ml-3 px-3 py-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 text-[10px] font-black tracking-wide text-amber-200">
+              Audio playback blocked by browser
+            </span>
           )}
           {mediaError && (
             <div className="ml-3 px-3 py-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 text-[10px] font-black tracking-wide text-rose-200 max-w-[420px] truncate" title={mediaError}>
@@ -963,14 +1334,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
             <div className={`w-full h-full grid gap-3 ${participantRailDock === 'top' ? 'grid-rows-[120px_1fr]' : participantRailDock === 'left' ? 'grid-cols-[220px_1fr]' : 'grid-cols-[1fr_220px]'}`}>
               <div className={`rounded-xl border border-[#333] bg-[#0d1117] overflow-hidden ${participantRailDock === 'right' ? 'order-2' : participantRailDock === 'left' ? 'order-1' : 'order-1'}`}>
                 <div className={`${participantRailDock === 'top' ? 'h-full flex overflow-x-auto gap-2 p-2' : 'h-full overflow-y-auto p-2 space-y-2'}`}>
-                  {participants.map((p) => {
-                    const isLocal = p.id === currentUser.id;
-                    const stream = isLocal ? activeVideoStream : remoteStreams.get(p.id);
+                  {renderedParticipants.map((p) => {
+                    const isLocal = p.identityKey === currentIdentityKey;
+                    const stream = isLocal ? activeVideoStream : remoteStreams.get(p.identityKey);
                     return (
                       <button
-                        key={`rail-${p.id}`}
-                        onClick={() => setFocusedParticipantId(p.id)}
-                        className={`${participantRailDock === 'top' ? 'min-w-[160px] w-[160px]' : 'w-full h-[104px]'} rounded-lg overflow-hidden border ${focusedParticipant?.id === p.id ? 'border-indigo-500' : 'border-[#2b313c]'} bg-[#111827] relative`}
+                        key={`rail-${p.identityKey}`}
+                        onClick={() => setFocusedParticipantId(p.identityKey)}
+                        className={`${participantRailDock === 'top' ? 'min-w-[160px] w-[160px]' : 'w-full h-[104px]'} rounded-lg overflow-hidden border ${focusedParticipant?.identityKey === p.identityKey ? 'border-indigo-500' : 'border-[#2b313c]'} bg-[#111827] relative`}
                         title={`Focus ${p.name}`}
                       >
                         {stream || (isLocal && activeCall.isVideo) ? (
@@ -1001,7 +1372,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                     effect="none"
                     isLocal={Boolean(screenStream)}
                     label={screenStream ? `${currentUser.name} (Presenting)` : (focusedParticipant?.name || currentUser.name)}
-                    isMuted={screenStream ? isMuted : Boolean(focusedParticipant?.id === currentUser.id ? isMuted : false)}
+                    isMuted={screenStream ? isMuted : Boolean(focusedParticipant?.identityKey === currentIdentityKey ? isMuted : false)}
                   />
                 ) : (
                   <div className="w-full h-full flex flex-col items-center justify-center gap-3">
@@ -1013,17 +1384,17 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
             </div>
           ) : (
             <div className={`grid gap-3 w-full h-full max-h-full transition-all duration-500
-               ${participants.length === 1 ? 'grid-cols-1' : ''}
-               ${participants.length === 2 ? 'grid-cols-1 md:grid-cols-2' : ''}
-               ${participants.length >= 3 && participants.length <= 4 ? 'grid-cols-2' : ''}
-               ${participants.length > 4 ? 'grid-cols-2 md:grid-cols-3' : ''}
+               ${renderedParticipants.length === 1 ? 'grid-cols-1' : ''}
+               ${renderedParticipants.length === 2 ? 'grid-cols-1 md:grid-cols-2' : ''}
+               ${renderedParticipants.length >= 3 && renderedParticipants.length <= 4 ? 'grid-cols-2' : ''}
+               ${renderedParticipants.length > 4 ? 'grid-cols-2 md:grid-cols-3' : ''}
             `}>
-              {participants.map(p => {
-                const isLocal = p.id === currentUser.id;
-                const stream = isLocal ? activeVideoStream : remoteStreams.get(p.id);
+              {renderedParticipants.map(p => {
+                const isLocal = p.identityKey === currentIdentityKey;
+                const stream = isLocal ? activeVideoStream : remoteStreams.get(p.identityKey);
 
                 return (
-                  <div key={p.id} className="relative bg-[#1a1a1a] rounded-xl overflow-hidden border border-[#333] shadow-lg group">
+                  <div key={p.identityKey} className="relative bg-[#1a1a1a] rounded-xl overflow-hidden border border-[#333] shadow-lg group">
                     {stream || (isLocal && activeCall.isVideo) ? (
                       <NeuralVideoSlot
                         stream={stream || null}
@@ -1056,7 +1427,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
           <div className="w-[320px] bg-[#1f1f1f] border-l border-[#333] flex flex-col absolute top-0 bottom-0 right-0 z-40 shadow-2xl">
              <div className="flex border-b border-[#333]">
                 <button onClick={() => setActiveTab('chat')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'chat' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>Chat</button>
-                <button onClick={() => setActiveTab('participants')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'participants' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>People ({participants.length})</button>
+                <button onClick={() => setActiveTab('participants')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'participants' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>People ({renderedParticipants.length})</button>
                 <button onClick={() => setActiveTab('intelligence')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'intelligence' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>AI Intel</button>
              </div>
              <div className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-gray-700">
@@ -1118,14 +1489,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                         <UserPlus size={14}/> Invite Someone
                      </button>
                      <div className="space-y-2">
-                        {participants.map(p => (
-                          <div key={p.id} className="flex items-center gap-3 p-2 hover:bg-[#2a2a2a] rounded-lg transition-colors">
+                        {renderedParticipants.map(p => (
+                          <div key={p.identityKey} className="flex items-center gap-3 p-2 hover:bg-[#2a2a2a] rounded-lg transition-colors">
                              <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white">{p.name.charAt(0)}</div>
                              <div className="flex-1">
                                 <p className="text-xs font-semibold text-gray-200">{p.name}</p>
                                 <p className="text-[10px] text-gray-500 uppercase">{p.role}</p>
                              </div>
-                             {p.id === currentUser.id && <span className="text-[10px] text-gray-500">(You)</span>}
+                             {p.identityKey === currentIdentityKey && <span className="text-[10px] text-gray-500">(You)</span>}
                           </div>
                         ))}
                      </div>
@@ -1166,40 +1537,82 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         )}
       </div>
 
-      {/* 4. Floating Control Bar */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-6 py-3 bg-[#222]/90 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl">
-         <div className="flex items-center gap-1 pr-4 border-r border-white/10">
-             <span className="text-xs font-bold text-gray-400 tabular-nums">{formatTime(duration)}</span>
-         </div>
-         <button onClick={toggleMute} className={`p-3 rounded-xl transition-all ${!isMuted ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Mute">
-            {!isMuted ? <Mic size={20}/> : <MicOff size={20}/>}
-         </button>
-         <button onClick={() => onToggleMedia('video')} className={`p-3 rounded-xl transition-all ${activeCall.isVideo ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Camera">
-            {activeCall.isVideo ? <Video size={20}/> : <VideoOff size={20}/>}
-         </button>
-         <button onClick={() => onToggleMedia('screen')} className={`p-3 rounded-xl transition-all ${activeCall.isScreenSharing ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-[#333] text-white'}`} title="Share Screen">
-            {activeCall.isScreenSharing ? <MonitorOff size={20}/> : <Monitor size={20}/>}
-         </button>
-         <div className="relative">
-             <button onClick={() => setShowReactions(!showReactions)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Reactions">
+            {/* 4. Floating Control Bar */}
+      <div
+        ref={controlBarRef}
+        className={`absolute z-50 flex items-center py-3 bg-[#222]/90 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl overflow-visible transition-all duration-300 ${controlBarPosition ? '' : 'bottom-8 right-6'} ${isBottomBarCollapsed ? 'w-[210px] px-3 gap-2' : 'w-[min(96vw,900px)] px-6 gap-3'}`}
+        style={controlBarPosition ? { left: `${controlBarPosition.x}px`, top: `${controlBarPosition.y}px` } : undefined}
+      >
+        {isBottomBarCollapsed ? (
+          <>
+            <button
+              onPointerDown={beginControlBarDrag}
+              className="p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white transition-all"
+              title="Move controls"
+            >
+              <GripHorizontal size={16} />
+            </button>
+            <div className="flex items-center gap-1 pr-2 border-r border-white/10">
+              <span className="text-xs font-bold text-gray-400 tabular-nums">{formatTime(duration)}</span>
+            </div>
+            <button
+              onClick={() => setIsBottomBarCollapsed(false)}
+              className="ml-auto p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white transition-all"
+              title="Expand controls"
+            >
+              <ChevronRight size={16} className="rotate-180" />
+            </button>
+          </>
+        ) : (
+          <>
+            <button
+              onPointerDown={beginControlBarDrag}
+              className="p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white transition-all"
+              title="Move controls"
+            >
+              <GripHorizontal size={16} />
+            </button>
+            <div className="flex items-center gap-1 pr-4 border-r border-white/10">
+              <span className="text-xs font-bold text-gray-400 tabular-nums">{formatTime(duration)}</span>
+            </div>
+            <button onClick={toggleMute} className={`p-3 rounded-xl transition-all ${!isMuted ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Mute">
+              {!isMuted ? <Mic size={20}/> : <MicOff size={20}/>}
+            </button>
+            <button onClick={() => onToggleMedia('video')} className={`p-3 rounded-xl transition-all ${activeCall.isVideo ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Camera">
+              {activeCall.isVideo ? <Video size={20}/> : <VideoOff size={20}/>}
+            </button>
+            <button onClick={() => onToggleMedia('screen')} className={`p-3 rounded-xl transition-all ${activeCall.isScreenSharing ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-[#333] text-white'}`} title="Share Screen">
+              {activeCall.isScreenSharing ? <MonitorOff size={20}/> : <Monitor size={20}/>}
+            </button>
+            <div className="relative">
+              <button onClick={() => setShowReactions(!showReactions)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Reactions">
                 <Smile size={20}/>
-             </button>
-             {showReactions && (
-                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 bg-[#222] border border-[#333] p-2 rounded-full flex gap-2 shadow-xl animate-in slide-in-from-bottom-2">
-                     {['👍','❤️','😂','👏','👋'].map(emoji => (
-                         <button key={emoji} onClick={() => triggerReaction(emoji)} className="w-8 h-8 flex items-center justify-center hover:bg-[#333] rounded-full text-xl transition-transform hover:scale-125">
-                             {emoji}
-                         </button>
-                     ))}
-                 </div>
-             )}
-         </div>
-         <button onClick={() => setShowSettings(true)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Device Settings"><Settings size={20}/></button>
-         <button onClick={() => setRaisedHand(!raisedHand)} className={`p-3 rounded-xl transition-all ${raisedHand ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'hover:bg-[#333] text-white'}`} title="Raise Hand">
-            <Hand size={20}/>
-         </button>
-         <div className="w-[1px] h-6 bg-white/10 mx-2"></div>
-         <button onClick={handleTerminate} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-all active:scale-95">{isMeetingSession ? 'End Meeting' : 'Leave'}</button>
+              </button>
+              {showReactions && (
+                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 bg-[#222] border border-[#333] p-2 rounded-full flex gap-2 shadow-xl animate-in slide-in-from-bottom-2">
+                  {[':+1:', '<3', ':D', 'clap', 'wave'].map(emoji => (
+                    <button key={emoji} onClick={() => triggerReaction(emoji)} className="w-8 h-8 flex items-center justify-center hover:bg-[#333] rounded-full text-xl transition-transform hover:scale-125">
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button onClick={() => setShowSettings(true)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Device Settings"><Settings size={20}/></button>
+            <button onClick={() => setRaisedHand(!raisedHand)} className={`p-3 rounded-xl transition-all ${raisedHand ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'hover:bg-[#333] text-white'}`} title="Raise Hand">
+              <Hand size={20}/>
+            </button>
+            <div className="w-[1px] h-6 bg-white/10 mx-2"></div>
+            <button onClick={handleTerminate} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-all active:scale-95">{isMeetingSession ? 'End Meeting' : 'Leave'}</button>
+            <button
+              onClick={() => setIsBottomBarCollapsed(true)}
+              className="p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white transition-all"
+              title="Collapse controls"
+            >
+              <ChevronRight size={16} />
+            </button>
+          </>
+        )}
       </div>
 
       {Array.from(remoteStreams.entries()).map(([userId, stream]) => (
@@ -1267,7 +1680,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
               <h3 className="text-lg font-bold text-white mb-4">Invite Participants</h3>
               <div className="space-y-2 max-h-[300px] overflow-y-auto">
                  {team.filter(t => !activeCall.participants?.includes(t.id) && t.id !== currentUser.id).map(user => (
-                    <button key={user.id} onClick={() => { onInviteParticipant(user.id); callUser(user.id); setShowInviteModal(false); }} className="w-full p-3 bg-[#2a2a2a] rounded-lg flex items-center gap-3 hover:bg-indigo-600 transition-colors group">
+                    <button key={user.id} onClick={() => { onInviteParticipant(user.id); callUser(buildIdentityKey(user), user.id); setShowInviteModal(false); }} className="w-full p-3 bg-[#2a2a2a] rounded-lg flex items-center gap-3 hover:bg-indigo-600 transition-colors group">
                        <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-xs font-bold text-white">{user.name.charAt(0)}</div>
                        <div className="text-left"><p className="text-sm font-bold text-white">{user.name}</p><p className="text-[10px] text-gray-400 group-hover:text-indigo-200">{user.role}</p></div>
                        <Plus size={16} className="ml-auto text-gray-400 group-hover:text-white"/>
@@ -1291,3 +1704,4 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     </div>
   );
 };
+
