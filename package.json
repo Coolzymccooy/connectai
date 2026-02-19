@@ -42,6 +42,7 @@
     "lucide-react": "^0.561.0",
     "ml-distance": "^4.0.1",
     "mongoose": "^9.1.6",
+    "peer": "^1.0.2",
     "peerjs": "^1.5.5",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",

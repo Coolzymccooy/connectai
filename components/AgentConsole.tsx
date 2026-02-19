@@ -4,7 +4,7 @@ import {
   X, Plus, ClipboardCheck, User as UserIcon, Radio, Search, Filter, ArrowRight, BarChart3,
   TrendingUp, Users, Clock, DollarSign, Globe, Headset, BrainCircuit, Wand2, Lightbulb,
   CheckCircle, MoreHorizontal, Bot, MessageCircle, PhoneOutgoing, UserPlus, RefreshCw, Calendar as CalendarIcon, Video,
-  Repeat, ChevronLeft, LayoutGrid, CalendarDays, Lock, Trash2, Share2, HelpCircle, Paperclip, FileText, PhoneOff,
+  Repeat, ChevronLeft, LayoutGrid, CalendarDays, Lock, Trash2, Share2, HelpCircle, Paperclip, FileText, PhoneOff, ArrowDown,
   ShieldCheck, Terminal, Download, ClipboardList, Database, FileJson, CheckCircle2,
   ExternalLink, Layers, Eye, Settings, VideoOff, MoreVertical
 } from 'lucide-react';
@@ -22,7 +22,7 @@ interface AgentConsoleProps {
   onCompleteWrapUp: (finalCall: Call) => void;
   onEndActiveCall?: () => void;
   settings: AppSettings;
-  addNotification: (type: Notification['type'], message: string) => void;
+  addNotification: (type: Notification['type'], message: string, action?: Notification['action']) => void;
   leads?: Lead[];
   onOutboundCall?: (target: Lead | string) => void;
   onInternalCall?: (target: User) => void;
@@ -38,6 +38,7 @@ interface AgentConsoleProps {
   user: User;
   isFirebaseConfigured?: boolean;
   chatHealth?: { chatHealthy: boolean; callsHealthy?: boolean; offline?: boolean; lastError?: string };
+  focusInboxRequest?: { conversationId: string; at: number } | null;
 }
 
 const HOURS = Array.from({ length: 14 }, (_, i) => i + 8); 
@@ -116,8 +117,13 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   activeCall, agentStatus, onCompleteWrapUp, onEndActiveCall, settings, addNotification,
   leads = [], onOutboundCall, onInternalCall, onAddParticipant, history = [],
   campaigns, onUpdateCampaigns, onUpdateCampaign, onCreateLead, meetings, onUpdateMeetings, user, onJoinMeeting, isFirebaseConfigured = false, chatHealth
+  , focusInboxRequest
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inboxScrollRef = useRef<HTMLDivElement>(null);
+  const inboxNearBottomRef = useRef(true);
+  const inboxRenderedMessageCountRef = useRef(0);
+  const pendingInboxFocusRef = useRef<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [activeTab, setActiveTab] = useState<'voice' | 'omnichannel' | 'campaigns' | 'outbound' | 'team' | 'calendar' | 'leads' | 'crm' | 'help'>('voice');
   
@@ -141,6 +147,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const seededRef = useRef(false);
   const convoLastSeenRef = useRef<Record<string, number>>({});
   const convoRepairRef = useRef<Record<string, boolean>>({});
+  const senderNotificationAtRef = useRef<Record<string, number>>({});
   const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
   const selectedConvIdRef = useRef<string | null>(null);
   const [messageInput, setMessageInput] = useState('');
@@ -151,6 +158,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const [showThreadSettings, setShowThreadSettings] = useState(false);
   const [showTerminateConfirm, setShowTerminateConfirm] = useState(false);
   const [conversationPrefs, setConversationPrefs] = useState<Record<string, { muted: boolean; priority: boolean }>>({});
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
 
   // Campaign States
   const [showCampaignModal, setShowCampaignModal] = useState(false);
@@ -264,10 +272,31 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
 
   const activeConversation = conversations.find(c => c.id === selectedConvId);
   const activeMessages = selectedConvId ? (messageMap[selectedConvId] || activeConversation?.messages || []) : (activeConversation?.messages || []);
+  const isOwnMessage = (message: Message) =>
+    Boolean((message.senderId && message.senderId === user.id) || (!message.senderId && message.sender === 'agent'));
 
   useEffect(() => {
     selectedConvIdRef.current = selectedConvId;
   }, [selectedConvId]);
+
+  useEffect(() => {
+    const conversationId = String(focusInboxRequest?.conversationId || '').trim();
+    if (!conversationId) return;
+    pendingInboxFocusRef.current = conversationId;
+    setActiveTab('omnichannel');
+    if (conversations.some((conversation) => conversation.id === conversationId)) {
+      setSelectedConvId(conversationId);
+      pendingInboxFocusRef.current = null;
+    }
+  }, [focusInboxRequest?.at, focusInboxRequest?.conversationId, conversations]);
+
+  useEffect(() => {
+    const pendingConversationId = pendingInboxFocusRef.current;
+    if (!pendingConversationId) return;
+    if (!conversations.some((conversation) => conversation.id === pendingConversationId)) return;
+    setSelectedConvId(pendingConversationId);
+    pendingInboxFocusRef.current = null;
+  }, [conversations]);
   const normalizePhone = (value?: string) => (value || '').replace(/\D/g, '');
   const buildMemberIdentityKey = (member?: Partial<User> | null) => buildIdentityKey({
     id: member?.id,
@@ -387,6 +416,31 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       .map((conversation) => conversation.id)
       .filter(Boolean);
   };
+  const getConversationPeerKey = (conversation?: Conversation | null) => {
+    if (!conversation) return '';
+    if (conversation.channel !== 'chat') return `${conversation.channel}:${conversation.id}`;
+    const myIdentityKey = buildMemberIdentityKey(user);
+    const myEmail = normalizeEmail(user.email);
+    const myName = normalizeName(user.name);
+    const candidateIdentityKeys = (conversation.participantIdentityKeys || [])
+      .map((key) => String(key || '').trim())
+      .filter(Boolean)
+      .filter((key) => (
+        key !== myIdentityKey &&
+        key !== `id:${user.id}` &&
+        (!myEmail || key !== `email:${myEmail}`) &&
+        key !== `name:${myName}`
+      ));
+    if (candidateIdentityKeys.length) {
+      return `peer:${candidateIdentityKeys.sort()[0]}`;
+    }
+    if (conversation.teammateId && conversation.teammateId !== user.id) return `peer:id:${conversation.teammateId}`;
+    const peerEmail = (conversation.participantEmails || []).map(normalizeEmail).find((email) => email && email !== myEmail);
+    if (peerEmail) return `peer:email:${peerEmail}`;
+    const peerName = normalizeName(conversation.contactName);
+    if (peerName && peerName !== myName) return `peer:name:${peerName}`;
+    return `conv:${conversation.id}`;
+  };
   const normalizeConversationForUser = (conversation: Conversation): Conversation => {
     const participantIds = Array.from(new Set(conversation.participantIds || []));
     const participantEmails = Array.from(new Set((conversation.participantEmails || []).map(normalizeEmail).filter(Boolean)));
@@ -419,6 +473,27 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       participantEmails,
       participantIdentityKeys,
     };
+  };
+  const inboxConversations = useMemo(() => {
+    const grouped = new Map<string, Conversation>();
+    conversations.forEach((conversation) => {
+      const key = getConversationPeerKey(conversation);
+      const existing = grouped.get(key);
+      if (!existing || (conversation.lastMessageTime || 0) > (existing.lastMessageTime || 0)) {
+        grouped.set(key, conversation);
+      }
+    });
+    return Array.from(grouped.values())
+      .sort((a, b) => (b.lastMessageTime || 0) - (a.lastMessageTime || 0));
+  }, [conversations, user.id, user.email, user.name]);
+  const selectedConversationPeerKey = getConversationPeerKey(activeConversation);
+  const unreadInboxCount = inboxConversations.filter((conversation) => conversation.unreadCount > 0).length;
+  const selectInboxConversation = (conversation: Conversation) => {
+    setSelectedConvId(conversation.id);
+    convoLastSeenRef.current[conversation.id] = Math.max(
+      convoLastSeenRef.current[conversation.id] || 0,
+      conversation.lastMessageTime || 0
+    );
   };
 
   const refreshCrmData = async () => {
@@ -567,10 +642,65 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     }
   }, [conversations, selectedConvId]);
 
-  // Scroll logic
+  // Voice + wrap-up transcript scroll logic
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [activeCall?.transcript, activeMessages, wrapUpAnalysis]);
+  }, [activeCall?.transcript, wrapUpAnalysis]);
+
+  useEffect(() => {
+    const el = inboxScrollRef.current;
+    if (!el) return;
+    const updateScrollState = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const nearBottom = distanceFromBottom <= 72;
+      inboxNearBottomRef.current = nearBottom;
+      setShowJumpToLatest(!nearBottom && activeMessages.length > 0);
+    };
+    updateScrollState();
+    el.addEventListener('scroll', updateScrollState);
+    return () => el.removeEventListener('scroll', updateScrollState);
+  }, [selectedConvId, activeMessages.length]);
+
+  useEffect(() => {
+    inboxRenderedMessageCountRef.current = activeMessages.length;
+    const el = inboxScrollRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+      inboxNearBottomRef.current = true;
+      setShowJumpToLatest(false);
+    });
+  }, [selectedConvId]);
+
+  useEffect(() => {
+    const el = inboxScrollRef.current;
+    if (!el) return;
+    const previousCount = inboxRenderedMessageCountRef.current;
+    const currentCount = activeMessages.length;
+    inboxRenderedMessageCountRef.current = currentCount;
+    if (currentCount <= previousCount) return;
+    const latest = activeMessages[currentCount - 1];
+    requestAnimationFrame(() => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      const nearBottomNow = distanceFromBottom <= 72;
+      const shouldAutoScroll = isOwnMessage(latest) || inboxNearBottomRef.current || nearBottomNow;
+      if (shouldAutoScroll) {
+        el.scrollTop = el.scrollHeight;
+        inboxNearBottomRef.current = true;
+        setShowJumpToLatest(false);
+      } else {
+        setShowJumpToLatest(true);
+      }
+    });
+  }, [activeMessages, selectedConvId]);
+
+  const jumpToLatestMessage = () => {
+    const el = inboxScrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    inboxNearBottomRef.current = true;
+    setShowJumpToLatest(false);
+  };
 
   // Live Tool Extraction logic
   useEffect(() => {
@@ -1393,6 +1523,9 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     const seen = convoLastSeenRef.current;
     const isInitial = Object.keys(seen).length === 0;
     const nextSeen: Record<string, number> = {};
+    const now = Date.now();
+    const selectedConversation = conversations.find((conversation) => conversation.id === selectedConvId);
+    const selectedPeerKey = activeTab === 'omnichannel' ? getConversationPeerKey(selectedConversation) : '';
     conversations.forEach((conversation) => {
       const lastTime = conversation.lastMessageTime || 0;
       nextSeen[conversation.id] = lastTime;
@@ -1400,8 +1533,15 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       const previous = seen[conversation.id] || 0;
       const incoming = lastTime > previous && conversation.lastSenderId && conversation.lastSenderId !== user.id;
       if (!incoming) return;
-      if (activeTab === 'omnichannel' && selectedConvId === conversation.id) return;
-      addNotification('info', `New message from ${conversation.contactName}.`);
+      const peerKey = getConversationPeerKey(conversation);
+      if (selectedPeerKey && selectedPeerKey === peerKey) return;
+      if ((now - (senderNotificationAtRef.current[peerKey] || 0)) < 12000) return;
+      addNotification('info', `New message from ${conversation.contactName}.`, {
+        type: 'open-conversation',
+        conversationId: conversation.id,
+        label: 'Open thread',
+      });
+      senderNotificationAtRef.current[peerKey] = now;
     });
     convoLastSeenRef.current = nextSeen;
   }, [conversations, isFirebaseConfigured, user.id, activeTab, selectedConvId, addNotification]);
@@ -1568,11 +1708,21 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     }) || teammateFromIdentity;
     if (activeConversation.channel === 'chat' && onInternalCall) {
       const target = resolvedTeammate as User | null;
-      if (!target || !target.id || target.id === user.id || String(target.id).startsWith('peer_')) {
+      const targetEmail = normalizeEmail(target?.email || teammateEmail || '');
+      const mappedByEmail = targetEmail
+        ? settings.team.find((member) => normalizeEmail(member.email) === targetEmail)
+        : null;
+      const effectiveTarget = (mappedByEmail || target) as User | null;
+      const targetId = String(effectiveTarget?.id || '').trim();
+      const missingIdentity = !targetId || targetId.startsWith('peer_');
+      if (!effectiveTarget || targetId === user.id || (missingIdentity && !targetEmail)) {
         addNotification('error', 'This thread is not mapped to a real teammate yet. Open from Team roster or run Team Sync.');
         return;
       }
-      handleInternalLink(target, false);
+      handleInternalLink({
+        ...(effectiveTarget as User),
+        email: effectiveTarget?.email || targetEmail,
+      }, false);
       return;
     }
     onOutboundCall?.(activeConversation.contactPhone);
@@ -2341,13 +2491,14 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                          title={chatHealth?.chatHealthy ? 'Chat healthy' : (chatHealth?.lastError || 'Chat channel degraded')}
                        />
                      </div>
-                     <div className="w-8 h-8 bg-brand-600 rounded-lg flex items-center justify-center text-white text-[10px] font-black">{conversations.filter(c => c.unreadCount > 0).length}</div>
+                     <div className="w-8 h-8 bg-brand-600 rounded-lg flex items-center justify-center text-white text-[10px] font-black">{unreadInboxCount}</div>
                   </div>
                  <div className="flex-1 overflow-y-auto scrollbar-hide p-4 space-y-3">
-                    {conversations.map(conv => {
+                    {inboxConversations.map(conv => {
                       const isClosed = conv.status === 'closed';
+                      const isSelected = selectedConversationPeerKey && getConversationPeerKey(conv) === selectedConversationPeerKey;
                       return (
-                       <button key={conv.id} onClick={() => setSelectedConvId(conv.id)} className={`w-full p-4 rounded-[1.6rem] text-left transition-all border-2 group ${selectedConvId === conv.id ? 'bg-brand-50 border-brand-500 shadow-lg' : 'border-transparent hover:bg-slate-50'} ${isClosed ? 'opacity-60' : ''}`}>
+                       <button key={conv.id} onClick={() => selectInboxConversation(conv)} className={`w-full p-4 rounded-[1.6rem] text-left transition-all border-2 group ${isSelected ? 'bg-brand-50 border-brand-500 shadow-lg' : 'border-transparent hover:bg-slate-50'} ${isClosed ? 'opacity-60' : ''}`}>
                           <div className="flex justify-between items-start mb-2">
                              <h4 className="font-black text-slate-800 uppercase text-xs italic group-hover:text-brand-600">{conv.contactName}</h4>
                              <span className="text-[9px] font-black text-slate-400">{new Date(conv.lastMessageTime).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}</span>
@@ -2405,10 +2556,10 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                         </div>
                       )}
                       
-                      <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-slate-50/50">
+                      <div ref={inboxScrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-hide bg-slate-50/50">
                         {activeMessages.map(m => (
-                          <div key={m.id} className={`flex ${((m.senderId && m.senderId === user.id) || (!m.senderId && m.sender === 'agent')) ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`max-w-[70%] p-5 rounded-[1.8rem] text-sm leading-relaxed shadow-sm ${((m.senderId && m.senderId === user.id) || (!m.senderId && m.sender === 'agent')) ? 'bg-brand-600 text-white rounded-br-none' : 'bg-white border border-slate-100 text-slate-800 rounded-bl-none'}`}>
+                          <div key={m.id} className={`flex ${isOwnMessage(m) ? 'justify-end' : 'justify-start'}`}>
+                            <div className={`max-w-[70%] p-5 rounded-[1.8rem] text-sm leading-relaxed shadow-sm ${isOwnMessage(m) ? 'bg-brand-600 text-white rounded-br-none' : 'bg-white border border-slate-100 text-slate-800 rounded-bl-none'}`}>
                               {m.text && <p className="font-medium italic">"{m.text}"</p>}
                               {m.attachments?.map((att, i) => (
                                 <div key={i} className="mt-4 p-4 bg-black/10 rounded-2xl flex items-center gap-4 border border-white/5 group/file cursor-pointer hover:bg-black/20 transition-all">
@@ -2424,6 +2575,15 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                           </div>
                         ))}
                       </div>
+                      {showJumpToLatest && (
+                        <button
+                          onClick={jumpToLatestMessage}
+                          className="absolute bottom-28 right-7 z-20 px-3 py-2 rounded-full bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest shadow-xl hover:bg-slate-800 inline-flex items-center gap-2"
+                        >
+                          <ArrowDown size={12} />
+                          Latest Message
+                        </button>
+                      )}
 
                       <div className="p-6 border-t bg-white space-y-4">
                          {aiDraftText && (
@@ -3080,11 +3240,11 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       )}
 
       {campaignConfig && (
-        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-xl p-10 border border-white/20 relative overflow-hidden">
-            <button onClick={() => setCampaignConfig(null)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-600"><X size={18}/></button>
-            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-6">Campaign Settings</h3>
-            <div className="space-y-4">
+        <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-start md:items-center justify-center p-4 md:p-6 animate-in fade-in overflow-y-auto">
+          <div className="bg-white rounded-[2.5rem] shadow-2xl w-full max-w-2xl p-6 md:p-8 border border-white/20 relative overflow-hidden my-4 max-h-[92vh] flex flex-col">
+            <button onClick={() => setCampaignConfig(null)} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 z-10"><X size={18}/></button>
+            <h3 className="text-2xl font-black italic uppercase tracking-tighter text-slate-800 mb-4 md:mb-6 shrink-0">Campaign Settings</h3>
+            <div className="space-y-4 overflow-y-auto pr-1 md:pr-2">
               <div className="space-y-2">
                 <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Name</label>
                 <input
@@ -3308,13 +3468,21 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                   Add Step
                 </button>
               </div>
+            </div>
+            <div className="mt-4 pt-4 border-t border-slate-200 shrink-0 flex gap-2">
+              <button
+                onClick={() => setCampaignConfig(null)}
+                className="flex-1 py-3 rounded-xl border border-slate-200 text-slate-600 text-[10px] font-black uppercase tracking-widest hover:bg-slate-50"
+              >
+                Cancel
+              </button>
               <button
                 onClick={() => {
                   onUpdateCampaign?.(campaignConfig);
                   addNotification('success', 'Campaign updated.');
                   setCampaignConfig(null);
                 }}
-                className="w-full py-3 bg-brand-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
+                className="flex-1 py-3 bg-brand-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest"
               >
                 Save Changes
               </button>

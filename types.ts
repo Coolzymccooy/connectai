@@ -365,6 +365,11 @@ export interface Notification {
   id: string;
   type: 'success' | 'error' | 'info';
   message: string;
+  action?: {
+    type: 'open-conversation';
+    conversationId: string;
+    label?: string;
+  };
 }
 
 export interface AiSuggestion {

@@ -15,6 +15,7 @@ import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import twilio from 'twilio';
 import Stripe from 'stripe';
+import { ExpressPeerServer } from 'peer';
 import { authenticate, authorize, UserRole } from './rbacMiddleware.js';
 import { globalQueue } from './services/queueManager.js';
 import { startDialer } from './services/dialerEngine.js';
@@ -69,6 +70,7 @@ http.globalAgent.maxSockets = maxSockets;
 https.globalAgent.maxSockets = maxSockets;
 
 const app = express();
+const httpServer = http.createServer(app);
 app.set('trust proxy', 1);
 const isDevEnv = process.env.NODE_ENV !== 'production';
 
@@ -109,6 +111,23 @@ app.use('/api/rag', aiLimiter);
 
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: '2mb' }));
+
+const peerServerBasePath = (process.env.PEER_SERVER_PATH || '/peerjs').trim() || '/peerjs';
+const peerServer = ExpressPeerServer(httpServer, {
+  proxied: true,
+  allow_discovery: false,
+  path: '/',
+  pingInterval: Number(process.env.PEER_PING_INTERVAL_MS || 5000),
+});
+peerServer.on('connection', (client) => {
+  const id = client?.getId?.() || client?.id || 'unknown';
+  log('info', 'peer.connected', { peerId: id });
+});
+peerServer.on('disconnect', (client) => {
+  const id = client?.getId?.() || client?.id || 'unknown';
+  log('info', 'peer.disconnected', { peerId: id });
+});
+app.use(peerServerBasePath, peerServer);
 
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || 'default-tenant';
 const isMongoReady = () => mongoose.connection.readyState === 1;
@@ -4139,6 +4158,6 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT}`);
 });

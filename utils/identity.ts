@@ -31,8 +31,10 @@ const hashIdentity = (value: string): string => {
   return (hash >>> 0).toString(16).padStart(8, '0');
 };
 
-export const buildPeerId = (identityKey: string): string => {
+export const buildPeerId = (identityKey: string, scope?: string): string => {
   const normalized = String(identityKey || '').trim().toLowerCase();
+  const normalizedScope = String(scope || '').trim().toLowerCase();
+  const hashSource = normalizedScope ? `${normalized}::${normalizedScope}` : normalized;
   const slug = normalized.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 42) || 'peer';
-  return `connectai-peer-${slug}-${hashIdentity(normalized || 'peer')}`;
+  return `connectai-peer-${slug}-${hashIdentity(hashSource || 'peer')}`;
 };

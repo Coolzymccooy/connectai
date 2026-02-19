@@ -17,6 +17,7 @@ import { getIntegrationsStatus, startGoogleOAuth, startMicrosoftOAuth, startHubS
 import { apiRequest } from '../services/apiClient';
 import { saveSettingsApi } from '../services/settingsService';
 import { createInvite, fetchInvites } from '../services/authPolicyService';
+import { normalizeEmail, normalizeName } from '../utils/identity';
 
 const PERSONA_TEMPLATES = [
   { name: 'Professional Concierge', prompt: 'Welcome to ConnectAI Corporate. Your call is vital to our cluster. For technical admitting, press 1. For account stewardship, press 2.' },
@@ -112,6 +113,81 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       return true;
     });
   }, [settings.team]);
+  const identityDiagnostics = useMemo(() => {
+    const diagnostics: Array<{ member: User; reason: string; canonical?: User }> = [];
+    const roleRank = (role: Role) => (role === Role.ADMIN ? 3 : role === Role.SUPERVISOR ? 2 : 1);
+    const pickCanonical = (members: User[]) => {
+      const ordered = [...members].sort((a, b) => {
+        const aInvite = String(a.id || '').startsWith('invite_') ? 1 : 0;
+        const bInvite = String(b.id || '').startsWith('invite_') ? 1 : 0;
+        if (aInvite !== bInvite) return aInvite - bInvite;
+        const byRole = roleRank(b.role) - roleRank(a.role);
+        if (byRole !== 0) return byRole;
+        const aHasEmail = normalizeEmail(a.email) ? 1 : 0;
+        const bHasEmail = normalizeEmail(b.email) ? 1 : 0;
+        if (aHasEmail !== bHasEmail) return bHasEmail - aHasEmail;
+        return String(a.id || '').localeCompare(String(b.id || ''));
+      });
+      return ordered[0];
+    };
+
+    const emailGroups = new Map<string, User[]>();
+    teamMembers.forEach((member) => {
+      const email = normalizeEmail(member.email);
+      if (!email) return;
+      const bucket = emailGroups.get(email) || [];
+      bucket.push(member);
+      emailGroups.set(email, bucket);
+    });
+    emailGroups.forEach((members, email) => {
+      if (members.length < 2) return;
+      const canonical = pickCanonical(members);
+      members.forEach((member) => {
+        if (member.id === canonical.id) return;
+        diagnostics.push({
+          member,
+          canonical,
+          reason: `Duplicate email: ${email}`,
+        });
+      });
+    });
+
+    const nameGroups = new Map<string, User[]>();
+    teamMembers.forEach((member) => {
+      const nameKey = normalizeName(member.name);
+      if (!nameKey) return;
+      const bucket = nameGroups.get(nameKey) || [];
+      bucket.push(member);
+      nameGroups.set(nameKey, bucket);
+    });
+    nameGroups.forEach((members, nameKey) => {
+      if (members.length < 2) return;
+      const membersWithoutEmail = members.filter((member) => !normalizeEmail(member.email));
+      if (membersWithoutEmail.length === 0) return;
+      const canonical = pickCanonical(members);
+      membersWithoutEmail.forEach((member) => {
+        if (member.id === canonical.id) return;
+        if (diagnostics.some((entry) => entry.member.id === member.id)) return;
+        diagnostics.push({
+          member,
+          canonical,
+          reason: `Name-only alias: ${nameKey}`,
+        });
+      });
+    });
+
+    teamMembers.forEach((member) => {
+      const id = String(member.id || '');
+      if (!/^peer_/i.test(id)) return;
+      if (diagnostics.some((entry) => entry.member.id === member.id)) return;
+      diagnostics.push({
+        member,
+        reason: 'Synthetic peer alias id',
+      });
+    });
+
+    return diagnostics;
+  }, [teamMembers]);
   const [collapsedGeneral, setCollapsedGeneral] = useState<Record<string, boolean>>({
     access: false,
     providers: false,
@@ -352,6 +428,13 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     onUpdateSettings(next);
     saveSettingsApi(next).catch(() => {});
     addNotification('info', 'Member de-provisioned.');
+  };
+
+  const handleRemoveAlias = (userId: string) => {
+    const next = { ...settings, team: settings.team.filter(u => u.id !== userId) };
+    onUpdateSettings(next);
+    saveSettingsApi(next).catch(() => {});
+    addNotification('success', 'Identity alias removed.');
   };
 
   const handleUpdateMember = (userId: string, updates: Partial<User>) => {
@@ -1431,6 +1514,48 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                   <UserPlus size={14}/> Invite Member
                 </button>
               </div>
+            </div>
+            <div className="bg-white p-5 rounded-[1.6rem] border border-slate-200 shadow-sm">
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <div>
+                  <h5 className="text-[11px] font-black uppercase tracking-[0.22em] text-slate-700">Identity Diagnostics</h5>
+                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">
+                    Surface stale aliases before they impact inbox calls.
+                  </p>
+                </div>
+                <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${identityDiagnostics.length ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}`}>
+                  {identityDiagnostics.length ? `${identityDiagnostics.length} flagged` : 'Clean'}
+                </span>
+              </div>
+              {identityDiagnostics.length === 0 ? (
+                <div className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                  No stale aliases detected.
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {identityDiagnostics.map((entry) => (
+                    <div key={`${entry.member.id}:${entry.reason}`} className="flex items-center justify-between gap-3 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2.5">
+                      <div className="min-w-0">
+                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-700 truncate">
+                          {entry.member.name} ({entry.member.id})
+                        </p>
+                        <p className="text-[10px] font-bold text-amber-700">{entry.reason}</p>
+                        {entry.canonical && (
+                          <p className="text-[9px] font-bold uppercase tracking-widest text-slate-500">
+                            Keep: {entry.canonical.name} ({entry.canonical.id})
+                          </p>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => handleRemoveAlias(entry.member.id)}
+                        className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase tracking-widest hover:bg-slate-800"
+                      >
+                        Remove Alias
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {teamMembers.map(member => (

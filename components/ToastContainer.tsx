@@ -6,9 +6,10 @@ import { Notification } from '../types';
 interface ToastContainerProps {
   notifications: Notification[];
   removeNotification: (id: string) => void;
+  onNotificationClick?: (notification: Notification) => void;
 }
 
-export const ToastContainer: React.FC<ToastContainerProps> = ({ notifications, removeNotification }) => {
+export const ToastContainer: React.FC<ToastContainerProps> = ({ notifications, removeNotification, onNotificationClick }) => {
   // Local state to track which notifications are "visible" as toasts
   const [visibleIds, setVisibleIds] = useState<string[]>([]);
 
@@ -37,10 +38,13 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({ notifications, r
       {visibleNotes.map((note) => (
         <div 
           key={note.id}
+          onClick={() => {
+            if (note.action && onNotificationClick) onNotificationClick(note);
+          }}
           className={`pointer-events-auto min-w-[320px] max-w-sm w-full bg-white/90 backdrop-blur-md rounded-2xl shadow-2xl border-l-4 p-5 flex items-start space-x-4 animate-in slide-in-from-right-full fade-in duration-500 ${
             note.type === 'success' ? 'border-green-500' :
             note.type === 'error' ? 'border-red-500' : 'border-brand-500'
-          }`}
+          } ${note.action ? 'cursor-pointer hover:shadow-[0_18px_50px_-24px_rgba(14,116,144,0.6)]' : ''}`}
         >
           <div className="shrink-0 pt-0.5">
             {note.type === 'success' && <CheckCircle size={20} className="text-green-500" />}
@@ -50,9 +54,16 @@ export const ToastContainer: React.FC<ToastContainerProps> = ({ notifications, r
           <div className="flex-1">
             <p className="text-xs font-black uppercase tracking-widest text-slate-400 mb-1">{note.type} protocol</p>
             <p className="text-sm font-bold text-slate-800 leading-tight">{note.message}</p>
+            {note.action?.label && (
+              <p className="mt-1 text-[10px] font-black uppercase tracking-widest text-cyan-700">{note.action.label}</p>
+            )}
           </div>
           <button 
-            onClick={() => setVisibleIds(prev => prev.filter(id => id !== note.id))}
+            onClick={(event) => {
+              event.stopPropagation();
+              setVisibleIds(prev => prev.filter(id => id !== note.id));
+              removeNotification(note.id);
+            }}
             className="text-slate-300 hover:text-slate-600 shrink-0 transition-colors"
           >
             <X size={18} />

@@ -213,6 +213,7 @@ const App: React.FC = () => {
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [showNotificationPanel, setShowNotificationPanel] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [inboxFocusRequest, setInboxFocusRequest] = useState<{ conversationId: string; at: number } | null>(null);
   const [callHistory, setCallHistory] = useState<Call[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [meetings, setMeetings] = useState<Meeting[]>([]);
@@ -292,12 +293,13 @@ const App: React.FC = () => {
   const callWindowRef = useRef<HTMLDivElement | null>(null);
   const callWindowInitRef = useRef<string | null>(null);
   const callWindowDragRef = useRef<{ active: boolean; startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const recentlyEndedCallRef = useRef<{ id: string; at: number } | null>(null);
   const saveUserLockRef = useRef<{ uid?: string; failed?: boolean }>({});
   const sessionRoleLockRef = useRef<Role | null>(null);
   const notificationSeqRef = useRef(0);
   const lastNotificationRef = useRef<{ message: string; at: number }>({ message: '', at: 0 });
 
-  const addNotification = useCallback((type: Notification['type'], message: string) => {
+  const addNotification = useCallback((type: Notification['type'], message: string, action?: Notification['action']) => {
     const now = Date.now();
     if (lastNotificationRef.current.message === message && (now - lastNotificationRef.current.at) < 8000) {
       return;
@@ -305,9 +307,13 @@ const App: React.FC = () => {
     lastNotificationRef.current = { message, at: now };
     notificationSeqRef.current += 1;
     const id = `${now}-${notificationSeqRef.current}`;
-    setNotifications(prev => [{ id, type, message }, ...prev]);
+    setNotifications(prev => [{ id, type, message, action }, ...prev]);
     if (!showNotificationPanel) setUnreadCount(prev => prev + 1);
   }, [showNotificationPanel]);
+
+  const removeNotification = useCallback((id: string) => {
+    setNotifications((prev) => prev.filter((notification) => notification.id !== id));
+  }, []);
 
   const isDocumentVisible = useCallback(() => {
     if (typeof document === 'undefined') return true;
@@ -329,6 +335,15 @@ const App: React.FC = () => {
     callFeedPollCooldownRef.current = Math.max(callFeedPollCooldownRef.current, until);
     internalPollCooldownRef.current = Math.max(internalPollCooldownRef.current, until);
     activeCallPollCooldownRef.current = Math.max(activeCallPollCooldownRef.current, until);
+  }, []);
+
+  const wasRecentlyEndedCall = useCallback((callId?: string | null) => {
+    const id = String(callId || '').trim();
+    if (!id) return false;
+    const recent = recentlyEndedCallRef.current;
+    if (!recent) return false;
+    if (recent.id !== id) return false;
+    return (Date.now() - recent.at) < 120000;
   }, []);
 
   const normalizeCallForSession = useCallback((call: Call): Call => {
@@ -398,7 +413,9 @@ const App: React.FC = () => {
       normalized.hostId,
       ...team.map((m) => m.id),
     ].filter(Boolean) as string[]);
-    let participantIds = rawParticipantIds.filter((id) => allowedIds.has(id));
+    let participantIds = normalized.direction === 'internal'
+      ? rawParticipantIds
+      : rawParticipantIds.filter((id) => allowedIds.has(id));
     if (!participantIds.length) {
       participantIds = dedupe([currentUser.id, resolvedTarget?.id, resolvedAgent?.id]);
     }
@@ -419,11 +436,13 @@ const App: React.FC = () => {
       .filter((key) => {
         if (key.startsWith('email:')) {
           const email = key.slice(6);
-          return team.some((member) => normalizeEmail(member.email) === email) || normalizeEmail(currentUser.email) === email;
+          if (team.some((member) => normalizeEmail(member.email) === email) || normalizeEmail(currentUser.email) === email) return true;
+          return normalized.direction === 'internal';
         }
         if (key.startsWith('id:')) {
           const id = key.slice(3).trim();
-          return allowedIds.has(id);
+          if (allowedIds.has(id)) return true;
+          return normalized.direction === 'internal';
         }
         if (key.startsWith('name:')) return true;
         return true;
@@ -545,6 +564,10 @@ const App: React.FC = () => {
       return;
     }
     const ok = await dbService.saveCall(safeCall);
+    if (safeCall.status === CallStatus.ENDED) {
+      // Keep API mirror fresh so recovery logic never resurrects stale active sessions.
+      updateCallLog(call.id, safeCall).catch(() => {});
+    }
     if (!ok) {
       markCallsDegraded('realtime write failed');
       await updateCallLog(call.id, safeCall).catch(() => {});
@@ -848,9 +871,37 @@ const App: React.FC = () => {
           const callData = normalizeCallForSession(change.doc.data() as Call);
           const isStale = callData.startTime && (Date.now() - callData.startTime) > 5 * 60 * 1000;
           if (isStale) return;
+          const isCurrentActive = activeCall?.id === callData.id;
           const isTarget = matchesCurrentUserAsTarget(callData);
           const isParticipant = matchesCurrentUserInCall(callData);
-          if (!isParticipant) return;
+          if (change.type === 'removed') {
+            if (!isCurrentActive) return;
+            const peerEmails = [
+              activeCall?.agentEmail || callData.agentEmail || '',
+              activeCall?.targetAgentEmail || callData.targetAgentEmail || '',
+              activeCall?.customerEmail || callData.customerEmail || '',
+            ].filter(Boolean);
+            const endTime = Date.now();
+            const start = Number(activeCall?.startTime || callData.startTime || endTime);
+            const endedCall = normalizeCallForSession({
+              ...(activeCall || callData),
+              id: callData.id,
+              status: CallStatus.ENDED,
+              durationSeconds: Math.max(0, (endTime - start) / 1000),
+            } as Call);
+            recentlyEndedCallRef.current = { id: endedCall.id, at: Date.now() };
+            setCallHistory((h) => [endedCall, ...h.filter((c) => c.id !== endedCall.id)]);
+            setActiveCall(null);
+            setIncomingCallBanner((prev) => (prev?.id === callData.id ? null : prev));
+            setAgentStatus(AgentStatus.WRAP_UP);
+            markTeamPresenceByEmails(peerEmails, AgentStatus.WRAP_UP);
+            setTimeout(() => {
+              setAgentStatus(AgentStatus.AVAILABLE);
+              markTeamPresenceByEmails(peerEmails, AgentStatus.AVAILABLE);
+            }, 1200);
+            return;
+          }
+          if (!isParticipant && !isCurrentActive) return;
           if (change.type === 'added' || change.type === 'modified') {
             if (!activeCall || activeCall.id === callData.id || activeCall.status === CallStatus.ENDED) {
               setActiveCall(callData);
@@ -864,8 +915,6 @@ const App: React.FC = () => {
                 setIncomingCallBanner((prev) => (prev?.id === callData.id ? null : prev));
               }
             }
-          } else if (change.type === 'removed') {
-            if (activeCall?.id === callData.id) handleHangup();
           }
         });
       },
@@ -879,7 +928,7 @@ const App: React.FC = () => {
       }
     );
     return () => unsubscribe();
-  }, [currentUser, realtimeCallsEnabled, activeCall?.id, matchesCurrentUserAsTarget, matchesCurrentUserInCall, normalizeCallForSession, markCallsDegraded]);
+  }, [currentUser, realtimeCallsEnabled, activeCall?.id, matchesCurrentUserAsTarget, matchesCurrentUserInCall, normalizeCallForSession, markCallsDegraded, markTeamPresenceByEmails]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -1127,6 +1176,23 @@ const App: React.FC = () => {
   }, [incomingCallBanner?.id, callHistory]);
 
   useEffect(() => {
+    if (!activeCall) return;
+    const ended = callHistory.find((c) => c.id === activeCall.id && c.status === CallStatus.ENDED);
+    if (!ended) return;
+    recentlyEndedCallRef.current = { id: ended.id, at: Date.now() };
+    const peerEmails = [activeCall.agentEmail || '', activeCall.targetAgentEmail || '', activeCall.customerEmail || ''].filter(Boolean);
+    setIncomingCallBanner((prev) => (prev?.id === ended.id ? null : prev));
+    setActiveCall(null);
+    setAgentStatus(AgentStatus.WRAP_UP);
+    markTeamPresenceByEmails(peerEmails, AgentStatus.WRAP_UP);
+    const timer = setTimeout(() => {
+      setAgentStatus(AgentStatus.AVAILABLE);
+      markTeamPresenceByEmails(peerEmails, AgentStatus.AVAILABLE);
+    }, 1200);
+    return () => clearTimeout(timer);
+  }, [activeCall?.id, callHistory, markTeamPresenceByEmails]);
+
+  useEffect(() => {
     if (!activeCall?.id) return;
     if (activeCall.status === CallStatus.DIALING || activeCall.status === CallStatus.RINGING) {
       scheduleUnansweredAutoHangup(activeCall.id);
@@ -1140,7 +1206,7 @@ const App: React.FC = () => {
   }, [activeCall?.id, activeCall?.status, scheduleUnansweredAutoHangup]);
 
   useEffect(() => {
-    if (!currentUser || activeCall) return;
+    if (!currentUser || activeCall || realtimeCallsEnabled) return;
     let cancelled = false;
     const restoreActiveCall = async () => {
       try {
@@ -1149,6 +1215,7 @@ const App: React.FC = () => {
         let recovered: Call | null = null;
         if (savedId) {
           recovered = await fetchCallById(savedId).catch(() => null);
+          if (recovered && wasRecentlyEndedCall(recovered.id)) recovered = null;
         }
         if (!recovered) {
           const calls = await fetchCallLogs({ limit: 50 });
@@ -1160,6 +1227,7 @@ const App: React.FC = () => {
             if (myEmail && (normalizeEmail(c.agentEmail) === myEmail || normalizeEmail((c as any).targetAgentEmail || c.customerEmail) === myEmail)) return true;
             return false;
           }) || null;
+          if (recovered && wasRecentlyEndedCall(recovered.id)) recovered = null;
         }
         if (cancelled || !recovered) return;
         const normalizedRecovered = normalizeCallForSession(recovered);
@@ -1177,7 +1245,7 @@ const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [currentUser?.id, currentUser?.email, activeCall?.id, normalizeCallForSession]);
+  }, [currentUser?.id, currentUser?.email, activeCall?.id, normalizeCallForSession, realtimeCallsEnabled, wasRecentlyEndedCall]);
 
   useEffect(() => {
     if (!currentUser || activeCall || typeof window === 'undefined') return;
@@ -1742,22 +1810,24 @@ const App: React.FC = () => {
     setLiveService(null);
     setAudioLevel(0);
     setIncomingCallBanner(null);
-    if (activeCall) {
-      const peerEmails = [activeCall.agentEmail || '', activeCall.targetAgentEmail || '', activeCall.customerEmail || ''].filter(Boolean);
-      if (activeCall.roomId) {
-        const meetingToClose = meetings.find(m => m.roomId === activeCall.roomId);
+    const callToEnd = activeCall;
+    if (callToEnd) {
+      const peerEmails = [callToEnd.agentEmail || '', callToEnd.targetAgentEmail || '', callToEnd.customerEmail || ''].filter(Boolean);
+      if (callToEnd.roomId) {
+        const meetingToClose = meetings.find(m => m.roomId === callToEnd.roomId);
         if (meetingToClose) {
           const endedMeeting: Meeting = { ...meetingToClose, status: 'ended' };
           setMeetings(prev => prev.map(m => m.id === endedMeeting.id ? endedMeeting : m));
           updateCalendarEvent(endedMeeting).catch(() => { });
         }
       }
-      const finalCall: Call = { ...activeCall, status: CallStatus.ENDED, durationSeconds: (Date.now() - activeCall.startTime) / 1000 };
+      const finalCall: Call = { ...callToEnd, status: CallStatus.ENDED, durationSeconds: (Date.now() - callToEnd.startTime) / 1000 };
+      recentlyEndedCallRef.current = { id: finalCall.id, at: Date.now() };
       setCallHistory(h => [finalCall, ...h]);
-      await persistCall(finalCall);
       setActiveCall(null);
       setAgentStatus(AgentStatus.WRAP_UP);
       markTeamPresenceByEmails(peerEmails, AgentStatus.WRAP_UP);
+      persistCall(finalCall).catch(() => {});
       setTimeout(() => {
         setAgentStatus(AgentStatus.AVAILABLE);
         markTeamPresenceByEmails(peerEmails, AgentStatus.AVAILABLE);
@@ -1929,7 +1999,6 @@ const App: React.FC = () => {
     if (activeCall.status === CallStatus.ENDED) return;
     let cancelled = false;
     const syncActiveCall = async () => {
-      if (!isDocumentVisible()) return;
       if (isCallsApiCoolingDown()) return;
       try {
         const latest = await fetchCallById(activeCall.id);
@@ -1938,18 +2007,24 @@ const App: React.FC = () => {
           delete activeCallNotFoundRef.current[activeCall.id];
         }
         const normalizedLatest = normalizeCallForSession(latest);
+        if (normalizedLatest.status === CallStatus.ENDED) {
+          recentlyEndedCallRef.current = { id: normalizedLatest.id, at: Date.now() };
+          setCallHistory((h) => [normalizedLatest, ...h.filter((c) => c.id !== normalizedLatest.id)]);
+          setActiveCall((prev) => (prev?.id === normalizedLatest.id ? null : prev));
+          setIncomingCallBanner((prev) => (prev?.id === normalizedLatest.id ? null : prev));
+          setAgentStatus(AgentStatus.WRAP_UP);
+          return;
+        }
+        if (realtimeCallsEnabled) {
+          // In realtime mode, trust Firestore for non-terminal state to avoid stale API resurrection.
+          return;
+        }
         setActiveCall((prev) => {
           if (!prev || prev.id !== normalizedLatest.id) return prev;
           return normalizeCallForSession({ ...prev, ...normalizedLatest });
         });
         if (normalizedLatest.status !== CallStatus.DIALING && normalizedLatest.status !== CallStatus.RINGING) {
           setIncomingCallBanner((prev) => (prev?.id === normalizedLatest.id ? null : prev));
-        }
-        if (normalizedLatest.status === CallStatus.ENDED) {
-          setCallHistory((h) => [normalizedLatest, ...h.filter((c) => c.id !== normalizedLatest.id)]);
-          setActiveCall((prev) => (prev?.id === normalizedLatest.id ? null : prev));
-          setIncomingCallBanner((prev) => (prev?.id === normalizedLatest.id ? null : prev));
-          setAgentStatus(AgentStatus.WRAP_UP);
         }
       } catch (err: any) {
         if (Number(err?.status) === 404) {
@@ -1974,13 +2049,25 @@ const App: React.FC = () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [activeCall?.id, activeCall?.status, normalizeCallForSession, isDocumentVisible, isCallsApiCoolingDown, setCallsApiCooldown]);
+  }, [activeCall?.id, activeCall?.status, normalizeCallForSession, isDocumentVisible, isCallsApiCoolingDown, setCallsApiCooldown, realtimeCallsEnabled]);
 
   const isMeetingActive =
     Boolean(activeCall) &&
     activeCall.status === CallStatus.ACTIVE &&
     (activeCall.direction === 'internal' || Boolean(activeCall.isVideo) || Boolean(activeCall.roomId));
   const showMeetingFullScreen = isMeetingActive && callWindowMode === 'full';
+
+  const handleNotificationClick = useCallback((notification: Notification) => {
+    if (notification.action?.type !== 'open-conversation') return;
+    const conversationId = String(notification.action.conversationId || '').trim();
+    if (!conversationId) return;
+    if (isMeetingActive && callWindowMode === 'full') {
+      setCallWindowMode('minimized');
+    }
+    setView('agent');
+    setInboxFocusRequest({ conversationId, at: Date.now() });
+    setUnreadCount(0);
+  }, [isMeetingActive, callWindowMode]);
 
   const placeCallWindow = useCallback(() => {
     const panel = callWindowRef.current;
@@ -2122,7 +2209,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-[100dvh] bg-[radial-gradient(120%_120%_at_50%_0%,#0f172a_0%,#020617_58%,#000000_100%)] app-compact flex-col md:flex-row overflow-hidden">
-      <ToastContainer notifications={notifications} removeNotification={() => { }} />
+      <ToastContainer notifications={notifications} removeNotification={removeNotification} onNotificationClick={handleNotificationClick} />
       {incomingCallBanner && incomingCallBanner.status !== CallStatus.ENDED && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[140] bg-white border border-slate-200 rounded-2xl shadow-2xl px-4 py-3 flex items-center gap-3">
           <div>
@@ -2235,7 +2322,7 @@ const App: React.FC = () => {
                 <div className="p-4 md:p-8 h-full bg-[radial-gradient(110%_100%_at_50%_0%,rgba(15,23,42,0.55)_0%,rgba(2,6,23,0.15)_55%,rgba(2,6,23,0)_100%)]">
                   <div className="h-full relative">
                     <div className="h-full">
-                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} onEndActiveCall={handleHangup} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} onUpdateCampaign={handleUpdateCampaign} onCreateLead={handleCreateLead} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} chatHealth={{ chatHealthy, callsHealthy, offline: realtimeOffline, lastError: realtimeError }} />
+                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} onEndActiveCall={handleHangup} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} onUpdateCampaign={handleUpdateCampaign} onCreateLead={handleCreateLead} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} chatHealth={{ chatHealthy, callsHealthy, offline: realtimeOffline, lastError: realtimeError }} focusInboxRequest={inboxFocusRequest} />
                     </div>
 
                   </div>

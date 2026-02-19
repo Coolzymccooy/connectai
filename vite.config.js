@@ -22,6 +22,12 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: false,
         },
+        '/peerjs': {
+          target: 'http://localhost:8787',
+          changeOrigin: true,
+          secure: false,
+          ws: true,
+        },
       },
       configureServer(server) {
         server.middlewares.use((req, _res, next) => {

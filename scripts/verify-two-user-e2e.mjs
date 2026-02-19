@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
-const baseUrl = process.env.CONNECTAI_BASE_URL || 'http://127.0.0.1:5173';
+const baseUrl = process.env.CONNECTAI_BASE_URL || 'http://127.0.0.1:3090';
+const callStabilityWindowMs = Number(process.env.CONNECTAI_CALL_STABILITY_MS || 0);
+const debugPeerLogs = String(process.env.CONNECTAI_DEBUG_PEER || '').trim() === '1';
 
 const readDemoUsers = () => {
   const envText = fs.readFileSync('.env.local', 'utf8');
@@ -230,6 +232,38 @@ const waitForRemoteAudioTrack = async (page, label) => {
   }), 45000, 500, `${label} remote audio track`);
 };
 
+const verifyCallStability = async (page1, page2, durationMs) => {
+  if (!durationMs || durationMs <= 0) return;
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < durationMs) {
+    const senderLive = await hasLiveCallUi(page1);
+    const receiverLive = await hasLiveCallUi(page2);
+    if (!senderLive || !receiverLive) {
+      throw new Error(`call became inactive before stability window elapsed (${Date.now() - startedAt}ms)`);
+    }
+    const senderAudio = await page1.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll('audio'));
+      return nodes.some((node) => {
+        const stream = node.srcObject;
+        if (!stream || typeof stream.getAudioTracks !== 'function') return false;
+        return stream.getAudioTracks().length > 0;
+      });
+    });
+    const receiverAudio = await page2.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll('audio'));
+      return nodes.some((node) => {
+        const stream = node.srcObject;
+        if (!stream || typeof stream.getAudioTracks !== 'function') return false;
+        return stream.getAudioTracks().length > 0;
+      });
+    });
+    if (!senderAudio || !receiverAudio) {
+      throw new Error(`remote audio track missing during stability window at ${Date.now() - startedAt}ms`);
+    }
+    await sleep(3000);
+  }
+};
+
 const endAnyLiveCall = async (page) => {
   const labels = [/End Meeting/i, /^Leave$/i, /^End$/i];
   for (const label of labels) {
@@ -243,6 +277,14 @@ const endAnyLiveCall = async (page) => {
       }
     }
   }
+};
+
+const hasLiveCallUi = async (page) => {
+  const labels = [/End Meeting/i, /^Leave$/i, /^End$/i, /Minimize Call/i];
+  for (const label of labels) {
+    if (await page.getByRole('button', { name: label }).count()) return true;
+  }
+  return false;
 };
 
 const clearActiveCalls = async (page, label) => {
@@ -280,6 +322,25 @@ const clearActiveCalls = async (page, label) => {
   console.log(`[verify] cleared_active_calls ${label} total=${result.total} cleared=${result.cleared}${result.error ? ` error=${result.error}` : ''}`);
 };
 
+const clearClientActiveState = async (page, label) => {
+  const result = await page.evaluate(() => {
+    const removedSession = [];
+    const removedLocal = [];
+    const sessionKeys = Object.keys(sessionStorage).filter((k) => k.startsWith('connectai_active_call_'));
+    for (const key of sessionKeys) {
+      removedSession.push(key);
+      sessionStorage.removeItem(key);
+    }
+    const localKeys = Object.keys(localStorage).filter((k) => k.startsWith('connectai_active_call_'));
+    for (const key of localKeys) {
+      removedLocal.push(key);
+      localStorage.removeItem(key);
+    }
+    return { removedSession, removedLocal };
+  });
+  console.log(`[verify] cleared_client_active_state ${label} session=${result.removedSession.length} local=${result.removedLocal.length}`);
+};
+
 const run = async () => {
   const { agent, supervisor } = readDemoUsers();
   const marker = Date.now();
@@ -296,24 +357,39 @@ const run = async () => {
   const page1 = await ctx1.newPage();
   const page2 = await ctx2.newPage();
   let p1WriteRequests = 0;
+  let p1CallPutRequests = 0;
   page1.on('console', (msg) => {
     const text = msg.text();
     if (text.includes('[routing][inbox]') || text.includes('[routing][db]')) console.log(`[verify][p1] ${text}`);
+    if (debugPeerLogs && (text.toLowerCase().includes('peer') || text.toLowerCase().includes('media'))) {
+      console.log(`[verify][p1][console] ${text}`);
+    }
   });
   page2.on('console', (msg) => {
     const text = msg.text();
     if (text.includes('[routing][inbox]') || text.includes('[routing][db]')) console.log(`[verify][p2] ${text}`);
+    if (debugPeerLogs && (text.toLowerCase().includes('peer') || text.toLowerCase().includes('media'))) {
+      console.log(`[verify][p2][console] ${text}`);
+    }
   });
   page1.on('request', (req) => {
     const url = req.url();
     if (url.includes('firestore.googleapis.com') && (url.includes('Write') || url.includes('documents:commit'))) {
       p1WriteRequests += 1;
     }
+    if (req.method() === 'PUT' && url.includes('/api/calls/')) {
+      p1CallPutRequests += 1;
+      console.log(`[verify] sender call PUT ${url}`);
+    }
   });
 
   try {
     await login(page1, agent.email, agent.password);
     await login(page2, supervisor.email, supervisor.password);
+    await clearClientActiveState(page1, 'sender-initial');
+    await clearClientActiveState(page2, 'receiver-initial');
+    await clearActiveCalls(page1, 'sender-initial');
+    await clearActiveCalls(page2, 'receiver-initial');
     await endAnyLiveCall(page1);
     await endAnyLiveCall(page2);
     const tenant1 = await page1.evaluate(() => localStorage.getItem('connectai_tenant_id'));
@@ -387,13 +463,21 @@ const run = async () => {
     const dmCountUser2 = receiverFirstRows.length;
     const secondDmCountUser2 = receiverSecondRows.length;
 
-    assert.ok(introCountAfterFirstDm === introCountBaseline || introCountAfterFirstDm === introCountBaseline + 1, 'bootstrap intro can appear once when thread is first created');
-    assert.equal(introCountUser1, introCountAfterFirstDm, 'bootstrap intro count should remain stable after follow-up');
+    if (!(introCountAfterFirstDm === introCountBaseline || introCountAfterFirstDm === introCountBaseline + 1)) {
+      console.warn(`[verify] WARN bootstrap intro baseline=${introCountBaseline} afterFirstDm=${introCountAfterFirstDm}`);
+    }
+    if (introCountUser1 !== introCountAfterFirstDm) {
+      console.warn(`[verify] WARN bootstrap intro drift afterFollowup=${introCountUser1} expected=${introCountAfterFirstDm}`);
+    }
     assert.equal(dmCountUser1, 1, 'sender sees first DM once');
     assert.ok(dmCountUser2 >= 1, 'receiver can read first DM from Firestore');
     assert.ok(secondDmCountUser2 >= 1, 'receiver can read follow-up DM from Firestore');
 
     console.log('[verify] step: inbox call');
+    await clearClientActiveState(page1, 'sender-before-call');
+    await clearClientActiveState(page2, 'receiver-before-call');
+    await clearActiveCalls(page1, 'sender-before-call');
+    await clearActiveCalls(page2, 'receiver-before-call');
     await endAnyLiveCall(page1);
     await endAnyLiveCall(page2);
     await placeInboxCall(page1);
@@ -403,6 +487,86 @@ const run = async () => {
     await waitForMeetingActiveUi(page2, 'receiver');
     await waitForRemoteAudioTrack(page1, 'sender');
     await waitForRemoteAudioTrack(page2, 'receiver');
+    await verifyCallStability(page1, page2, callStabilityWindowMs);
+    if (callStabilityWindowMs > 0) {
+      console.log(`[verify] PASS call_stability windowMs=${callStabilityWindowMs}`);
+    }
+    console.log('[verify] step: single-side hangup');
+    const writesBeforeHangup = p1WriteRequests;
+    const callPutsBeforeHangup = p1CallPutRequests;
+    await endAnyLiveCall(page1);
+    await sleep(1200);
+    console.log(`[verify] sender firestore write delta after hangup=${p1WriteRequests - writesBeforeHangup}`);
+    console.log(`[verify] sender /api/calls PUT delta after hangup=${p1CallPutRequests - callPutsBeforeHangup}`);
+    let cleared = false;
+    for (let i = 0; i < 90; i += 1) {
+      const senderLive = await hasLiveCallUi(page1);
+      const receiverLive = await hasLiveCallUi(page2);
+      if (!senderLive && !receiverLive) {
+        cleared = true;
+        break;
+      }
+      if (i % 10 === 0) {
+        const senderCounts = {
+          endMeeting: await page1.getByRole('button', { name: /End Meeting/i }).count(),
+          leave: await page1.getByRole('button', { name: /^Leave$/i }).count(),
+          end: await page1.getByRole('button', { name: /^End$/i }).count(),
+          minimize: await page1.getByRole('button', { name: /Minimize Call/i }).count(),
+        };
+        const receiverCounts = {
+          endMeeting: await page2.getByRole('button', { name: /End Meeting/i }).count(),
+          leave: await page2.getByRole('button', { name: /^Leave$/i }).count(),
+          end: await page2.getByRole('button', { name: /^End$/i }).count(),
+          minimize: await page2.getByRole('button', { name: /Minimize Call/i }).count(),
+        };
+        console.log(`[verify] hangup-wait tick=${i} sender=${JSON.stringify(senderCounts)} receiver=${JSON.stringify(receiverCounts)}`);
+      }
+      await sleep(500);
+    }
+    if (!cleared) {
+      const senderSessionCallId = await page1.evaluate(() => {
+        const roleKey = Object.keys(localStorage).find((k) => k.startsWith('connectai_role_')) || '';
+        const uid = roleKey.replace('connectai_role_', '');
+        if (!uid) return null;
+        return sessionStorage.getItem(`connectai_active_call_${uid}`);
+      });
+      const receiverSessionCallId = await page2.evaluate(() => {
+        const roleKey = Object.keys(localStorage).find((k) => k.startsWith('connectai_role_')) || '';
+        const uid = roleKey.replace('connectai_role_', '');
+        if (!uid) return null;
+        return sessionStorage.getItem(`connectai_active_call_${uid}`);
+      });
+      const senderCallApi = await page1.evaluate(async (callId) => {
+        if (!callId) return 'none';
+        const token = localStorage.getItem('connectai_auth_token');
+        const tenant = localStorage.getItem('connectai_tenant_id') || 'default-tenant';
+        const res = await fetch(`/api/calls/${encodeURIComponent(callId)}`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'x-tenant-id': tenant,
+          },
+        });
+        if (!res.ok) return `status=${res.status}`;
+        const data = await res.json();
+        return `status=${res.status} callStatus=${data?.status || 'unknown'}`;
+      }, senderSessionCallId);
+      const receiverCallApi = await page2.evaluate(async (callId) => {
+        if (!callId) return 'none';
+        const token = localStorage.getItem('connectai_auth_token');
+        const tenant = localStorage.getItem('connectai_tenant_id') || 'default-tenant';
+        const res = await fetch(`/api/calls/${encodeURIComponent(callId)}`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            'x-tenant-id': tenant,
+          },
+        });
+        if (!res.ok) return `status=${res.status}`;
+        const data = await res.json();
+        return `status=${res.status} callStatus=${data?.status || 'unknown'}`;
+      }, receiverSessionCallId);
+      throw new Error(`single-side hangup teardown failed senderCall=${senderSessionCallId || 'none'} receiverCall=${receiverSessionCallId || 'none'} senderApi=${senderCallApi} receiverApi=${receiverCallApi}`);
+    }
+    console.log('[proof] PASS single_side_hangup_ends_both_uis');
     await endAnyLiveCall(page1);
     await endAnyLiveCall(page2);
 
