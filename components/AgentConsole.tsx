@@ -1,4 +1,4 @@
-﻿import React, { useRef, useEffect, useState, useMemo } from 'react';
+﻿import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
 import { 
   Activity, Sparkles, Target, ChevronRight, Phone, Zap, Info, MessageSquare, Send, Mail, Briefcase, 
   X, Plus, ClipboardCheck, User as UserIcon, Radio, Search, Filter, ArrowRight, BarChart3,
@@ -62,15 +62,15 @@ const CAMPAIGN_TEMPLATES = [
     id: 'welcome',
     label: 'Welcome',
     subject: 'Welcome to ConnectAI',
-    email: 'Hi {{name}},\n\nThanks for your interest in ConnectAI. We help teams modernize calling, messaging, and call intelligence in one workspace.\n\nWould you like a 15‑minute overview this week?',
-    sms: 'Hi {{name}} — thanks for your interest in ConnectAI. Want a quick 15‑min overview this week?',
+    email: 'Hi {{name}},\n\nThanks for your interest in ConnectAI. We help teams modernize calling, messaging, and call intelligence in one workspace.\n\nWould you like a 15-minute overview this week?',
+    sms: 'Hi {{name}} — thanks for your interest in ConnectAI. Want a quick 15-min overview this week?',
   },
   {
     id: 'reengage',
-    label: 'Re‑engage',
-    subject: 'Quick check‑in',
-    email: 'Hi {{name}},\n\nJust checking in on your interest in ConnectAI. We can help your team consolidate call + chat and speed up follow‑ups.\n\nIs now a good time to reconnect?',
-    sms: 'Hi {{name}}, quick check‑in — is now a good time to reconnect about ConnectAI?',
+    label: 'Re-engage',
+    subject: 'Quick check-in',
+    email: 'Hi {{name}},\n\nJust checking in on your interest in ConnectAI. We can help your team consolidate call + chat and speed up follow-ups.\n\nIs now a good time to reconnect?',
+    sms: 'Hi {{name}}, quick check-in — is now a good time to reconnect about ConnectAI?',
   },
   {
     id: 'event',
@@ -140,6 +140,15 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     crmSynced: false,
     followUpScheduled: false,
   });
+  const aiCallIntelligenceEnabled = settings.aiCallIntelligence?.enabled !== false;
+  const autoCrmWrapUpEnabled = aiCallIntelligenceEnabled && settings.aiCallIntelligence?.autoSyncCrm !== false;
+  const autoCrmSyncInFlightRef = useRef<Record<string, boolean>>({});
+  const buildWrapUpActionsForCall = useCallback((call?: Call | null) => ({
+    qaApproved: false,
+    dispositionApplied: false,
+    crmSynced: Boolean(call?.crmData?.status === 'synced'),
+    followUpScheduled: false,
+  }), []);
 
   // Omnichannel States
   const [conversations, setConversations] = useState<Conversation[]>(DEFAULT_CONVERSATIONS);
@@ -718,6 +727,21 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       if (!lastCall) return;
       setLastEndedCall(lastCall);
       const transcriptLen = lastCall.transcript?.length || 0;
+      if (!aiCallIntelligenceEnabled) {
+        const disabledAnalysis: CallAnalysis = {
+          summary: 'AI call intelligence is disabled by admin policy. Recap, transcript enrichment, and automatic CRM wrap-up are paused.',
+          sentimentScore: 50,
+          sentimentLabel: 'Neutral',
+          topics: ['Policy Disabled'],
+          qaScore: 70,
+          dispositionSuggestion: 'Manual Review',
+        };
+        setWrapUpAnalysis(disabledAnalysis);
+        setLastEndedCall(prev => prev ? { ...prev, analysis: disabledAnalysis } : prev);
+        setWrapUpActions(buildWrapUpActionsForCall(lastCall));
+        analyzedRef.current = { id: lastCall.id, len: transcriptLen };
+        return;
+      }
       if (lastCall.analysis?.summary) {
         setWrapUpAnalysis({
           summary: lastCall.analysis.summary,
@@ -727,12 +751,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
           qaScore: lastCall.analysis.qaScore ?? 75,
           dispositionSuggestion: lastCall.analysis.dispositionSuggestion || 'Follow-up Needed',
         });
-        setWrapUpActions({
-          qaApproved: false,
-          dispositionApplied: false,
-          crmSynced: false,
-          followUpScheduled: false,
-        });
+        setWrapUpActions(buildWrapUpActionsForCall(lastCall));
         analyzedRef.current = { id: lastCall.id, len: transcriptLen };
         return;
       }
@@ -747,12 +766,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         };
         setWrapUpAnalysis(fallback);
         setLastEndedCall(prev => prev ? { ...prev, analysis: fallback } : prev);
-        setWrapUpActions({
-          qaApproved: false,
-          dispositionApplied: false,
-          crmSynced: false,
-          followUpScheduled: false,
-        });
+        setWrapUpActions(buildWrapUpActionsForCall(lastCall));
         analyzedRef.current = { id: lastCall.id, len: transcriptLen };
         return;
       }
@@ -763,26 +777,16 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
           analyzedRef.current = { id: lastCall.id, len: transcriptLen };
           setWrapUpAnalysis(analysis);
           setLastEndedCall(prev => prev ? { ...prev, analysis } : prev);
-          setWrapUpActions({
-            qaApproved: false,
-            dispositionApplied: false,
-            crmSynced: false,
-            followUpScheduled: false,
-          });
+          setWrapUpActions(buildWrapUpActionsForCall(lastCall));
         })
         .finally(() => setIsAnalyzing(false));
     } else if (agentStatus !== AgentStatus.WRAP_UP) {
       setWrapUpAnalysis(null);
       setLastEndedCall(null);
       analyzedRef.current = { id: null, len: 0 };
-      setWrapUpActions({
-        qaApproved: false,
-        dispositionApplied: false,
-        crmSynced: false,
-        followUpScheduled: false,
-      });
+      setWrapUpActions(buildWrapUpActionsForCall());
     }
-  }, [agentStatus, history, isAnalyzing]);
+  }, [agentStatus, history, isAnalyzing, aiCallIntelligenceEnabled, buildWrapUpActionsForCall]);
 
   const handleExecuteTool = (toolId: string) => {
     setLiveTools(prev => prev.map(t => t.id === toolId ? { ...t, status: 'executed' } : t));
@@ -1155,7 +1159,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     {
       id: 'q2',
       question: 'How do I import leads in bulk?',
-      answer: 'Open Leads, paste/upload CSV, map columns, preview, then Import. You can AI‑enrich before importing.',
+      answer: 'Open Leads, paste/upload CSV, map columns, preview, then Import. You can AI-enrich before importing.',
     },
     {
       id: 'q3',
@@ -1759,26 +1763,55 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     addNotification('success', `Disposition linked: ${wrapUpAnalysis.dispositionSuggestion}.`);
   };
 
-  const handleSyncCrm = async () => {
-    if (!lastEndedCall) return;
+  const handleSyncCrm = async (options?: { silent?: boolean; auto?: boolean }) => {
+    if (!lastEndedCall) return false;
+    if (!aiCallIntelligenceEnabled) {
+      if (!options?.silent) addNotification('info', 'AI wrap-up to CRM is disabled in Admin settings.');
+      return false;
+    }
+    if (wrapUpActions.crmSynced || lastEndedCall.crmData?.status === 'synced') {
+      return true;
+    }
+    const platform = settings.integrations.primaryCrm || 'HubSpot';
+    const syncedAt = Date.now();
     const updated: Call = {
       ...lastEndedCall,
-      crmData: { platform: 'HubSpot', status: 'synced', syncedAt: Date.now() },
+      crmData: { platform, status: 'synced', syncedAt },
     };
     await persistWrapUpCall(updated);
     await createCrmTask({
-      id: `task_${Date.now()}`,
-      subject: `Follow-up: ${lastEndedCall.customerName}`,
+      id: `task_wrapup_${lastEndedCall.id}`,
+      subject: `AI Wrap-up (${String(lastEndedCall.direction || 'call').toUpperCase()}): ${lastEndedCall.customerName}`,
       status: 'open',
-      dueDate: Date.now() + 24 * 60 * 60 * 1000,
+      dueDate: syncedAt + 24 * 60 * 60 * 1000,
       summary: wrapUpAnalysis?.summary || '',
       callId: lastEndedCall.id,
-      platform: 'HubSpot',
+      platform,
+      source: options?.auto ? 'ai-wrapup-auto' : 'ai-wrapup-manual',
     });
     refreshCrmData().catch(() => {});
     setWrapUpActions(prev => ({ ...prev, crmSynced: true }));
-    addNotification('success', 'CRM sync queued and confirmed.');
+    if (!options?.silent) {
+      addNotification('success', options?.auto ? 'AI wrap-up auto-synced to CRM.' : 'CRM sync queued and confirmed.');
+    }
+    return true;
   };
+
+  useEffect(() => {
+    if (!autoCrmWrapUpEnabled) return;
+    if (agentStatus !== AgentStatus.WRAP_UP) return;
+    if (!lastEndedCall || !wrapUpAnalysis) return;
+    if (wrapUpActions.crmSynced || lastEndedCall.crmData?.status === 'synced') return;
+    const callId = String(lastEndedCall.id || '');
+    if (!callId) return;
+    if (autoCrmSyncInFlightRef.current[callId]) return;
+    autoCrmSyncInFlightRef.current[callId] = true;
+    handleSyncCrm({ silent: true, auto: true })
+      .catch(() => {})
+      .finally(() => {
+        autoCrmSyncInFlightRef.current[callId] = false;
+      });
+  }, [autoCrmWrapUpEnabled, agentStatus, lastEndedCall?.id, lastEndedCall?.crmData?.status, wrapUpAnalysis, wrapUpActions.crmSynced]);
 
   const handleScheduleFollowUp = () => {
     if (!lastEndedCall) return;
@@ -2061,10 +2094,10 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                  <div className="space-y-3">
                                     <button
                                       onClick={handleSyncCrm}
-                                      disabled={wrapUpActions.crmSynced}
-                                      className={`w-full py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 ${wrapUpActions.crmSynced ? 'bg-green-500/20 text-green-200 cursor-not-allowed' : 'bg-white text-slate-900 hover:bg-slate-100'}`}
+                                      disabled={!aiCallIntelligenceEnabled || wrapUpActions.crmSynced}
+                                      className={`w-full py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg flex items-center justify-center gap-2 ${!aiCallIntelligenceEnabled || wrapUpActions.crmSynced ? 'bg-green-500/20 text-green-200 cursor-not-allowed' : 'bg-white text-slate-900 hover:bg-slate-100'}`}
                                     >
-                                      <CheckCircle size={14}/> {wrapUpActions.crmSynced ? 'CRM Synced' : 'Sync to CRM'}
+                                      <CheckCircle size={14}/> {!aiCallIntelligenceEnabled ? 'AI Disabled' : (wrapUpActions.crmSynced ? 'CRM Synced' : 'Sync to CRM')}
                                     </button>
                                     <button
                                       onClick={handleScheduleFollowUp}
@@ -3691,5 +3724,4 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     </div>
   );
 };
-
 

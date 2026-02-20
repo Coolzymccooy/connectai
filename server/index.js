@@ -408,6 +408,10 @@ const normalizeSettingsShape = (input = {}) => {
     autoTenantByDomain: false,
     domainTenantMap: [],
   };
+  const fallbackAiCallIntelligence = {
+    enabled: true,
+    autoSyncCrm: true,
+  };
   const fallbackSubscription = {
     plan: 'Growth',
     seats: 20,
@@ -445,6 +449,10 @@ const normalizeSettingsShape = (input = {}) => {
     auth: {
       ...fallbackAuth,
       ...(input?.auth || {}),
+    },
+    aiCallIntelligence: {
+      ...fallbackAiCallIntelligence,
+      ...(input?.aiCallIntelligence || {}),
     },
     subscription: {
       ...fallbackSubscription,
@@ -484,6 +492,71 @@ const getSettingsForTenant = async (tenantId) => {
   }
   const stored = stores.settingsByTenant.find(s => s.tenantId === tenantId);
   return normalizeSettingsShape(stored?.data || {});
+};
+
+const getAiCallIntelligencePolicy = (settings = {}) => {
+  const source = settings?.aiCallIntelligence || {};
+  return {
+    enabled: source.enabled !== false,
+    autoSyncCrm: source.autoSyncCrm !== false,
+  };
+};
+
+const resolvePrimaryCrmPlatform = (settings = {}) => {
+  const raw = String(settings?.integrations?.primaryCrm || 'HubSpot').trim().toLowerCase();
+  if (raw === 'salesforce') return 'Salesforce';
+  if (raw === 'pipedrive') return 'Pipedrive';
+  return 'HubSpot';
+};
+
+const enqueuePostCallJobs = async (tenantId, callId, settingsOverride) => {
+  const settings = settingsOverride || await getSettingsForTenant(tenantId);
+  const policy = getAiCallIntelligencePolicy(settings);
+  if (policy.enabled) {
+    await enqueueJob(tenantId, 'transcription', { callId });
+    await enqueueJob(tenantId, 'summary', { callId });
+  }
+  await enqueueJob(tenantId, 'report', { callId });
+  return policy;
+};
+
+const syncAiWrapUpToCrm = async (tenantId, call, summary, settingsOverride) => {
+  if (!call) return;
+  const settings = settingsOverride || await getSettingsForTenant(tenantId);
+  const policy = getAiCallIntelligencePolicy(settings);
+  if (!policy.enabled || !policy.autoSyncCrm) return;
+  const callId = call.externalId || call.id;
+  if (!callId) return;
+  const platform = resolvePrimaryCrmPlatform(settings);
+  const syncedAt = Date.now();
+  const crmData = { platform, status: 'synced', syncedAt };
+  const task = {
+    id: `task_wrapup_${callId}`,
+    tenantId,
+    subject: `AI Wrap-up (${String(call.direction || 'call').toUpperCase()}): ${call.customerName || call.phoneNumber || 'Customer'}`,
+    status: 'open',
+    dueDate: syncedAt + 24 * 60 * 60 * 1000,
+    summary: String(summary || ''),
+    callId,
+    platform,
+    source: 'ai-wrapup-auto',
+    updatedAt: syncedAt,
+  };
+  stores.crmTasks = upsertById(stores.crmTasks, task);
+  await saveStore('crmTasks', stores.crmTasks);
+  if (isMongoReady()) {
+    await Call.findOneAndUpdate(
+      { tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }] },
+      { crmData }
+    ).catch(() => {});
+    return;
+  }
+  stores.calls = stores.calls.map((entry) => (
+    entry.tenantId === tenantId && (entry.id === callId || entry.twilioCallSid === callId)
+      ? { ...entry, crmData }
+      : entry
+  ));
+  await saveStore('calls', stores.calls);
 };
 
 const saveSettingsForTenant = async (tenantId, incoming = {}) => {
@@ -982,6 +1055,12 @@ const processJobs = async () => {
       if (job.type === 'summary') {
         const call = await getCallForJob(job.tenantId, job.payload?.callId);
         if (!call) throw new Error('Call not found');
+        const settings = await getSettingsForTenant(job.tenantId);
+        const policy = getAiCallIntelligencePolicy(settings);
+        if (!policy.enabled) {
+          await updateJob(jobId, { status: 'completed', result: { skipped: 'ai_call_intelligence_disabled' } });
+          continue;
+        }
         const text = (call.transcript || []).map((t) => `${t.speaker}: ${t.text}`).join('\n');
         const duration = Number(call.durationSeconds || 0);
         const customer = call.customerName || call.phoneNumber || 'Customer';
@@ -1009,6 +1088,7 @@ const processJobs = async () => {
           stores.calls = stores.calls.map(c => c.id === call.id ? { ...c, analysis: { ...(c.analysis || {}), summary } } : c);
           await saveStore('calls', stores.calls);
         }
+        await syncAiWrapUpToCrm(job.tenantId, call, summary, settings);
         await updateJob(jobId, { status: 'completed', result: { summary } });
         continue;
       }
@@ -1432,6 +1512,10 @@ const defaultSettings = {
     allowedDomains: [],
     autoTenantByDomain: false,
     domainTenantMap: [],
+  },
+  aiCallIntelligence: {
+    enabled: true,
+    autoSyncCrm: true,
   },
 };
 
@@ -2726,12 +2810,15 @@ app.post('/api/calls', authenticate, async (req, res) => {
   const tenantId = req.tenantId;
   const payload = req.body || {};
   const externalId = payload.id || crypto.randomUUID();
+  const settings = await getSettingsForTenant(tenantId);
+  const aiPolicy = getAiCallIntelligencePolicy(settings);
   const call = {
     ...payload,
     tenantId,
     externalId,
     startTime: payload.startTime || Date.now(),
     status: payload.status || 'DIALING',
+    transcriptionEnabled: payload.transcriptionEnabled !== undefined ? Boolean(payload.transcriptionEnabled) : aiPolicy.enabled,
   };
   if (isMongoReady()) {
     const created = await Call.create(call);
@@ -2763,9 +2850,7 @@ app.put('/api/calls/:id', authenticate, async (req, res) => {
       await writeAuditLog(req, 'CALL_STATUS_UPDATE', externalId, { from: existing?.status, to: payload.status });
     }
     if (payload.status === 'ENDED') {
-      await enqueueJob(tenantId, 'transcription', { callId: externalId });
-      await enqueueJob(tenantId, 'summary', { callId: externalId });
-      await enqueueJob(tenantId, 'report', { callId: externalId });
+      await enqueuePostCallJobs(tenantId, externalId);
       await ensureRecordingForCall(req, updated);
     }
     return res.json(toPublic(updated));
@@ -2779,9 +2864,7 @@ app.put('/api/calls/:id', authenticate, async (req, res) => {
   stores.calls = upsertById(stores.calls, stored);
   await saveStore('calls', stores.calls);
   if (payload.status === 'ENDED') {
-    await enqueueJob(tenantId, 'transcription', { callId: externalId });
-    await enqueueJob(tenantId, 'summary', { callId: externalId });
-    await enqueueJob(tenantId, 'report', { callId: externalId });
+    await enqueuePostCallJobs(tenantId, externalId);
     await ensureRecordingForCall(req, stored);
   }
   res.json(stored);
@@ -3852,8 +3935,17 @@ app.post('/twilio/transcription/status', verifyTwilioSignature, async (req, res)
       isFinal: true,
     };
     if (isMongoReady()) {
+      const existingCall = await Call.findOne({ $or: [{ externalId: callSid }, { twilioCallSid: callSid }] }).lean();
+      if (!existingCall?.tenantId) {
+        return res.json({ ok: true, skipped: 'call_not_found' });
+      }
+      const settings = await getSettingsForTenant(existingCall.tenantId);
+      const policy = getAiCallIntelligencePolicy(settings);
+      if (!policy.enabled) {
+        return res.json({ ok: true, skipped: 'ai_call_intelligence_disabled' });
+      }
       const call = await Call.findOneAndUpdate(
-        { $or: [{ externalId: callSid }, { twilioCallSid: callSid }] },
+        { _id: existingCall._id },
         { $push: { transcript: segment }, transcriptionEnabled: true },
         { new: true }
       ).lean();
@@ -3866,12 +3958,18 @@ app.post('/twilio/transcription/status', verifyTwilioSignature, async (req, res)
       const idx = (stores.calls || []).findIndex(c => c.id === callSid || c.twilioCallSid === callSid);
       if (idx >= 0) {
         const existing = stores.calls[idx];
+        const tenantId = existing.tenantId || DEFAULT_TENANT_ID;
+        const settings = await getSettingsForTenant(tenantId);
+        const policy = getAiCallIntelligencePolicy(settings);
+        if (!policy.enabled) {
+          return res.json({ ok: true, skipped: 'ai_call_intelligence_disabled' });
+        }
         const transcript = Array.isArray(existing.transcript) ? [...existing.transcript, segment] : [segment];
         stores.calls[idx] = { ...existing, transcript, transcriptionEnabled: true };
         await saveStore('calls', stores.calls);
         const resolvedCallId = existing.id || callSid;
-        await enqueueJob(existing.tenantId || DEFAULT_TENANT_ID, 'summary', { callId: resolvedCallId });
-        await enqueueJob(existing.tenantId || DEFAULT_TENANT_ID, 'report', { callId: resolvedCallId });
+        await enqueueJob(tenantId, 'summary', { callId: resolvedCallId });
+        await enqueueJob(tenantId, 'report', { callId: resolvedCallId });
       }
     }
     res.json({ ok: true });
@@ -3885,6 +3983,7 @@ app.post('/twilio/voice/incoming', verifyTwilioSignature, async (req, res) => {
   const tenantId = req.tenantId || DEFAULT_TENANT_ID;
   const identityOverride = (req.query?.identity || req.body?.identity || '').toString().trim();
   const settings = await getSettingsForTenant(tenantId);
+  const aiPolicy = getAiCallIntelligencePolicy(settings);
   const targets = identityOverride ? [identityOverride] : buildRouteTargets(settings, 'agent');
   const callSid = req.body?.CallSid || crypto.randomUUID();
   const conferenceName = getConferenceName(callSid);
@@ -3907,6 +4006,7 @@ app.post('/twilio/voice/incoming', verifyTwilioSignature, async (req, res) => {
         queue: settings?.ivr?.phoneNumber || 'Inbound',
         startTime: Date.now(),
         status: 'RINGING',
+        transcriptionEnabled: aiPolicy.enabled,
       },
       { upsert: true, new: true }
     );
@@ -3920,6 +4020,7 @@ app.post('/twilio/voice/incoming', verifyTwilioSignature, async (req, res) => {
       queue: settings?.ivr?.phoneNumber || 'Inbound',
       startTime: Date.now(),
       status: 'RINGING',
+      transcriptionEnabled: aiPolicy.enabled,
     };
     stores.calls = upsertById(stores.calls, call);
     await saveStore('calls', stores.calls);
@@ -3967,9 +4068,7 @@ app.post('/twilio/voice/route-next', verifyTwilioSignature, async (req, res) => 
       stores.calls = stores.calls.map(c => c.id === callSid ? { ...c, status: 'ENDED', endTime: Date.now() } : c);
       await saveStore('calls', stores.calls);
     }
-    await enqueueJob(tenantId, 'transcription', { callId: callSid });
-    await enqueueJob(tenantId, 'summary', { callId: callSid });
-    await enqueueJob(tenantId, 'report', { callId: callSid });
+    await enqueuePostCallJobs(tenantId, callSid);
     await ensureRecordingForCall(req, { tenantId, externalId: callSid, id: callSid });
     res.type('text/xml').send(`<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>`);
     return;

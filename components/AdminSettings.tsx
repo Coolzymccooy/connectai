@@ -190,6 +190,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   }, [teamMembers]);
   const [collapsedGeneral, setCollapsedGeneral] = useState<Record<string, boolean>>({
     access: false,
+    aiCallIntelligence: false,
     providers: false,
     calendar: false,
     crm: false,
@@ -359,6 +360,26 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     onUpdateSettings(newSettings);
     saveSettingsApi(newSettings).catch(() => {});
     addNotification('info', `${key.toUpperCase()} state synchronized.`);
+  };
+
+  const handleUpdateAiCallIntelligence = async (patch: Partial<AppSettings['aiCallIntelligence']>) => {
+    const current = settings.aiCallIntelligence || { enabled: true, autoSyncCrm: true };
+    const nextSettings: AppSettings = {
+      ...settings,
+      aiCallIntelligence: {
+        enabled: current.enabled !== false,
+        autoSyncCrm: current.autoSyncCrm !== false,
+        ...patch,
+      },
+    };
+    onUpdateSettings(nextSettings);
+    try {
+      const saved = await saveSettingsApi(nextSettings);
+      onUpdateSettings(saved);
+      addNotification('success', 'AI call intelligence policy updated.');
+    } catch {
+      addNotification('error', 'Failed to save AI call intelligence policy.');
+    }
   };
 
   const handleConnectHubSpotOAuth = async () => {
@@ -997,6 +1018,38 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                         <button onClick={async () => { try { const { url } = await startMicrosoftOAuth(); if (url) window.open(url, '_blank', 'noopener,noreferrer'); } catch {} }} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase">Microsoft</button>
                       </div>
                       <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Status: {integrationStatus?.calendar?.google ? 'Google Connected' : integrationStatus?.calendar?.microsoft ? 'Microsoft Connected' : 'Not Connected'}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white p-4 rounded-[1.4rem] border border-slate-200 shadow-sm">
+                  <button onClick={() => toggleGeneralSection('aiCallIntelligence')} className="w-full flex items-center justify-between text-left">
+                    <h4 className="text-sm font-black uppercase tracking-widest text-slate-700">AI Call Intelligence</h4>
+                    <ChevronUp size={16} className={`text-slate-400 transition-transform ${collapsedGeneral.aiCallIntelligence ? 'rotate-180' : ''}`} />
+                  </button>
+                  {!collapsedGeneral.aiCallIntelligence && (
+                    <div className="mt-4 space-y-3">
+                      <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100">
+                        Enable Recap + Transcript + Insights
+                        <input
+                          type="checkbox"
+                          checked={settings.aiCallIntelligence?.enabled !== false}
+                          onChange={(e) => handleUpdateAiCallIntelligence({ enabled: e.target.checked })}
+                          className="h-4 w-4 rounded border-slate-300"
+                        />
+                      </label>
+                      <label className="flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-50 rounded-xl px-3 py-2.5 border border-slate-100">
+                        Auto Wrap-up To CRM
+                        <input
+                          type="checkbox"
+                          checked={settings.aiCallIntelligence?.autoSyncCrm !== false}
+                          onChange={(e) => handleUpdateAiCallIntelligence({ autoSyncCrm: e.target.checked })}
+                          className="h-4 w-4 rounded border-slate-300"
+                        />
+                      </label>
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                        Applies to inbound, outbound, and internal calls.
+                      </p>
                     </div>
                   )}
                 </div>

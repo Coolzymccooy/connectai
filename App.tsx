@@ -42,6 +42,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     unsignedBeta: true,
   },
   integrations: { hubSpot: { enabled: true, syncContacts: true, syncDeals: true, syncTasks: false, logs: [] }, primaryCrm: 'HubSpot', webhooks: [], schemaMappings: [], pipedrive: false, salesforce: false },
+  aiCallIntelligence: { enabled: true, autoSyncCrm: true },
   compliance: { jurisdiction: 'UK', pciMode: false, playConsentMessage: true, anonymizePii: false, retentionDays: '90', exportEnabled: true },
   subscription: {
     plan: 'Growth', seats: 20, balance: 420.50, autoTopUp: true, nextBillingDate: 'Nov 01, 2025',
@@ -169,6 +170,10 @@ const mergeTeamWithDirectory = (team: User[], members: User[]): User[] => {
       options: Array.isArray((source as any).ivr?.options) ? (source as any).ivr.options : DEFAULT_SETTINGS.ivr.options,
       departments: Array.isArray((source as any).ivr?.departments) ? (source as any).ivr.departments : (DEFAULT_SETTINGS.ivr as any).departments,
     },
+    aiCallIntelligence: {
+      ...DEFAULT_SETTINGS.aiCallIntelligence,
+      ...((source as any).aiCallIntelligence || {}),
+    },
     voice: { ...DEFAULT_SETTINGS.voice, ...((source as any).voice || {}) },
     auth: { ...DEFAULT_SETTINGS.auth, ...((source as any).auth || {}) },
   };
@@ -276,6 +281,7 @@ const App: React.FC = () => {
   const [lastTeamSyncAt, setLastTeamSyncAt] = useState(0);
   const [callWindowMode, setCallWindowMode] = useState<'docked' | 'minimized' | 'full'>('docked');
   const [callWindowPosition, setCallWindowPosition] = useState({ x: 24, y: 96 });
+  const aiCallIntelligenceEnabled = appSettings.aiCallIntelligence?.enabled !== false;
   
   const mountedRef = useRef(true);
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -450,6 +456,9 @@ const App: React.FC = () => {
     normalized.participants = participantIds;
     normalized.waitingRoom = filteredWaitingRoom;
     normalized.participantIdentityKeys = participantIdentityKeys;
+    if (normalized.transcriptionEnabled === undefined) {
+      normalized.transcriptionEnabled = aiCallIntelligenceEnabled;
+    }
     if (normalized.direction === 'internal') {
       if (!normalized.roomId && normalized.id) {
         normalized.roomId = `room_${normalized.id}`;
@@ -464,7 +473,7 @@ const App: React.FC = () => {
       participantIdentityKeys: normalized.participantIdentityKeys,
     });
     return normalized;
-  }, [currentUser?.id, currentUser?.email, currentUser?.name, appSettings.team]);
+  }, [currentUser?.id, currentUser?.email, currentUser?.name, appSettings.team, aiCallIntelligenceEnabled]);
 
   const matchesCurrentUserAsTarget = useCallback((call: Call) => {
     if (!currentUser) return false;
@@ -1326,7 +1335,7 @@ const App: React.FC = () => {
       participants: participantIds,
       roomId: room,
       emailSynced: true,
-      transcriptionEnabled: true,
+      transcriptionEnabled: aiCallIntelligenceEnabled,
     };
     setActiveCall(meetingCall);
     persistCall(meetingCall).catch(() => {});
@@ -1336,7 +1345,7 @@ const App: React.FC = () => {
     params.delete('room');
     const cleanHash = `#/app${params.toString() ? `?${params.toString()}` : ''}`;
     window.history.replaceState(null, '', cleanHash);
-  }, [currentUser?.id, activeCall?.id, meetings, callHistory]);
+  }, [currentUser?.id, activeCall?.id, meetings, callHistory, aiCallIntelligenceEnabled]);
 
   useEffect(() => {
     if (!lobbyPending || activeCall || !currentUser) return;
@@ -1643,7 +1652,7 @@ const App: React.FC = () => {
     const name = typeof target === 'string' ? 'Manual Node' : target.name;
     const phone = typeof target === 'string' ? target : target.phone;
     const newCall: Call = {
-      id: `ext_${Date.now()}`, direction: 'outbound', customerName: name, phoneNumber: phone, queue: 'External Hub', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, agentEmail: currentUser?.email, agentExtension: currentUser?.extension, emailSynced: true, transcriptionEnabled: true
+      id: `ext_${Date.now()}`, direction: 'outbound', customerName: name, phoneNumber: phone, queue: 'External Hub', startTime: Date.now(), durationSeconds: 0, status: CallStatus.DIALING, transcript: [], agentId: currentUser?.id, agentName: currentUser?.name, agentEmail: currentUser?.email, agentExtension: currentUser?.extension, emailSynced: true, transcriptionEnabled: aiCallIntelligenceEnabled
     };
     setActiveCall(newCall);
     await persistCall(newCall);
@@ -1687,7 +1696,7 @@ const App: React.FC = () => {
       agentEmail: currentUser?.email,
       agentExtension: currentUser?.extension,
       emailSynced: true,
-      transcriptionEnabled: true
+      transcriptionEnabled: aiCallIntelligenceEnabled
     };
     setShowPersonaModal(false);
     setActiveCall(newCall);
@@ -1779,7 +1788,7 @@ const App: React.FC = () => {
       participants: Array.from(new Set([canonicalTargetId, currentUser!.id].filter(Boolean))),
       roomId: `room_${callId}`,
       emailSynced: true,
-      transcriptionEnabled: true
+      transcriptionEnabled: aiCallIntelligenceEnabled
     };
     debugRouting('startInternalCall', {
       callId: newCall.id,
@@ -1939,7 +1948,7 @@ const App: React.FC = () => {
       participantIdentityKeys,
       roomId,
       emailSynced: true,
-      transcriptionEnabled: true
+      transcriptionEnabled: aiCallIntelligenceEnabled
     };
     setActiveCall(meetingCall);
     persistCall(meetingCall);
@@ -2332,7 +2341,7 @@ const App: React.FC = () => {
               {view === 'logs' && <div className="h-full"><CallLogView currentUser={currentUser} /></div>}
               {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} onSyncTeamNow={syncTeamNow} />}
               {showSoftphone && (
-                <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} departments={appSettings.ivr.departments || []} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} agentName={currentUser?.name} agentEmail={currentUser?.email} enableServerLogs onCallEnded={handleSoftphoneCallEnded} />
+                <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} departments={appSettings.ivr.departments || []} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} agentName={currentUser?.name} agentEmail={currentUser?.email} transcriptionEnabled={aiCallIntelligenceEnabled} enableServerLogs onCallEnded={handleSoftphoneCallEnded} />
               )}
             </>
           )}

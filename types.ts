@@ -176,6 +176,10 @@ export interface AppSettings {
     pipedrive: boolean;
     salesforce: boolean;
   };
+  aiCallIntelligence: {
+    enabled: boolean;
+    autoSyncCrm: boolean;
+  };
   compliance: {
     jurisdiction: 'US' | 'UK' | 'NG' | 'EU';
     pciMode: boolean;

@@ -1595,12 +1595,12 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
 
         <div className={`flex-1 p-4 transition-all duration-300 flex items-center justify-center ${showSidebar ? 'mr-[320px]' : ''}`}>
           <div className={`grid gap-3 w-full h-full max-h-full transition-all duration-500
-             ${participants.length === 1 ? 'grid-cols-1' : ''}
-             ${participants.length === 2 ? 'grid-cols-1 md:grid-cols-2' : ''}
-             ${participants.length >= 3 && participants.length <= 4 ? 'grid-cols-2' : ''}
-             ${participants.length > 4 ? 'grid-cols-2 md:grid-cols-3' : ''}
+             ${renderedParticipants.length === 1 ? 'grid-cols-1' : ''}
+             ${renderedParticipants.length === 2 ? 'grid-cols-1 md:grid-cols-2' : ''}
+             ${renderedParticipants.length >= 3 && renderedParticipants.length <= 4 ? 'grid-cols-2' : ''}
+             ${renderedParticipants.length > 4 ? 'grid-cols-2 md:grid-cols-3' : ''}
           `}>
-             {participants.map(p => {
+             {renderedParticipants.map(p => {
                  const isLocal = p.id === currentUser.id;
                  const stream = isLocal ? activeVideoStream : remoteStreams.get(p.identityKey);
                  
@@ -1646,7 +1646,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
           <div className="w-[320px] bg-[#1f1f1f] border-l border-[#333] flex flex-col absolute top-0 bottom-0 right-0 z-40 shadow-2xl">
              <div className="flex border-b border-[#333]">
                 <button onClick={() => setActiveTab('chat')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'chat' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>Chat</button>
-                <button onClick={() => setActiveTab('participants')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'participants' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>People ({participants.length})</button>
+                <button onClick={() => setActiveTab('participants')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'participants' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>People ({renderedParticipants.length})</button>
                 <button onClick={() => setActiveTab('intelligence')} className={`flex-1 py-4 text-xs font-bold uppercase tracking-wider ${activeTab === 'intelligence' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-gray-400 hover:text-white'}`}>AI Intel</button>
              </div>
              <div className="flex-1 overflow-y-auto p-4 scrollbar-thin scrollbar-thumb-gray-700">
@@ -1680,7 +1680,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
                         <UserPlus size={14}/> Invite Someone
                      </button>
                      <div className="space-y-2">
-                        {participants.map(p => (
+                        {renderedParticipants.map(p => (
                           <div key={p.id} className="flex items-center gap-3 p-2 hover:bg-[#2a2a2a] rounded-lg transition-colors">
                              <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white">{p.name.charAt(0)}</div>
                              <div className="flex-1">

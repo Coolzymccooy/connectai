@@ -30,9 +30,10 @@ interface SoftphoneProps {
   floating?: boolean;
   enableServerLogs?: boolean;
   onCallEnded?: (call: AppCall) => void;
+  transcriptionEnabled?: boolean;
 }
 
-export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, agentName, agentEmail, allowedNumbers = [], restrictOutboundNumbers = false, team = [], departments = [], floating = true, enableServerLogs = true, onCallEnded }) => {
+export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, agentName, agentEmail, allowedNumbers = [], restrictOutboundNumbers = false, team = [], departments = [], floating = true, enableServerLogs = true, onCallEnded, transcriptionEnabled = true }) => {
   const [number, setNumber] = useState('');
   const [status, setStatus] = useState<'idle' | 'dialing' | 'connected' | 'incoming'>('idle');
   const [isMuted, setIsMuted] = useState(false);
@@ -205,6 +206,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
             agentEmail,
             extension: userExtension,
             twilioCallSid: twilioCallSid || callSid,
+            transcriptionEnabled,
           };
           activeHistoryRef.current = newCallObs;
           if (enableServerLogs) {
@@ -375,6 +377,7 @@ export const Softphone: React.FC<SoftphoneProps> = ({ userExtension, agentId, ag
         agentEmail,
         extension: userExtension,
         twilioCallSid,
+        transcriptionEnabled,
       };
       activeHistoryRef.current = newCallObs;
       if (enableServerLogs) {

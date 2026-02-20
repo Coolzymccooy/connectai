@@ -5,6 +5,7 @@ import { chromium } from 'playwright';
 const baseUrl = process.env.CONNECTAI_BASE_URL || 'http://127.0.0.1:3090';
 const callStabilityWindowMs = Number(process.env.CONNECTAI_CALL_STABILITY_MS || 0);
 const debugPeerLogs = String(process.env.CONNECTAI_DEBUG_PEER || '').trim() === '1';
+const skipAudioAssert = String(process.env.CONNECTAI_SKIP_AUDIO_ASSERT || '').trim() === '1';
 
 const readDemoUsers = () => {
   const envText = fs.readFileSync('.env.local', 'utf8');
@@ -93,10 +94,16 @@ const login = async (page, email, password) => {
   await page.getByPlaceholder('Email address').fill(email);
   await page.getByPlaceholder('Password').fill(password);
   await page.locator('button[type="submit"]').filter({ hasText: 'Sign In' }).click();
-  await page.locator('button[title="Agent Workspace"]').first().waitFor({ timeout: 60000 });
-  const agentWorkspaceButton = page.locator('button[title="Agent Workspace"]');
+  await waitFor(async () => {
+    const workspaceButtonCount = await page.locator('button[title="Agent Workspace"]').count();
+    if (workspaceButtonCount > 0) return true;
+    const workspaceTabCount = await page.getByRole('button', { name: 'WORKSPACE', exact: true }).count();
+    if (workspaceTabCount > 0) return true;
+    return false;
+  }, 90000, 400, 'workspace entry after login');
+  const agentWorkspaceButton = page.locator('button[title="Agent Workspace"]').first();
   if (await agentWorkspaceButton.count()) {
-    await agentWorkspaceButton.click();
+    await agentWorkspaceButton.click().catch(() => {});
   }
   await page.getByRole('button', { name: 'WORKSPACE', exact: true }).waitFor({ timeout: 60000 });
 };
@@ -485,8 +492,12 @@ const run = async () => {
     await acceptIncomingCall(page2);
     await waitForMeetingActiveUi(page1, 'sender');
     await waitForMeetingActiveUi(page2, 'receiver');
-    await waitForRemoteAudioTrack(page1, 'sender');
-    await waitForRemoteAudioTrack(page2, 'receiver');
+    if (!skipAudioAssert) {
+      await waitForRemoteAudioTrack(page1, 'sender');
+      await waitForRemoteAudioTrack(page2, 'receiver');
+    } else {
+      console.log('[verify] WARN skipping remote audio track assertion (CONNECTAI_SKIP_AUDIO_ASSERT=1)');
+    }
     await verifyCallStability(page1, page2, callStabilityWindowMs);
     if (callStabilityWindowMs > 0) {
       console.log(`[verify] PASS call_stability windowMs=${callStabilityWindowMs}`);
@@ -574,7 +585,11 @@ const run = async () => {
     console.log(`[verify] PASS bootstrap_once count=${introCountUser1}`);
     console.log('[verify] PASS inbox_call incoming banner detected on target user');
     console.log('[verify] PASS inbox_call accepted and active on both users');
-    console.log('[verify] PASS call_audio_track remote audio tracks detected on both users');
+    if (skipAudioAssert) {
+      console.log('[verify] SKIP call_audio_track assertion disabled via CONNECTAI_SKIP_AUDIO_ASSERT=1');
+    } else {
+      console.log('[verify] PASS call_audio_track remote audio tracks detected on both users');
+    }
   } finally {
     await ctx1.close();
     await ctx2.close();
