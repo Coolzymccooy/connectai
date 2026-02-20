@@ -21,6 +21,7 @@
   ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "https://connectai-ldhc.onrender.com/api/:path*" },
-    { "source": "/twilio/:path*", "destination": "https://connectai-ldhc.onrender.com/twilio/:path*" }
+    { "source": "/twilio/:path*", "destination": "https://connectai-ldhc.onrender.com/twilio/:path*" },
+    { "source": "/peerjs/:path*", "destination": "https://connectai-ldhc.onrender.com/peerjs/:path*" }
   ]
 }

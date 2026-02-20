@@ -9,7 +9,7 @@ import {
   ArrowRight, Play, FileJson, Share, UserMinus, Key, Server, Hash, Layers3, Phone,
   ChevronUp, Sliders, Sparkles, Wand2, ShieldAlert, Check
 } from 'lucide-react';
-import { AppSettings, DepartmentRoute, Role, Notification, User, WorkflowRule, MigrationProvider, IntegrationLog, ChannelType, IvrConfig, WebhookConfig, SchemaMapping, IvrOption, BroadcastAudience, BroadcastMessage } from '../types';
+import { AppSettings, DepartmentRoute, Role, Notification, User, WorkflowRule, MigrationProvider, IntegrationLog, ChannelType, IvrConfig, WebhookConfig, SchemaMapping, IvrOption, BroadcastAudience, BroadcastMessage, StartupGuardReport } from '../types';
 import { VisualIvr } from './VisualIvr';
 import { startLegacyMigration } from '../services/migrationService';
 import { exportClusterData, downloadJson } from '../services/exportService';
@@ -37,9 +37,11 @@ interface AdminSettingsProps {
   onUpdateSettings: (newSettings: AppSettings) => void;
   addNotification: (type: Notification['type'], message: string) => void;
   onSyncTeamNow?: () => void | Promise<void>;
+  startupGuardReport?: StartupGuardReport | null;
+  onRefreshStartupGuard?: () => void | Promise<void>;
 }
 
-export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdateSettings, addNotification, onSyncTeamNow }) => {
+export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdateSettings, addNotification, onSyncTeamNow, startupGuardReport, onRefreshStartupGuard }) => {
   const [activeTab, setActiveTab] = useState<'general' | 'ivr' | 'team' | 'migration' | 'billing' | 'anatomy'>('general');
   const [isMigrating, setIsMigrating] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
@@ -98,6 +100,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const [authDirty, setAuthDirty] = useState(false);
   const [authSaving, setAuthSaving] = useState(false);
   const [authLastSavedAt, setAuthLastSavedAt] = useState<number | null>(null);
+  const [tenantCheckEmail, setTenantCheckEmail] = useState('');
+  const [pendingAuthSave, setPendingAuthSave] = useState<{ nextSettings: AppSettings; warnings: string[] } | null>(null);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<Role>(Role.AGENT);
   const [inviteTenantId, setInviteTenantId] = useState('');
@@ -222,6 +226,83 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     (import.meta.env as any).VITE_TENANT_ID ||
     (import.meta.env as any).VITE_DEFAULT_TENANT_ID ||
     'default-tenant';
+  const defaultTenantId = startupGuardReport?.defaultTenantId || activeTenantId;
+
+  const parsedAllowedDomains = useMemo(() => authDomains
+    .split('\n')
+    .map((domain) => domain.trim().toLowerCase())
+    .filter(Boolean), [authDomains]);
+
+  const parsedDomainTenantMap = useMemo(() => {
+    const lines = domainTenantMap.split('\n');
+    const invalidLines: Array<{ line: number; raw: string; reason: string }> = [];
+    const entries: Array<{ domain: string; tenantId: string }> = [];
+    lines.forEach((line, idx) => {
+      const raw = line.trim();
+      if (!raw) return;
+      const parts = raw.split('=');
+      if (parts.length !== 2) {
+        invalidLines.push({ line: idx + 1, raw, reason: 'Use domain=tenantId format.' });
+        return;
+      }
+      const domain = String(parts[0] || '').trim().toLowerCase();
+      const tenantId = String(parts[1] || '').trim();
+      if (!domain || !tenantId) {
+        invalidLines.push({ line: idx + 1, raw, reason: 'Domain and tenantId are required.' });
+        return;
+      }
+      entries.push({ domain, tenantId });
+    });
+    const seen = new Map<string, string>();
+    const duplicates: string[] = [];
+    entries.forEach((entry) => {
+      const prior = seen.get(entry.domain);
+      if (!prior) {
+        seen.set(entry.domain, entry.tenantId);
+        return;
+      }
+      duplicates.push(entry.domain);
+    });
+    return {
+      entries,
+      invalidLines,
+      duplicates: Array.from(new Set(duplicates)),
+    };
+  }, [domainTenantMap]);
+
+  const authValidation = useMemo(() => {
+    const warnings: string[] = [];
+    const mapLookup = new Map(parsedDomainTenantMap.entries.map((entry) => [entry.domain, entry.tenantId]));
+    const missingMappings = Boolean(authSettings.autoTenantByDomain)
+      ? parsedAllowedDomains.filter((domain) => !mapLookup.has(domain))
+      : [];
+    if (missingMappings.length) {
+      warnings.push(`Auto-tenant is enabled but missing domain map for: ${missingMappings.join(', ')}`);
+    }
+    const mismatchedDefault = parsedDomainTenantMap.entries
+      .filter((entry) => entry.tenantId !== defaultTenantId)
+      .map((entry) => `${entry.domain}=${entry.tenantId}`);
+    if (mismatchedDefault.length) {
+      warnings.push(`Mappings differ from default tenant (${defaultTenantId}): ${mismatchedDefault.join(', ')}`);
+    }
+    return { warnings, missingMappings, mismatchedDefault };
+  }, [authSettings.autoTenantByDomain, parsedAllowedDomains, parsedDomainTenantMap.entries, defaultTenantId]);
+
+  const tenantResolutionPreview = useMemo(() => {
+    const normalized = normalizeEmail(tenantCheckEmail);
+    if (!normalized || !normalized.includes('@')) {
+      return { tenantId: defaultTenantId, reason: 'Enter an email to evaluate tenant resolution.' };
+    }
+    const domain = normalized.split('@')[1] || '';
+    if (!authSettings.autoTenantByDomain) {
+      return { tenantId: defaultTenantId, reason: 'Auto-tenant is disabled; default tenant will be used.' };
+    }
+    const hit = parsedDomainTenantMap.entries.find((entry) => entry.domain === domain);
+    if (hit?.tenantId) {
+      return { tenantId: hit.tenantId, reason: `Mapped from ${domain}.` };
+    }
+    return { tenantId: defaultTenantId, reason: `No mapping found for ${domain}; default tenant will be used.` };
+  }, [tenantCheckEmail, authSettings.autoTenantByDomain, parsedDomainTenantMap.entries, defaultTenantId]);
   const toggleGeneralSection = (key: string) => {
     setCollapsedGeneral((prev) => ({ ...prev, [key]: !prev[key] }));
   };
@@ -487,28 +568,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     addNotification('success', 'Call Routing Architecture Deployed.');
   };
 
-  const handleSaveAuth = async () => {
-    const allowedDomains = authDomains
-      .split('\n')
-      .map((d) => d.trim().toLowerCase())
-      .filter(Boolean);
-    const domainTenantMapParsed = domainTenantMap
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line) => {
-        const [domain, tenantId] = line.split('=').map((v) => v.trim());
-        return { domain: (domain || '').toLowerCase(), tenantId: tenantId || '' };
-      })
-      .filter((m) => m.domain && m.tenantId);
-    const nextSettings = {
-      ...settings,
-      auth: {
-        ...authSettings,
-        allowedDomains,
-        domainTenantMap: domainTenantMapParsed,
-      },
-    };
+  const executeSaveAuth = async (nextSettings: AppSettings) => {
     setAuthSaving(true);
     try {
       const saved = await saveSettingsApi(nextSettings);
@@ -516,12 +576,44 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       setAuthLastSavedAt(Number((saved as any)?._meta?.savedAt || Date.now()));
       setAuthDirty(false);
       addNotification('success', 'Access policy updated.');
+      if (onRefreshStartupGuard) {
+        await Promise.resolve(onRefreshStartupGuard());
+      }
     } catch {
       setAuthDirty(true);
       addNotification('error', 'Access policy save failed. Check rate limit and retry.');
     } finally {
       setAuthSaving(false);
     }
+  };
+
+  const handleSaveAuth = async (options?: { force?: boolean }) => {
+    if (parsedDomainTenantMap.invalidLines.length > 0) {
+      const first = parsedDomainTenantMap.invalidLines[0];
+      addNotification('error', `Domain map line ${first.line} is invalid. ${first.reason}`);
+      return;
+    }
+    if (parsedDomainTenantMap.duplicates.length > 0) {
+      addNotification('error', `Duplicate domains in map: ${parsedDomainTenantMap.duplicates.join(', ')}`);
+      return;
+    }
+    const nextSettings: AppSettings = {
+      ...settings,
+      auth: {
+        ...authSettings,
+        allowedDomains: parsedAllowedDomains,
+        domainTenantMap: parsedDomainTenantMap.entries,
+      },
+    };
+    if (!options?.force && authValidation.mismatchedDefault.length > 0) {
+      setPendingAuthSave({
+        nextSettings,
+        warnings: authValidation.warnings,
+      });
+      return;
+    }
+    setPendingAuthSave(null);
+    await executeSaveAuth(nextSettings);
   };
 
   const handleCreateInvite = async () => {
@@ -969,13 +1061,84 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                       </div>
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[9px] font-black uppercase tracking-widest text-slate-500">
                         <span>Tenant: {activeTenantId}</span>
+                        <span>Default: {defaultTenantId}</span>
                         <span>{authDirty ? 'Unsaved changes' : authLastSavedAt ? `Saved ${new Date(authLastSavedAt).toLocaleTimeString()}` : 'No saves in this session'}</span>
+                      </div>
+                      {startupGuardReport?.warnings?.length ? (
+                        <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[9px] font-black uppercase tracking-widest text-rose-700">Startup Guard</p>
+                            {onRefreshStartupGuard && (
+                              <button onClick={() => Promise.resolve(onRefreshStartupGuard())} className="px-2 py-1 rounded-md border border-rose-200 text-[9px] font-black uppercase tracking-widest text-rose-700 hover:bg-rose-100">
+                                Refresh
+                              </button>
+                            )}
+                          </div>
+                          {startupGuardReport.warnings.slice(0, 4).map((warning, idx) => (
+                            <p key={`${warning.code}-${idx}`} className="text-[10px] font-bold text-rose-700">
+                              {warning.message}{warning.detail ? ` - ${warning.detail}` : ''}
+                            </p>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                          <p className="text-[9px] font-black uppercase tracking-widest text-emerald-700">Startup Guard Healthy</p>
+                          <p className="text-[10px] font-bold text-emerald-700 mt-1">No tenant mapping warnings detected for the current startup context.</p>
+                        </div>
+                      )}
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                        <p className="text-[9px] font-black uppercase tracking-widest text-slate-700">How To Configure Domains</p>
+                        <p className="text-[10px] font-bold text-slate-600">Single tenant (demo/prod baseline): allowed `capital.com`, `yopmail.com`, map each to `{defaultTenantId}`.</p>
+                        <p className="text-[10px] font-bold text-slate-600">Multi tenant (future): keep `auto-tenant` on, map each customer domain to its own tenant id.</p>
+                        <p className="text-[10px] font-bold text-slate-600">`inviteOnly` requires invite records; `allowedDomains` blocks unknown domains; `autoTenantByDomain` enables routing via `domainTenantMap`.</p>
                       </div>
                       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder="Allowed domains&#10;company.com" value={authDomains} onChange={(e) => { setAuthDomains(e.target.value); setAuthDirty(true); }} />
-                        <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder="domain=tenantId&#10;company.com=default-tenant" value={domainTenantMap} onChange={(e) => { setDomainTenantMap(e.target.value); setAuthDirty(true); }} />
+                        <textarea className="w-full bg-slate-50 rounded-xl border border-slate-200 font-bold text-[10px] uppercase tracking-widest outline-none focus:border-brand-500" rows={3} placeholder={`domain=tenantId\ncompany.com=${defaultTenantId}`} value={domainTenantMap} onChange={(e) => { setDomainTenantMap(e.target.value); setAuthDirty(true); }} />
                       </div>
-                      <button onClick={handleSaveAuth} disabled={authSaving} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[10px] font-black uppercase disabled:opacity-60 disabled:cursor-not-allowed">{authSaving ? 'Saving...' : 'Save Policy'}</button>
+                      {(parsedDomainTenantMap.invalidLines.length > 0 || parsedDomainTenantMap.duplicates.length > 0 || authValidation.warnings.length > 0) && (
+                        <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 space-y-1">
+                          {parsedDomainTenantMap.invalidLines.map((row) => (
+                            <p key={`${row.line}-${row.raw}`} className="text-[10px] font-bold text-amber-700">Line {row.line}: {row.reason}</p>
+                          ))}
+                          {parsedDomainTenantMap.duplicates.length > 0 && (
+                            <p className="text-[10px] font-bold text-amber-700">Duplicate domains: {parsedDomainTenantMap.duplicates.join(', ')}</p>
+                          )}
+                          {authValidation.warnings.map((warning) => (
+                            <p key={warning} className="text-[10px] font-bold text-amber-700">{warning}</p>
+                          ))}
+                        </div>
+                      )}
+                      <div className="rounded-xl border border-slate-200 overflow-hidden">
+                        <div className="grid grid-cols-12 bg-slate-50 px-3 py-2">
+                          <span className="col-span-6 text-[9px] font-black uppercase tracking-widest text-slate-500">Domain</span>
+                          <span className="col-span-6 text-[9px] font-black uppercase tracking-widest text-slate-500">Tenant</span>
+                        </div>
+                        <div className="max-h-32 overflow-y-auto">
+                          {parsedDomainTenantMap.entries.length > 0 ? parsedDomainTenantMap.entries.map((entry, idx) => (
+                            <div key={`${entry.domain}-${idx}`} className="grid grid-cols-12 px-3 py-2 border-t border-slate-100">
+                              <span className="col-span-6 text-[10px] font-bold text-slate-700">{entry.domain}</span>
+                              <span className={`col-span-6 text-[10px] font-black ${entry.tenantId === defaultTenantId ? 'text-emerald-700' : 'text-rose-600'}`}>{entry.tenantId}</span>
+                            </div>
+                          )) : (
+                            <div className="px-3 py-3 border-t border-slate-100 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                              No domain mappings configured.
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-3 space-y-2">
+                        <p className="text-[9px] font-black uppercase tracking-widest text-slate-600">Effective Tenant Check</p>
+                        <input
+                          value={tenantCheckEmail}
+                          onChange={(e) => setTenantCheckEmail(e.target.value)}
+                          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[11px] font-bold text-slate-700 outline-none focus:border-brand-500"
+                          placeholder="name@capital.com"
+                        />
+                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Resolved Tenant: {tenantResolutionPreview.tenantId}</p>
+                        <p className="text-[10px] font-bold text-slate-500">{tenantResolutionPreview.reason}</p>
+                      </div>
+                      <button onClick={() => handleSaveAuth()} disabled={authSaving} className="px-4 py-2 rounded-lg bg-slate-900 text-white text-[10px] font-black uppercase disabled:opacity-60 disabled:cursor-not-allowed">{authSaving ? 'Saving...' : 'Save Policy'}</button>
                     </div>
                   )}
                 </div>
@@ -1836,6 +1999,30 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
            </div>
         )}
       </div>
+
+      {pendingAuthSave && (
+        <div className="fixed inset-0 z-[130] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
+          <div className="bg-white rounded-[1.8rem] shadow-2xl w-full max-w-lg p-7 border border-slate-200">
+            <h3 className="text-lg font-black uppercase tracking-widest text-slate-800">Tenant Mapping Warning</h3>
+            <p className="mt-2 text-sm text-slate-600">
+              Domain mapping is inconsistent with default tenant <span className="font-black">{defaultTenantId}</span>. Save anyway?
+            </p>
+            <div className="mt-4 space-y-2 max-h-44 overflow-y-auto">
+              {pendingAuthSave.warnings.map((warning) => (
+                <p key={warning} className="text-[11px] font-bold text-rose-700">{warning}</p>
+              ))}
+            </div>
+            <div className="mt-6 flex items-center justify-end gap-2">
+              <button onClick={() => setPendingAuthSave(null)} className="px-4 py-2 rounded-lg border border-slate-200 text-[10px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50">
+                Cancel
+              </button>
+              <button onClick={() => handleSaveAuth({ force: true })} className="px-4 py-2 rounded-lg bg-rose-600 text-[10px] font-black uppercase tracking-widest text-white hover:bg-rose-700">
+                Save Anyway
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showCrmModal && crmProvider && (
         <div className="fixed inset-0 z-[120] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">

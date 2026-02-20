@@ -175,6 +175,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [reconnectRunning, setReconnectRunning] = useState(false);
   const [reconnectNote, setReconnectNote] = useState('');
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [peerEndpointInfo, setPeerEndpointInfo] = useState('');
   const [flyingEmojis, setFlyingEmojis] = useState<{id: number, emoji: string, left: number}[]>([]);
   
   // Device Management
@@ -227,6 +228,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const controlBarDragRef = useRef<{ active: boolean; offsetX: number; offsetY: number } | null>(null);
   const mediaDevicesRef = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
   const roomId = activeCall.roomId || activeCall.id;
+  const activeTenantId = (typeof window !== 'undefined'
+    ? localStorage.getItem('connectai_tenant_id')
+    : null) || (import.meta.env as any).VITE_TENANT_ID || (import.meta.env as any).VITE_DEFAULT_TENANT_ID || 'default-tenant';
   const legacyThreadId = activeCall.id !== roomId ? activeCall.id : undefined;
   const isMutedRef = useRef(isMuted);
   const isVideoEnabledRef = useRef(isVideoEnabled);
@@ -234,6 +238,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     () => buildIdentityKey({ id: currentUser.id, email: currentUser.email, name: currentUser.name }),
     [currentUser.id, currentUser.email, currentUser.name]
   );
+  const mediaDeviceStorageKey = useMemo(() => `connectai_media_devices_${activeTenantId}_${currentIdentityKey}`, [activeTenantId, currentIdentityKey]);
+  const controlBarSessionKey = useMemo(() => `connectai_control_bar_${roomId}_${currentIdentityKey}`, [roomId, currentIdentityKey]);
+  const deviceFallbackNoticeRef = useRef<{ video: boolean; audio: boolean }>({ video: false, audio: false });
+  const peerReconnectAttemptRef = useRef(0);
+  const appliedDeviceSelectionRef = useRef<{ video?: string; audio?: string }>({});
   const scopedPeerId = useMemo(() => buildPeerId(currentIdentityKey, roomId), [currentIdentityKey, roomId]);
   const peerClientOptions = useMemo(() => {
     const env = (import.meta.env as any) || {};
@@ -261,6 +270,27 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       pingInterval: Number(env.VITE_PEER_PING_INTERVAL_MS || 5000),
     } as any;
   }, []);
+  const peerEndpointLabel = useMemo(() => {
+    const protocol = peerClientOptions.secure ? 'wss' : 'ws';
+    return `${protocol}://${peerClientOptions.host}:${peerClientOptions.port}${peerClientOptions.path}`;
+  }, [peerClientOptions]);
+
+  const buildPreferredMediaConstraints = useCallback((videoEnabled: boolean): MediaStreamConstraints => ({
+    video: videoEnabled
+      ? {
+          deviceId: selectedVideoDevice ? { exact: selectedVideoDevice } : undefined,
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 30 },
+        }
+      : false,
+    audio: {
+      deviceId: selectedAudioDevice ? { exact: selectedAudioDevice } : undefined,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  }), [selectedVideoDevice, selectedAudioDevice]);
   const dedupeMeetingMessages = useCallback((input: MeetingMessage[]) => {
     const dedupe = new Map<string, MeetingMessage>();
     input.forEach((message) => {
@@ -302,6 +332,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     isVideoEnabledRef.current = isVideoEnabled;
   }, [isVideoEnabled]);
 
+  useEffect(() => {
+    setPeerEndpointInfo(peerEndpointLabel);
+    console.info('[peer] endpoint', peerEndpointLabel);
+  }, [peerEndpointLabel]);
+
   // --- DEVICE DISCOVERY ---
   useEffect(() => {
     const fetchDevices = async () => {
@@ -323,6 +358,28 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   }, [mediaDevicesRef]);
 
   useEffect(() => {
+    if (!videoDevices.length && !audioDevices.length) return;
+    let nextVideo = selectedVideoDevice;
+    let nextAudio = selectedAudioDevice;
+    if (videoDevices.length > 0 && !videoDevices.some((device) => device.deviceId === nextVideo)) {
+      nextVideo = videoDevices[0].deviceId;
+      setSelectedVideoDevice(nextVideo);
+      if (selectedVideoDevice && !deviceFallbackNoticeRef.current.video) {
+        deviceFallbackNoticeRef.current.video = true;
+        setMediaError('Selected camera is unavailable. Switched to available camera.');
+      }
+    }
+    if (audioDevices.length > 0 && !audioDevices.some((device) => device.deviceId === nextAudio)) {
+      nextAudio = audioDevices[0].deviceId;
+      setSelectedAudioDevice(nextAudio);
+      if (selectedAudioDevice && !deviceFallbackNoticeRef.current.audio) {
+        deviceFallbackNoticeRef.current.audio = true;
+        setMediaError('Selected microphone is unavailable. Switched to available microphone.');
+      }
+    }
+  }, [videoDevices, audioDevices, selectedVideoDevice, selectedAudioDevice]);
+
+  useEffect(() => {
     if (!isFirebaseConfigured) return;
     return dbService.fetchMeetingMessages(roomId, (incoming) => {
       setMessages((prev) => {
@@ -340,16 +397,61 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
 
   useEffect(() => {
     setIsBottomBarCollapsed(false);
-    setControlBarPosition(null);
     messageDedupeRef.current = new Set();
-  }, [activeCall.id]);
+    try {
+      const savedBar = sessionStorage.getItem(controlBarSessionKey);
+      if (savedBar) {
+        const parsed = JSON.parse(savedBar);
+        if (Number.isFinite(parsed?.x) && Number.isFinite(parsed?.y)) {
+          setControlBarPosition({ x: Number(parsed.x), y: Number(parsed.y) });
+        } else {
+          setControlBarPosition(null);
+        }
+      } else {
+        setControlBarPosition(null);
+      }
+    } catch {
+      setControlBarPosition(null);
+    }
+    try {
+      const savedDevices = localStorage.getItem(mediaDeviceStorageKey);
+      if (savedDevices) {
+        const parsed = JSON.parse(savedDevices) as { video?: string; audio?: string };
+        if (parsed?.video) setSelectedVideoDevice(parsed.video);
+        if (parsed?.audio) setSelectedAudioDevice(parsed.audio);
+      }
+    } catch {
+      // ignore storage parse issues
+    }
+  }, [activeCall.id, controlBarSessionKey, mediaDeviceStorageKey]);
+
+  useEffect(() => {
+    if (!controlBarPosition) return;
+    try {
+      sessionStorage.setItem(controlBarSessionKey, JSON.stringify(controlBarPosition));
+    } catch {
+      // ignore
+    }
+  }, [controlBarPosition, controlBarSessionKey]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        mediaDeviceStorageKey,
+        JSON.stringify({
+          video: selectedVideoDevice || '',
+          audio: selectedAudioDevice || '',
+        })
+      );
+    } catch {
+      // ignore
+    }
+  }, [mediaDeviceStorageKey, selectedVideoDevice, selectedAudioDevice]);
 
   useEffect(() => {
     if (localStream) return;
     let cancelled = false;
-    const constraints: MediaStreamConstraints = isVideoEnabled
-      ? { video: true, audio: true }
-      : { video: false, audio: true };
+    const constraints = buildPreferredMediaConstraints(isVideoEnabled);
     getUserMediaSafe(constraints)
       .then((stream) => {
         if (cancelled) {
@@ -368,7 +470,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [activeCall.id, isVideoEnabled, localStream, isMuted, getUserMediaSafe]);
+  }, [activeCall.id, isVideoEnabled, localStream, isMuted, getUserMediaSafe, buildPreferredMediaConstraints]);
 
   const resolveRemoteIdentityFromPeer = useCallback((peerValue: string): string => {
     const peerKey = String(peerValue || '').trim();
@@ -517,6 +619,24 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     const id = scopedPeerId;
     let disposed = false;
     let retryTimer: number | null = null;
+    const clearRetry = () => {
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+    };
+    const scheduleReconnect = (reason: string) => {
+      if (disposed) return;
+      if (retryTimer !== null) return;
+      peerReconnectAttemptRef.current += 1;
+      const delay = Math.min(15000, 800 * Math.pow(1.6, peerReconnectAttemptRef.current));
+      setMediaError(`Peer signaling endpoint unreachable (${peerEndpointLabel}). Retrying in ${Math.round(delay / 1000)}s.`);
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        connectPeer();
+      }, delay);
+      debugRouting('peer.reconnect.scheduled', { reason, delay, attempts: peerReconnectAttemptRef.current });
+    };
 
     const connectPeer = () => {
       if (disposed) return;
@@ -524,7 +644,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       peerRef.current = peer;
 
       peer.on('open', (openedId) => {
+        clearRetry();
+        peerReconnectAttemptRef.current = 0;
         setPeerId(openedId);
+        setMediaError((prev) => {
+          if (!prev) return prev;
+          if (prev.startsWith('Peer signaling endpoint unreachable')) return null;
+          return prev;
+        });
         debugRouting('peer.open', { peerId: openedId, currentIdentityKey });
       });
       peer.on('disconnected', () => {
@@ -534,35 +661,35 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         } catch {
           // noop
         }
+        scheduleReconnect('peer-disconnected');
       });
       peer.on('close', () => {
         debugRouting('peer.close', { currentIdentityKey, peerId: peer.id });
+        scheduleReconnect('peer-close');
       });
       peer.on('error', (err) => {
         const errType = String((err as any)?.type || '').toLowerCase();
-        if (!disposed && errType === 'unavailable-id') {
+        const retryable = ['unavailable-id', 'network', 'socket-error', 'socket-closed', 'server-error', 'webrtc'];
+        if (!disposed && retryable.some((candidate) => errType.includes(candidate))) {
           try {
             if (!peer.destroyed) peer.destroy();
           } catch {
             // noop
           }
           if (peerRef.current === peer) peerRef.current = null;
-          setPeerId(null);
-          retryTimer = window.setTimeout(() => {
-            retryTimer = null;
-            connectPeer();
-          }, 1200);
+          setPeerId('');
+          scheduleReconnect(errType || 'peer-error');
           return;
         }
         console.warn('PeerJS client error', err);
-        setMediaError(`Peer signaling error: ${String((err as any)?.type || (err as any)?.message || err)}`);
+        setMediaError(`Peer signaling error: ${String((err as any)?.type || (err as any)?.message || err)} (${peerEndpointLabel})`);
       });
 
       peer.on('call', async (call) => {
         try {
           const existing = localStreamRef.current;
           const stream = existing ?? await getUserMediaSafeRef.current(
-            isVideoEnabledRef.current ? { video: true, audio: true } : { video: false, audio: true }
+            buildPreferredMediaConstraints(isVideoEnabledRef.current)
           );
           stream.getAudioTracks().forEach((track) => {
             track.enabled = !isMutedRef.current;
@@ -585,10 +712,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
 
     return () => {
       disposed = true;
-      if (retryTimer !== null) {
-        window.clearTimeout(retryTimer);
-        retryTimer = null;
-      }
+      clearRetry();
       connectionsRef.current.forEach(c => c.close());
       connectionsRef.current.clear();
       const peer = peerRef.current;
@@ -601,7 +725,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         if (peerRef.current === peer) peerRef.current = null;
       }
     };
-  }, [scopedPeerId, currentIdentityKey, peerClientOptions]);
+  }, [scopedPeerId, currentIdentityKey, peerClientOptions, peerEndpointLabel, buildPreferredMediaConstraints]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -632,7 +756,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       if (cancelled) return;
       try {
         const next = await getUserMediaSafe(
-          isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
+          buildPreferredMediaConstraints(isVideoEnabled)
         );
         if (cancelled) {
           next.getTracks().forEach((track) => track.stop());
@@ -670,7 +794,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       cancelled = true;
       disposers.forEach((dispose) => dispose());
     };
-  }, [localStream, activeCall.status, getUserMediaSafe, isVideoEnabled, isMuted]);
+  }, [localStream, activeCall.status, getUserMediaSafe, isVideoEnabled, isMuted, buildPreferredMediaConstraints]);
 
   // --- PROPRIETARY TRANSCRIPTION PROTOCOL ---
   useEffect(() => {
@@ -709,50 +833,68 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   // --- HARDWARE ADMISSION (ROBUST) ---
   const admitHardware = useCallback(async (deviceId?: string, kind: 'video' | 'audio' = 'video') => {
     try {
-      if (localStream) {
-         localStream.getTracks().forEach(t => {
-             if (deviceId && t.kind === kind.replace('input', '')) t.stop();
-             else if (!deviceId) t.stop(); 
-         });
-      }
-
+      const nextVideoDevice = kind === 'video' ? (deviceId || selectedVideoDevice) : selectedVideoDevice;
+      const nextAudioDevice = kind === 'audio' ? (deviceId || selectedAudioDevice) : selectedAudioDevice;
       const constraints: MediaStreamConstraints = {
-        video: isVideoEnabled ? { 
-            deviceId: kind === 'video' && deviceId ? { exact: deviceId } : undefined,
-            width: { ideal: 1920 }, 
-            height: { ideal: 1080 }, 
-            frameRate: { ideal: 30 } 
-        } : false,
-        audio: { 
-            deviceId: kind === 'audio' && deviceId ? { exact: deviceId } : undefined,
-            echoCancellation: true, 
-            noiseSuppression: true, 
-            autoGainControl: true 
-        } 
+        video: isVideoEnabled
+          ? {
+              deviceId: nextVideoDevice ? { exact: nextVideoDevice } : undefined,
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              frameRate: { ideal: 30 },
+            }
+          : false,
+        audio: {
+          deviceId: nextAudioDevice ? { exact: nextAudioDevice } : undefined,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
       };
-
       const stream = await getUserMediaSafe(constraints);
+      stream.getAudioTracks().forEach((track) => {
+        track.enabled = !isMuted;
+      });
       setLocalStream(stream);
-      
+
       const videoTrack = stream.getVideoTracks()[0];
       const audioTrack = stream.getAudioTracks()[0];
-      
       connectionsRef.current.forEach((call) => {
         const senders = call.peerConnection?.getSenders?.() || [];
         if (videoTrack) {
             const sender = senders.find(s => s.track?.kind === 'video');
-            sender?.replaceTrack(videoTrack);
+            sender?.replaceTrack(videoTrack).catch(() => {});
         }
         if (audioTrack) {
             const sender = senders.find(s => s.track?.kind === 'audio');
-            sender?.replaceTrack(audioTrack);
+            sender?.replaceTrack(audioTrack).catch(() => {});
         }
       });
+      localStream?.getTracks().forEach((track) => {
+        try { track.stop(); } catch {}
+      });
+      if (kind === 'video' && deviceId) setSelectedVideoDevice(deviceId);
+      if (kind === 'audio' && deviceId) setSelectedAudioDevice(deviceId);
 
     } catch (err) {
       console.error("Hardware Session Rejected:", err);
+      setMediaError(`Hardware switch failed: ${String((err as any)?.message || err)}`);
     }
-  }, [isMuted, isVideoEnabled, localStream, getUserMediaSafe]);
+  }, [isMuted, isVideoEnabled, localStream, getUserMediaSafe, selectedVideoDevice, selectedAudioDevice]);
+
+  useEffect(() => {
+    if (!localStream || !selectedVideoDevice) return;
+    if (appliedDeviceSelectionRef.current.video === selectedVideoDevice) return;
+    appliedDeviceSelectionRef.current.video = selectedVideoDevice;
+    admitHardware(selectedVideoDevice, 'video').catch(() => {});
+  }, [localStream, selectedVideoDevice, admitHardware]);
+
+  useEffect(() => {
+    if (!localStream || !selectedAudioDevice) return;
+    if (appliedDeviceSelectionRef.current.audio === selectedAudioDevice) return;
+    appliedDeviceSelectionRef.current.audio = selectedAudioDevice;
+    admitHardware(selectedAudioDevice, 'audio').catch(() => {});
+  }, [localStream, selectedAudioDevice, admitHardware]);
 
   // --- ROBUST SCREEN SHARE ---
   const replaceOutgoingVideoTrack = useCallback((track: MediaStreamTrack | null) => {
@@ -979,7 +1121,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         stream = localStream;
       } else {
         stream = await getUserMediaSafe(
-           isVideoEnabled ? { video: true, audio: true } : { video: false, audio: true }
+           buildPreferredMediaConstraints(isVideoEnabled)
         );
         setLocalStream(stream);
       }
@@ -1061,7 +1203,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     };
     
     attemptDial();
-  }, [localStream, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe, currentIdentityKey, roomId]);
+  }, [localStream, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe, currentIdentityKey, roomId, buildPreferredMediaConstraints]);
 
   const bindRemoteAudioEl = useCallback((remoteIdentityKey: string, element: HTMLAudioElement | null) => {
     if (!element) {
@@ -1465,6 +1607,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     setReconnectRunning(true);
     setReconnectNote('Running reconnect sweep...');
     try {
+      dialingPeersRef.current.clear();
       const reconnectTargets = expectedRemoteIdentityKeys
         .filter((identityKey) => !remoteStreams.has(identityKey))
         .map((identityKey) => callParticipantMap.get(identityKey) || ({
@@ -1523,6 +1666,34 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     return () => window.clearInterval(interval);
   }, [peerId, activeCall.status, expectedRemoteIdentityKeys, remoteStreams, callUser, callParticipantMap]);
 
+  useEffect(() => {
+    if (activeCall.status !== CallStatus.ACTIVE) return;
+    const interval = window.setInterval(() => {
+      const staleRemote = Array.from(remoteStreams.entries()).filter(([, stream]) =>
+        stream.getTracks().some((track) => track.readyState === 'ended')
+      );
+      if (staleRemote.length > 0) {
+        staleRemote.forEach(([identityKey]) => {
+          const conn = connectionsRef.current.get(identityKey);
+          try { conn?.close(); } catch {}
+          connectionsRef.current.delete(identityKey);
+          dialingPeersRef.current.delete(identityKey);
+          setRemoteStreams((prev) => {
+            const next = new Map(prev);
+            next.delete(identityKey);
+            return next;
+          });
+        });
+        runReconnectSweep().catch(() => {});
+      }
+      const localEnded = localStream?.getTracks().some((track) => track.readyState === 'ended');
+      if (localEnded) {
+        admitHardware(undefined, 'audio').catch(() => {});
+      }
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [activeCall.status, remoteStreams, localStream, runReconnectSweep, admitHardware]);
+
   return (
     <div ref={bridgeRootRef} className="relative h-full w-full z-[100] bg-[#111] flex flex-col overflow-hidden text-white font-sans selection:bg-brand-500/30">
       
@@ -1554,6 +1725,11 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
           {mediaError && (
             <div className="ml-3 px-3 py-1.5 rounded-md border border-rose-500/40 bg-rose-500/10 text-[10px] font-black tracking-wide text-rose-200 max-w-[420px] truncate" title={mediaError}>
               {mediaError}
+            </div>
+          )}
+          {peerEndpointInfo && (
+            <div className="ml-3 px-3 py-1.5 rounded-md border border-slate-600/60 bg-slate-900/70 text-[10px] font-black tracking-wide text-slate-300 max-w-[420px] truncate" title={peerEndpointInfo}>
+              Peer: {peerEndpointInfo}
             </div>
           )}
         </div>
@@ -1728,41 +1904,54 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       </div>
 
       {/* 4. Floating Control Bar */}
-      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-6 py-3 bg-[#222]/90 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl">
-         <div className="flex items-center gap-1 pr-4 border-r border-white/10">
-             <span className="text-xs font-bold text-gray-400 tabular-nums">{formatTime(duration)}</span>
-         </div>
-         <button onClick={toggleMute} className={`p-3 rounded-xl transition-all ${!isMuted ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Mute">
-            {!isMuted ? <Mic size={20}/> : <MicOff size={20}/>}
-         </button>
-         <button onClick={() => onToggleMedia('video')} className={`p-3 rounded-xl transition-all ${activeCall.isVideo ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Camera">
-            {activeCall.isVideo ? <Video size={20}/> : <VideoOff size={20}/>}
-         </button>
-         <button onClick={() => onToggleMedia('screen')} className={`p-3 rounded-xl transition-all ${activeCall.isScreenSharing ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-[#333] text-white'}`} title="Share Screen">
-            {activeCall.isScreenSharing ? <MonitorOff size={20}/> : <Monitor size={20}/>}
-         </button>
-         <div className="relative">
-             <button onClick={() => setShowReactions(!showReactions)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Reactions">
+      <div
+        ref={controlBarRef}
+        className="absolute z-50 flex items-center gap-2 px-3 py-2 bg-[#222]/90 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl max-w-[calc(100%-16px)]"
+        style={controlBarPosition ? { left: controlBarPosition.x, top: controlBarPosition.y } : { left: '50%', bottom: '2rem', transform: 'translateX(-50%)' }}
+      >
+        <button onPointerDown={beginControlBarDrag} className="p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white" title="Move controls">
+          <GripHorizontal size={16} />
+        </button>
+        <div className="flex items-center gap-1 pr-3 border-r border-white/10">
+          <span className="text-xs font-bold text-gray-400 tabular-nums">{formatTime(duration)}</span>
+        </div>
+        <button onClick={() => setIsBottomBarCollapsed((prev) => !prev)} className="p-2 rounded-lg text-slate-300 hover:bg-[#333] hover:text-white" title={isBottomBarCollapsed ? 'Expand controls' : 'Collapse controls'}>
+          {isBottomBarCollapsed ? <ChevronRight size={16} /> : <Minimize2 size={16} />}
+        </button>
+        {!isBottomBarCollapsed && (
+          <>
+            <button onClick={toggleMute} className={`p-3 rounded-xl transition-all ${!isMuted ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Mute">
+              {!isMuted ? <Mic size={20}/> : <MicOff size={20}/>}
+            </button>
+            <button onClick={() => onToggleMedia('video')} className={`p-3 rounded-xl transition-all ${activeCall.isVideo ? 'hover:bg-[#333] text-white' : 'bg-red-500/20 text-red-500 border border-red-500/50'}`} title="Toggle Camera">
+              {activeCall.isVideo ? <Video size={20}/> : <VideoOff size={20}/>}
+            </button>
+            <button onClick={() => onToggleMedia('screen')} className={`p-3 rounded-xl transition-all ${activeCall.isScreenSharing ? 'bg-indigo-600 text-white shadow-lg shadow-indigo-500/20' : 'hover:bg-[#333] text-white'}`} title="Share Screen">
+              {activeCall.isScreenSharing ? <MonitorOff size={20}/> : <Monitor size={20}/>}
+            </button>
+            <div className="relative">
+              <button onClick={() => setShowReactions(!showReactions)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Reactions">
                 <Smile size={20}/>
-             </button>
-             {showReactions && (
-                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 bg-[#222] border border-[#333] p-2 rounded-full flex gap-2 shadow-xl animate-in slide-in-from-bottom-2">
-                     {['👍','❤️','😂','👏','👋'].map(emoji => (
-                         <button key={emoji} onClick={() => triggerReaction(emoji)} className="w-8 h-8 flex items-center justify-center hover:bg-[#333] rounded-full text-xl transition-transform hover:scale-125">
-                             {emoji}
-                         </button>
-                     ))}
-                 </div>
-             )}
-         </div>
-         <button onClick={() => setShowSettings(true)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Device Settings"><Settings size={20}/></button>
-         <button onClick={() => setRaisedHand(!raisedHand)} className={`p-3 rounded-xl transition-all ${raisedHand ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'hover:bg-[#333] text-white'}`} title="Raise Hand">
-            <Hand size={20}/>
-         </button>
-         <div className="w-[1px] h-6 bg-white/10 mx-2"></div>
-         <button onClick={handleTerminate} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-all active:scale-95">Leave</button>
+              </button>
+              {showReactions && (
+                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4 bg-[#222] border border-[#333] p-2 rounded-full flex gap-2 shadow-xl animate-in slide-in-from-bottom-2">
+                  {[':)', '<3', ':D', '*', 'o/'].map((emoji) => (
+                    <button key={emoji} onClick={() => triggerReaction(emoji)} className="w-8 h-8 flex items-center justify-center hover:bg-[#333] rounded-full text-xl transition-transform hover:scale-125">
+                      {emoji}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <button onClick={() => setShowSettings(true)} className="p-3 rounded-xl hover:bg-[#333] text-white transition-all" title="Device Settings"><Settings size={20}/></button>
+            <button onClick={() => setRaisedHand(!raisedHand)} className={`p-3 rounded-xl transition-all ${raisedHand ? 'bg-yellow-500/20 text-yellow-500 border border-yellow-500/50' : 'hover:bg-[#333] text-white'}`} title="Raise Hand">
+              <Hand size={20}/>
+            </button>
+            <div className="w-[1px] h-6 bg-white/10 mx-2"></div>
+            <button onClick={handleTerminate} className="bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-xs font-bold uppercase tracking-wider shadow-lg transition-all active:scale-95">Leave</button>
+          </>
+        )}
       </div>
-
       {/* Settings Modal */}
       {showSettings && (
         <div className="fixed inset-0 z-[150] bg-black/80 backdrop-blur-sm flex items-center justify-center p-6 animate-in fade-in">

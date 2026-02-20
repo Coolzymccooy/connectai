@@ -111,9 +111,18 @@ const login = async (page, email, password) => {
 const openTeamAndMessage = async (page, teammateName) => {
   await page.getByRole('button', { name: 'TEAM' }).click();
   await page.getByRole('button', { name: 'List' }).click();
-  await page.getByPlaceholder('Search roster...').fill(teammateName);
-  const msgButton = page.locator('button:has-text("Msg"):not([disabled])').first();
-  await msgButton.waitFor({ timeout: 20000 });
+  const searchInput = page.getByPlaceholder('Search roster...');
+  if (await searchInput.count()) {
+    await searchInput.fill(teammateName);
+  }
+  let msgButton = page.locator('button:not([disabled])').filter({ hasText: /Msg|Message/i }).first();
+  try {
+    await msgButton.waitFor({ timeout: 12000 });
+  } catch {
+    if (await searchInput.count()) await searchInput.fill('');
+    msgButton = page.locator('button:not([disabled])').filter({ hasText: /Msg|Message/i }).first();
+    await msgButton.waitFor({ timeout: 12000 });
+  }
   await msgButton.click();
   await page.getByRole('button', { name: 'INBOX' }).waitFor({ timeout: 10000 });
   await page.getByPlaceholder('Type a message...').waitFor({ timeout: 20000 });

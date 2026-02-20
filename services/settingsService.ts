@@ -1,5 +1,5 @@
 import { apiGet, apiPut } from './apiClient';
-import { AppSettings } from '../types';
+import { AppSettings, StartupGuardReport } from '../types';
 
 const getTenantKey = () => {
   const tenantId =
@@ -51,4 +51,8 @@ export const fetchSettingsApi = async (): Promise<AppSettings> => {
     if (cached) return cached;
     throw err;
   }
+};
+
+export const fetchStartupGuardReport = async (): Promise<StartupGuardReport> => {
+  return apiGet<StartupGuardReport>('/api/startup-guard');
 };

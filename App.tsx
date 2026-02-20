@@ -1,7 +1,7 @@
 ﻿
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { LayoutDashboard, Phone, Settings, LogOut, Sparkles, Mic, PlayCircle, Bot, Shield, MessageSquare, Bell, X, CheckCircle, Info, AlertTriangle, Trash2, Mail, PhoneIncoming, FileText, UserCheck, Loader2, Minimize2, Maximize2, GripHorizontal } from 'lucide-react';
-import { Role, User, Call, CallStatus, AgentStatus, AppSettings, Notification, Lead, Campaign, Meeting, CallDirection } from './types';
+import { Role, User, Call, CallStatus, AgentStatus, AppSettings, Notification, Lead, Campaign, Meeting, CallDirection, StartupGuardReport, WrapUpPersistenceState } from './types';
 import { AgentConsole } from './components/AgentConsole';
 import { SupervisorDashboard } from './components/SupervisorDashboard';
 import { AdminSettings } from './components/AdminSettings';
@@ -20,7 +20,7 @@ import { synthesizeSpeech } from './services/geminiService';
 import { fetchCalendarEvents, createCalendarEvent, updateCalendarEvent } from './services/calendarService';
 import { fetchCampaigns, createCampaign, updateCampaign } from './services/campaignService';
 import { fetchCallById, fetchCallLogs, updateCall as updateCallLog } from './services/callLogService';
-import { fetchSettingsApi, saveSettingsApi } from './services/settingsService';
+import { fetchSettingsApi, fetchStartupGuardReport, saveSettingsApi } from './services/settingsService';
 import { fetchInvites } from './services/authPolicyService';
 import { sanitizeCallForStorage } from './utils/gdpr';
 import { buildIdentityKey, normalizeEmail, normalizeName } from './utils/identity';
@@ -90,6 +90,28 @@ const rolePriority: Record<Role, number> = {
   [Role.ADMIN]: 3,
 };
 const getHighestRole = (roles: Role[]) => roles.sort((a, b) => rolePriority[b] - rolePriority[a])[0] || Role.AGENT;
+const getEmailRoleLockStorageKey = (email?: string | null) => {
+  const normalized = normalizeEmail(email || '');
+  return normalized ? `connectai_role_lock_email_${normalized}` : '';
+};
+const readRoleLockForEmail = (email?: string | null): Role | null => {
+  if (typeof window === 'undefined') return null;
+  const key = getEmailRoleLockStorageKey(email);
+  if (!key) return null;
+  const raw = localStorage.getItem(key);
+  if (raw === Role.ADMIN || raw === Role.SUPERVISOR || raw === Role.AGENT) return raw;
+  return null;
+};
+const writeRoleLockForEmail = (email?: string | null, role?: Role | null) => {
+  if (typeof window === 'undefined') return;
+  const key = getEmailRoleLockStorageKey(email);
+  if (!key) return;
+  if (!role) {
+    localStorage.removeItem(key);
+    return;
+  }
+  localStorage.setItem(key, role);
+};
 
 const teamFingerprint = (member: User) => {
   const email = normalizeEmail(member.email);
@@ -281,6 +303,8 @@ const App: React.FC = () => {
   const [lastTeamSyncAt, setLastTeamSyncAt] = useState(0);
   const [callWindowMode, setCallWindowMode] = useState<'docked' | 'minimized' | 'full'>('docked');
   const [callWindowPosition, setCallWindowPosition] = useState({ x: 24, y: 96 });
+  const [startupGuardReport, setStartupGuardReport] = useState<StartupGuardReport | null>(null);
+  const [pendingWrapUp, setPendingWrapUp] = useState<WrapUpPersistenceState | null>(null);
   const aiCallIntelligenceEnabled = appSettings.aiCallIntelligence?.enabled !== false;
   
   const mountedRef = useRef(true);
@@ -304,6 +328,8 @@ const App: React.FC = () => {
   const sessionRoleLockRef = useRef<Role | null>(null);
   const notificationSeqRef = useRef(0);
   const lastNotificationRef = useRef<{ message: string; at: number }>({ message: '', at: 0 });
+  const startupWarningNoticeRef = useRef<Record<string, number>>({});
+  const roleAlignmentNoticeRef = useRef<string>('');
 
   const addNotification = useCallback((type: Notification['type'], message: string, action?: Notification['action']) => {
     const now = Date.now();
@@ -320,6 +346,83 @@ const App: React.FC = () => {
   const removeNotification = useCallback((id: string) => {
     setNotifications((prev) => prev.filter((notification) => notification.id !== id));
   }, []);
+
+  const resolveRoleForAccount = useCallback((params: {
+    email?: string | null;
+    storedUidRole?: Role | null;
+    selectedRole?: Role | null;
+    sessionRole?: Role | null;
+  }) => {
+    const normalizedEmail = normalizeEmail(params.email || '');
+    const teamMatches = normalizedEmail
+      ? appSettings.team.filter((member) => normalizeEmail(member.email) === normalizedEmail)
+      : [];
+    const teamRole = teamMatches.length ? getHighestRole(teamMatches.map((member) => member.role)) : null;
+    const emailLockRole = readRoleLockForEmail(normalizedEmail);
+    const selectedRole = params.selectedRole || null;
+    const storedUidRole = params.storedUidRole || null;
+    const sessionRole = params.sessionRole || null;
+    const effectiveRole = teamRole || emailLockRole || sessionRole || selectedRole || storedUidRole || Role.AGENT;
+    let reason: 'team-policy' | 'email-lock' | 'session-lock' | 'login-selection' | 'stored-role' | 'default' = 'default';
+    if (teamRole) reason = 'team-policy';
+    else if (emailLockRole) reason = 'email-lock';
+    else if (sessionRole) reason = 'session-lock';
+    else if (selectedRole) reason = 'login-selection';
+    else if (storedUidRole) reason = 'stored-role';
+    return {
+      effectiveRole,
+      teamMatches,
+      teamRole,
+      emailLockRole,
+      reason,
+    };
+  }, [appSettings.team]);
+
+  const persistPendingWrapUp = useCallback((next: WrapUpPersistenceState | null) => {
+    if (!currentUser?.id) {
+      setPendingWrapUp(next);
+      return;
+    }
+    const storageKey = `connectai_pending_wrapup_${currentUser.id}`;
+    setPendingWrapUp(next);
+    try {
+      if (!next) {
+        localStorage.removeItem(storageKey);
+      } else {
+        localStorage.setItem(storageKey, JSON.stringify(next));
+      }
+    } catch {
+      // ignore localStorage errors
+    }
+  }, [currentUser?.id]);
+
+  const markWrapUpPending = useCallback((endedCall: Call) => {
+    persistPendingWrapUp({
+      callId: endedCall.id,
+      persistedAt: Date.now(),
+      crmSynced: Boolean(endedCall.crmData?.status === 'synced'),
+      dismissed: false,
+    });
+  }, [persistPendingWrapUp]);
+
+  const refreshStartupGuard = useCallback(async () => {
+    try {
+      const report = await fetchStartupGuardReport();
+      setStartupGuardReport(report);
+      (report.warnings || []).forEach((warning) => {
+        const key = `${warning.code}:${warning.detail || ''}`;
+        const prior = startupWarningNoticeRef.current[key] || 0;
+        if (Date.now() - prior < 60_000) return;
+        startupWarningNoticeRef.current[key] = Date.now();
+        addNotification(
+          warning.severity === 'error' ? 'error' : 'info',
+          `Startup guard: ${warning.message}${warning.detail ? ` (${warning.detail})` : ''}`
+        );
+      });
+    } catch (err: any) {
+      addNotification('error', `Startup guard unavailable: ${String(err?.message || err)}`);
+    }
+  }, [addNotification]);
 
   const isDocumentVisible = useCallback(() => {
     if (typeof document === 'undefined') return true;
@@ -771,18 +874,15 @@ const App: React.FC = () => {
   const finishLogin = async (user: any) => {
     try {
       const storedRole = (localStorage.getItem(`connectai_role_${user.uid}`) as Role) || Role.AGENT;
-      const normalizedEmail = normalizeEmail(user.email || '');
-      const knownMatches = normalizedEmail
-        ? appSettings.team.filter((m) => normalizeEmail(m.email) === normalizedEmail)
-        : [];
-      const lockedRole = knownMatches.length ? getHighestRole(knownMatches.map((m) => m.role)) : null;
-      const knownMember = lockedRole ? (knownMatches.find((m) => m.role === lockedRole) || knownMatches[0]) : null;
-      let effectiveRole = knownMember?.role || storedRole;
-      const roleLock = sessionRoleLockRef.current;
-      const roleCandidates = [effectiveRole, storedRole, roleLock].filter(Boolean) as Role[];
-      if (roleCandidates.length > 0) {
-        effectiveRole = getHighestRole(roleCandidates);
-      }
+      const roleResolution = resolveRoleForAccount({
+        email: user.email,
+        storedUidRole: storedRole,
+        sessionRole: sessionRoleLockRef.current,
+      });
+      const effectiveRole = roleResolution.effectiveRole;
+      const knownMember = roleResolution.teamMatches.length
+        ? (roleResolution.teamMatches.find((member) => member.role === effectiveRole) || roleResolution.teamMatches[0])
+        : null;
       const roleTemplate =
         (knownMember && knownMember.role === effectiveRole ? knownMember : null) ||
         appSettings.team.find(u => u.role === effectiveRole) ||
@@ -804,6 +904,7 @@ const App: React.FC = () => {
       }
       if (effectiveRole === Role.ADMIN) {
         sessionRoleLockRef.current = Role.ADMIN;
+        writeRoleLockForEmail(user.email, Role.ADMIN);
       }
       const token = await user.getIdToken();
       localStorage.setItem('connectai_auth_token', token);
@@ -908,10 +1009,7 @@ const App: React.FC = () => {
             setIncomingCallBanner((prev) => (prev?.id === callData.id ? null : prev));
             setAgentStatus(AgentStatus.WRAP_UP);
             markTeamPresenceByEmails(peerEmails, AgentStatus.WRAP_UP);
-            setTimeout(() => {
-              setAgentStatus(AgentStatus.AVAILABLE);
-              markTeamPresenceByEmails(peerEmails, AgentStatus.AVAILABLE);
-            }, 1200);
+            markWrapUpPending(endedCall);
             return;
           }
           if (!isParticipant && !isCurrentActive) return;
@@ -941,7 +1039,7 @@ const App: React.FC = () => {
       }
     );
     return () => unsubscribe();
-  }, [currentUser, realtimeCallsEnabled, activeCall?.id, matchesCurrentUserAsTarget, matchesCurrentUserInCall, normalizeCallForSession, markCallsDegraded, markTeamPresenceByEmails]);
+  }, [currentUser, realtimeCallsEnabled, activeCall?.id, matchesCurrentUserAsTarget, matchesCurrentUserInCall, normalizeCallForSession, markCallsDegraded, markTeamPresenceByEmails, markWrapUpPending]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -1161,6 +1259,56 @@ const App: React.FC = () => {
   }, [currentUser?.id, activeCall?.id, activeCall?.status]);
 
   useEffect(() => {
+    if (!currentUser?.id) {
+      setPendingWrapUp(null);
+      return;
+    }
+    const storageKey = `connectai_pending_wrapup_${currentUser.id}`;
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (!raw) {
+        setPendingWrapUp(null);
+        return;
+      }
+      const parsed = JSON.parse(raw) as WrapUpPersistenceState;
+      if (!parsed?.callId || parsed.dismissed) {
+        setPendingWrapUp(null);
+        return;
+      }
+      setPendingWrapUp(parsed);
+    } catch {
+      setPendingWrapUp(null);
+    }
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser?.id) return;
+    refreshStartupGuard().catch(() => {});
+  }, [currentUser?.id, refreshStartupGuard]);
+
+  useEffect(() => {
+    if (!currentUser || !pendingWrapUp || pendingWrapUp.dismissed || activeCall) return;
+    const existing = callHistory.find((call) => call.id === pendingWrapUp.callId);
+    if (existing && existing.status === CallStatus.ENDED) {
+      if (agentStatus !== AgentStatus.WRAP_UP) {
+        setAgentStatus(AgentStatus.WRAP_UP);
+      }
+      return;
+    }
+    let cancelled = false;
+    fetchCallById(pendingWrapUp.callId)
+      .then((call) => {
+        if (cancelled || !call || call.status !== CallStatus.ENDED) return;
+        setCallHistory((prev) => [call, ...prev.filter((entry) => entry.id !== call.id)]);
+        setAgentStatus(AgentStatus.WRAP_UP);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.id, pendingWrapUp?.callId, pendingWrapUp?.dismissed, activeCall?.id, callHistory, agentStatus]);
+
+  useEffect(() => {
     if (!incomingCallBanner || incomingCallBanner.status === CallStatus.ENDED || activeCall?.status === CallStatus.ACTIVE) {
       if (incomingToneTimerRef.current) {
         clearInterval(incomingToneTimerRef.current);
@@ -1198,12 +1346,8 @@ const App: React.FC = () => {
     setActiveCall(null);
     setAgentStatus(AgentStatus.WRAP_UP);
     markTeamPresenceByEmails(peerEmails, AgentStatus.WRAP_UP);
-    const timer = setTimeout(() => {
-      setAgentStatus(AgentStatus.AVAILABLE);
-      markTeamPresenceByEmails(peerEmails, AgentStatus.AVAILABLE);
-    }, 1200);
-    return () => clearTimeout(timer);
-  }, [activeCall?.id, callHistory, markTeamPresenceByEmails]);
+    markWrapUpPending(ended);
+  }, [activeCall?.id, callHistory, markTeamPresenceByEmails, markWrapUpPending]);
 
   useEffect(() => {
     if (!activeCall?.id) return;
@@ -1442,17 +1586,16 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!currentUser) return;
-    const normalizedEmail = normalizeEmail(currentUser.email || '');
-    if (!normalizedEmail) return;
-    const matches = appSettings.team.filter((m) => normalizeEmail(m.email) === normalizedEmail);
-    const lockRole = sessionRoleLockRef.current;
-    const resolvedTeamRole = matches.length ? getHighestRole(matches.map((m) => m.role)) : null;
-    const role = [resolvedTeamRole, lockRole].filter(Boolean).length
-      ? getHighestRole([resolvedTeamRole, lockRole].filter(Boolean) as Role[])
+    const roleResolution = resolveRoleForAccount({
+      email: currentUser.email,
+      storedUidRole: currentUser.role,
+      sessionRole: sessionRoleLockRef.current,
+    });
+    const member = roleResolution.teamMatches.length
+      ? (roleResolution.teamMatches.find((entry) => entry.role === roleResolution.effectiveRole) || roleResolution.teamMatches[0])
       : null;
-    const member = role ? (matches.find((m) => m.role === role) || matches[0]) : null;
     if (!member) return;
-    const nextRole = role || member.role;
+    const nextRole = roleResolution.effectiveRole;
     const shouldRoleSync = nextRole !== currentUser.role;
     const shouldRecordingSync = member.canAccessRecordings !== currentUser.canAccessRecordings;
     if (shouldRoleSync || shouldRecordingSync) {
@@ -1466,13 +1609,25 @@ const App: React.FC = () => {
       if (nextRole !== currentUser.role) {
         if (nextRole === Role.ADMIN) {
           sessionRoleLockRef.current = Role.ADMIN;
+          writeRoleLockForEmail(currentUser.email, Role.ADMIN);
         }
         setView(nextRole === Role.SUPERVISOR ? 'supervisor' : nextRole === Role.ADMIN ? 'admin' : 'agent');
         localStorage.setItem(`connectai_role_${currentUser.id}`, nextRole);
-        addNotification('info', `Session aligned to ${nextRole} role from team policy.`);
+        const reasonMessage = roleResolution.reason === 'team-policy'
+          ? 'team policy'
+          : roleResolution.reason === 'email-lock'
+            ? 'email role lock'
+            : roleResolution.reason === 'session-lock'
+              ? 'session lock'
+              : roleResolution.reason;
+        const noticeKey = `${currentUser.id}:${nextRole}:${reasonMessage}`;
+        if (roleAlignmentNoticeRef.current !== noticeKey) {
+          roleAlignmentNoticeRef.current = noticeKey;
+          addNotification('info', `Session aligned to ${nextRole} role from ${reasonMessage}.`);
+        }
       }
     }
-  }, [currentUser?.id, currentUser?.role, currentUser?.email, appSettings.team]);
+  }, [currentUser?.id, currentUser?.role, currentUser?.email, appSettings.team, resolveRoleForAccount]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -1840,17 +1995,15 @@ const App: React.FC = () => {
       setActiveCall(null);
       setAgentStatus(AgentStatus.WRAP_UP);
       markTeamPresenceByEmails(peerEmails, AgentStatus.WRAP_UP);
+      markWrapUpPending(finalCall);
       persistCall(finalCall).catch(() => {});
-      setTimeout(() => {
-        setAgentStatus(AgentStatus.AVAILABLE);
-        markTeamPresenceByEmails(peerEmails, AgentStatus.AVAILABLE);
-      }, 1200);
     }
   };
 
   const handleSoftphoneCallEnded = async (endedCall: Call) => {
     setCallHistory(h => [endedCall, ...h]);
     setAgentStatus(AgentStatus.WRAP_UP);
+    markWrapUpPending(endedCall);
     if (realtimeCallsEnabled) {
       await dbService.saveCall(endedCall);
     }
@@ -1878,6 +2031,7 @@ const App: React.FC = () => {
 
   const handleCompleteWrapUp = async (finalCall: Call) => {
     setActiveCall(null);
+    persistPendingWrapUp(null);
     setAgentStatus(AgentStatus.AVAILABLE);
     addNotification('success', `Session for ${finalCall.customerName} archived to cluster.`);
   };
@@ -1960,14 +2114,17 @@ const App: React.FC = () => {
   };
 
   const handleLogin = async (role: Role, profile?: { uid: string; email?: string | null; displayName?: string | null }) => {
-    const normalizedEmail = normalizeEmail(profile?.email || '');
-    const knownMatches = normalizedEmail ? appSettings.team.filter((m) => normalizeEmail(m.email) === normalizedEmail) : [];
-    const lockedRole = knownMatches.length ? getHighestRole(knownMatches.map((m) => m.role)) : null;
-    const knownMember = lockedRole ? (knownMatches.find((m) => m.role === lockedRole) || knownMatches[0]) : null;
-    const sessionRoleLock = sessionRoleLockRef.current;
-    const effectiveRole = getHighestRole([lockedRole, role, sessionRoleLock].filter(Boolean) as Role[]);
+    const roleResolution = resolveRoleForAccount({
+      email: profile?.email,
+      selectedRole: role,
+      sessionRole: sessionRoleLockRef.current,
+    });
+    const effectiveRole = roleResolution.effectiveRole;
+    const knownMember = roleResolution.teamMatches.length
+      ? (roleResolution.teamMatches.find((member) => member.role === effectiveRole) || roleResolution.teamMatches[0])
+      : null;
     if (knownMember && effectiveRole !== role) {
-      addNotification('info', `Role locked to ${effectiveRole} for this account.`);
+      addNotification('info', `Role resolved to ${effectiveRole} from ${roleResolution.reason}.`);
     }
     const base =
       (knownMember && knownMember.role === effectiveRole ? knownMember : null) ||
@@ -1991,6 +2148,7 @@ const App: React.FC = () => {
     }
     if (effectiveRole === Role.ADMIN) {
       sessionRoleLockRef.current = Role.ADMIN;
+      writeRoleLockForEmail(profile?.email, Role.ADMIN);
     }
     setCurrentUser(user);
     setAppSettings(prev => {
@@ -2219,6 +2377,8 @@ const App: React.FC = () => {
       setCallWindowMode('minimized');
     }
   };
+  const startupWarnings = startupGuardReport?.warnings || [];
+  const hasStartupWarnings = startupWarnings.length > 0;
 
   return (
     <div className="flex h-[100dvh] bg-[radial-gradient(120%_120%_at_50%_0%,#0f172a_0%,#020617_58%,#000000_100%)] app-compact flex-col md:flex-row overflow-hidden">
@@ -2270,6 +2430,36 @@ const App: React.FC = () => {
             </div>
             <HeaderProfileMenu user={currentUser} status={agentStatus} onStatusChange={setAgentStatus} onLogout={() => signOut(auth).then(() => setCurrentUser(null))} onUpdateUser={updateUserProfile} />
           </header>
+        )}
+        {hasStartupWarnings && (
+          <div className="px-4 md:px-8 py-3 bg-rose-50/95 border-b border-rose-200 backdrop-blur z-30">
+            <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+              <div className="space-y-1">
+                <p className="text-[10px] font-black uppercase tracking-widest text-rose-700">
+                  Startup Guard Warning ({startupGuardReport?.persistenceMode || 'unknown'})
+                </p>
+                {startupWarnings.slice(0, 3).map((warning, idx) => (
+                  <p key={`${warning.code}-${idx}`} className="text-xs text-rose-700">
+                    {warning.message}{warning.detail ? ` - ${warning.detail}` : ''}
+                  </p>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => refreshStartupGuard().catch(() => {})}
+                  className="px-3 py-1.5 rounded-lg border border-rose-200 text-[10px] font-black uppercase tracking-widest text-rose-700 hover:bg-rose-100"
+                >
+                  Refresh Guard
+                </button>
+                <button
+                  onClick={() => setView('admin')}
+                  className="px-3 py-1.5 rounded-lg bg-rose-600 text-[10px] font-black uppercase tracking-widest text-white hover:bg-rose-700"
+                >
+                  Open Admin
+                </button>
+              </div>
+            </div>
+          </div>
         )}
         {activeBroadcasts.length > 0 && (
           <div className="px-4 md:px-8 py-3 bg-amber-50/90 border-b border-amber-200 backdrop-blur z-30">
@@ -2343,7 +2533,7 @@ const App: React.FC = () => {
               )}
               {view === 'supervisor' && <div className="p-8 h-full"><SupervisorDashboard calls={callHistory} team={appSettings.team} addNotification={addNotification} activeCall={activeCall} /></div>}
               {view === 'logs' && <div className="h-full"><CallLogView currentUser={currentUser} /></div>}
-              {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} onSyncTeamNow={syncTeamNow} />}
+              {view === 'admin' && <AdminSettings settings={appSettings} onUpdateSettings={setAppSettings} addNotification={addNotification} onSyncTeamNow={syncTeamNow} startupGuardReport={startupGuardReport} onRefreshStartupGuard={refreshStartupGuard} />}
               {showSoftphone && (
                 <Softphone userExtension={currentUser?.extension} allowedNumbers={currentUser?.allowedNumbers ?? appSettings.voice.allowedNumbers} restrictOutboundNumbers={currentUser?.restrictOutboundNumbers} activeCall={activeCall} agentStatus={agentStatus} onAccept={handleAcceptInternal} onHangup={handleHangup} onHold={handleHold} onMute={handleMute} onTransfer={handleTransfer} onStatusChange={setAgentStatus} onStartSimulator={() => setShowPersonaModal(true)} audioLevel={audioLevel} onToggleMedia={toggleMedia} team={appSettings.team} departments={appSettings.ivr.departments || []} onManualDial={startExternalCall} onTestTts={playTtsSample} onOpenFreeCall={openFreeCallRoom} floating agentId={currentUser?.id} agentName={currentUser?.name} agentEmail={currentUser?.email} transcriptionEnabled={aiCallIntelligenceEnabled} enableServerLogs onCallEnded={handleSoftphoneCallEnded} />
               )}

@@ -469,6 +469,32 @@ export interface SchemaMapping {
   remoteField: string;
 }
 
+export interface StartupGuardWarning {
+  code: string;
+  severity: 'warn' | 'error';
+  message: string;
+  detail?: string;
+}
+
+export interface StartupGuardReport {
+  defaultTenantId: string;
+  authMode: 'dev' | 'strict';
+  persistenceMode: 'mongo' | 'json-store';
+  warnings: StartupGuardWarning[];
+  tenantMapping: {
+    autoTenantByDomain: boolean;
+    allowedDomains: string[];
+    domainTenantMap: Array<{ domain: string; tenantId: string }>;
+  };
+}
+
+export interface WrapUpPersistenceState {
+  callId: string;
+  persistedAt: number;
+  crmSynced?: boolean;
+  dismissed?: boolean;
+}
+
 export interface ToolAction {
   id: string;
   name: string;

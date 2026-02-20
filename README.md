@@ -167,6 +167,34 @@ You can check this in 3 ways:
    - Contacts -> `/api/crm/contacts` (`platform: HubSpot`)
    - Deals -> `/api/crm/deals`
 
+For Render production, use:
+- `HUBSPOT_OAUTH_REDIRECT_URI=https://connectai-ldhc.onrender.com/api/oauth/hubspot/callback`
+
+Keep HubSpot app redirect URI exactly equal to the value above.
+
+## Access Control Quick Tutor
+Single-tenant demo/prod baseline (recommended):
+- Render: `DEFAULT_TENANT_ID=connectai-main`
+- Admin -> Access Control:
+- `allowedDomains`: each customer domain, e.g. `company.com`, `yopmail.com`, `capital.com`
+- `autoTenantByDomain`: `true`
+- `domainTenantMap`:
+- `company.com=connectai-main`
+- `yopmail.com=connectai-main`
+- `capital.com=connectai-main`
+
+Do not map allowed domains to `default-tenant` when your default tenant is `connectai-main`.
+
+## PeerJS Split Deployment (Vercel + Render)
+Set frontend env vars in Vercel:
+- `VITE_PEER_SERVER_HOST=connectai-ldhc.onrender.com`
+- `VITE_PEER_SERVER_PORT=443`
+- `VITE_PEER_SERVER_SECURE=true`
+- `VITE_PEER_SERVER_PATH=/peerjs`
+
+Ensure `vercel.json` rewrites:
+- `/peerjs/:path*` -> `https://connectai-ldhc.onrender.com/peerjs/:path*`
+
 ## Frontend Environment Variables (Vercel / Local)
 Set these in Vercel or `.env.local`:
 - `VITE_FIREBASE_API_KEY`

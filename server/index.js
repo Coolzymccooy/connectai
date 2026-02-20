@@ -73,6 +73,7 @@ const app = express();
 const httpServer = http.createServer(app);
 app.set('trust proxy', 1);
 const isDevEnv = process.env.NODE_ENV !== 'production';
+const isJobWorkerInlineEnabled = String(process.env.RUN_JOB_WORKER_INLINE || 'true').toLowerCase() !== 'false';
 
 // --- GLOBAL SECURITY & PERFORMANCE ---
 app.use(helmet()); // Secure HTTP headers
@@ -86,10 +87,10 @@ app.use(cors({
 // --- RATE LIMITING (DDoS Protection) ---
 const limiter = rateLimit({
   windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
-  max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 300)),
+  max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 2000)),
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => req.path && req.path.startsWith('/auth/policy'),
+  skip: (req) => req.path && (req.path.startsWith('/auth/policy') || req.path === '/startup-guard'),
 });
 app.use('/api/', limiter);
 
@@ -112,11 +113,12 @@ app.use('/api/rag', aiLimiter);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: '2mb' }));
 
-const peerServerBasePath = (process.env.PEER_SERVER_PATH || '/peerjs').trim() || '/peerjs';
+const peerServerPathRaw = (process.env.PEER_SERVER_PATH || '/peerjs').trim() || '/peerjs';
+const peerServerPath = peerServerPathRaw.startsWith('/') ? peerServerPathRaw : `/${peerServerPathRaw}`;
 const peerServer = ExpressPeerServer(httpServer, {
   proxied: true,
   allow_discovery: false,
-  path: '/',
+  path: peerServerPath,
   pingInterval: Number(process.env.PEER_PING_INTERVAL_MS || 5000),
 });
 peerServer.on('connection', (client) => {
@@ -127,9 +129,12 @@ peerServer.on('disconnect', (client) => {
   const id = client?.getId?.() || client?.id || 'unknown';
   log('info', 'peer.disconnected', { peerId: id });
 });
-app.use(peerServerBasePath, peerServer);
+// Mount at root so the configured peer path remains a single segment (e.g. /peerjs),
+// avoiding accidental double-prefix routes such as /peerjs/peerjs.
+app.use('/', peerServer);
 
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || 'default-tenant';
+const AUTH_MODE = String(process.env.AUTH_MODE || 'dev').toLowerCase() === 'strict' ? 'strict' : 'dev';
 const isMongoReady = () => mongoose.connection.readyState === 1;
 
 const getTenantId = (req) => {
@@ -652,6 +657,112 @@ const getAuthSettingsForTenant = async (tenantId) => {
   return { ...DEFAULT_AUTH_SETTINGS, ...(settings?.auth || {}) };
 };
 
+const normalizeDomainTenantMap = (domainTenantMap = []) => {
+  if (!Array.isArray(domainTenantMap)) return [];
+  return domainTenantMap
+    .map((entry) => ({
+      domain: String(entry?.domain || '').trim().toLowerCase(),
+      tenantId: String(entry?.tenantId || '').trim(),
+    }))
+    .filter((entry) => entry.domain && entry.tenantId);
+};
+
+const isProductionLikeRuntime = () => {
+  if (String(process.env.NODE_ENV || '').toLowerCase() === 'production') return true;
+  if (Boolean(process.env.RENDER) || Boolean(process.env.RENDER_EXTERNAL_URL)) return true;
+  if (Boolean(process.env.VERCEL) || Boolean(process.env.VERCEL_URL)) return true;
+  return false;
+};
+
+const buildStartupGuardWarnings = (authSettings = {}) => {
+  const warnings = [];
+  const allowedDomains = Array.isArray(authSettings.allowedDomains)
+    ? authSettings.allowedDomains.map((domain) => String(domain || '').trim().toLowerCase()).filter(Boolean)
+    : [];
+  const domainTenantMap = normalizeDomainTenantMap(authSettings.domainTenantMap || []);
+  const uniqueMap = new Map();
+  domainTenantMap.forEach((entry) => {
+    if (!uniqueMap.has(entry.domain)) uniqueMap.set(entry.domain, entry.tenantId);
+  });
+
+  const duplicateDomains = domainTenantMap
+    .map((entry) => entry.domain)
+    .filter((domain, index, source) => source.indexOf(domain) !== index);
+  if (duplicateDomains.length > 0) {
+    warnings.push({
+      code: 'auth.domain_mapping_duplicate',
+      severity: 'warn',
+      message: 'Duplicate domains detected in Auto-tenant map.',
+      detail: Array.from(new Set(duplicateDomains)).join(', '),
+    });
+  }
+
+  if (authSettings.autoTenantByDomain) {
+    const missingDomains = allowedDomains.filter((domain) => !uniqueMap.has(domain));
+    if (missingDomains.length > 0) {
+      warnings.push({
+        code: 'auth.domain_mapping_missing',
+        severity: 'error',
+        message: 'Auto-tenant is on, but some allowed domains have no tenant mapping.',
+        detail: missingDomains.join(', '),
+      });
+    }
+  }
+
+  const uniqueTenantTargets = Array.from(new Set(domainTenantMap.map((entry) => entry.tenantId)));
+  const singleTenantMode = uniqueTenantTargets.length <= 1;
+  if (singleTenantMode) {
+    const mismatchedTenantTargets = domainTenantMap.filter((entry) => entry.tenantId !== DEFAULT_TENANT_ID);
+    if (mismatchedTenantTargets.length > 0) {
+      warnings.push({
+        code: 'auth.domain_mapping_mismatch_default',
+        severity: 'error',
+        message: `Domain map points to tenant IDs different from DEFAULT_TENANT_ID (${DEFAULT_TENANT_ID}).`,
+        detail: mismatchedTenantTargets.map((entry) => `${entry.domain}=${entry.tenantId}`).join(', '),
+      });
+    }
+  }
+
+  if (tenantSplitDetected) {
+    warnings.push({
+      code: 'tenant.split_detected',
+      severity: 'error',
+      message: 'Both connectai-main and default-tenant data exist. Tenant split can cause missing settings/calls.',
+      detail: 'Run tenant migration and align domain map to one tenant for demo.',
+    });
+  }
+
+  if (isProductionLikeRuntime() && !isMongoReady()) {
+    warnings.push({
+      code: 'persistence.mongo_unavailable',
+      severity: 'error',
+      message: 'MongoDB is not connected in production-like runtime. Settings can reset on restart/deploy.',
+      detail: 'Configure MONGO_URI and verify connection health.',
+    });
+  }
+
+  if (!isJobWorkerInlineEnabled) {
+    warnings.push({
+      code: 'jobs.worker_disabled',
+      severity: 'warn',
+      message: 'RUN_JOB_WORKER_INLINE is false. AI wrap-up/transcription jobs will not process unless an external worker is running.',
+      detail: 'Set RUN_JOB_WORKER_INLINE=true for single-service deployments, or run a dedicated worker.',
+    });
+  }
+
+  const configuredApiLimit = Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 2000));
+  if (!isDevEnv && configuredApiLimit < 1000) {
+    warnings.push({
+      code: 'api.rate_limit_low',
+      severity: 'warn',
+      message: `API_RATE_LIMIT_MAX is low for active-call polling (${configuredApiLimit}/15m).`,
+      detail: 'Increase API_RATE_LIMIT_MAX (for example 1500-3000) to avoid false-positive throttling during calls.',
+    });
+  }
+
+  return warnings;
+};
+
 const extractEmailDomain = (email = '') => {
   const at = String(email).lastIndexOf('@');
   if (at === -1) return '';
@@ -662,7 +773,8 @@ const resolveTenantForEmail = async (email) => {
   const domain = extractEmailDomain(email);
   const rootAuth = await getAuthSettingsForTenant(DEFAULT_TENANT_ID);
   if (rootAuth.autoTenantByDomain && domain) {
-    const hit = (rootAuth.domainTenantMap || []).find((m) => m.domain?.toLowerCase() === domain);
+    const rootMap = normalizeDomainTenantMap(rootAuth.domainTenantMap || []);
+    const hit = rootMap.find((m) => m.domain === domain);
     if (hit?.tenantId) return hit.tenantId;
   }
   return DEFAULT_TENANT_ID;
@@ -1476,10 +1588,17 @@ const stores = {
 };
 
 const hasTenantIn = (items = [], tenantId) => Array.isArray(items) && items.some((item) => item?.tenantId === tenantId);
-if (
+const tenantSplitDetected = (
   hasTenantIn(stores.settingsByTenant, 'connectai-main') ||
   hasTenantIn(stores.calls, 'connectai-main') ||
   hasTenantIn(stores.users, 'connectai-main')
+) && (
+  hasTenantIn(stores.settingsByTenant, 'default-tenant') ||
+  hasTenantIn(stores.calls, 'default-tenant') ||
+  hasTenantIn(stores.users, 'default-tenant')
+);
+if (
+  tenantSplitDetected
 ) {
   log('warn', 'tenant.split.detected', {
     message: 'Both connectai-main and default-tenant data detected in local stores. Run `npm run tenant:migrate-local`.',
@@ -2010,7 +2129,7 @@ app.get('/api/health/deps', async (req, res) => {
     },
     requestMetrics: summarizeLatencies(),
     rateLimits: {
-      api: { windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000), max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 2000 : 300)) },
+      api: { windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000), max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 2000)) },
       twilio: { windowMs: Number(process.env.TWILIO_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.TWILIO_RATE_LIMIT_MAX || (isDevEnv ? 800 : 250)) },
       ai: { windowMs: Number(process.env.AI_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.AI_RATE_LIMIT_MAX || (isDevEnv ? 240 : 120)) },
     },
@@ -2278,6 +2397,30 @@ app.post('/api/gemini/lead-brief', async (req, res) => {
 // --- QUEUES ---
 app.get('/api/queues', (req, res) => {
   res.json(QUEUES);
+});
+
+app.get('/api/startup-guard', async (_req, res) => {
+  try {
+    const authSettings = await getAuthSettingsForTenant(DEFAULT_TENANT_ID);
+    const domainTenantMap = normalizeDomainTenantMap(authSettings.domainTenantMap || []);
+    const warnings = buildStartupGuardWarnings({
+      ...authSettings,
+      domainTenantMap,
+    });
+    res.json({
+      defaultTenantId: DEFAULT_TENANT_ID,
+      authMode: AUTH_MODE,
+      persistenceMode: isMongoReady() ? 'mongo' : 'json-store',
+      warnings,
+      tenantMapping: {
+        autoTenantByDomain: Boolean(authSettings.autoTenantByDomain),
+        allowedDomains: Array.isArray(authSettings.allowedDomains) ? authSettings.allowedDomains : [],
+        domainTenantMap,
+      },
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'startup guard unavailable', detail: String(err?.message || err) });
+  }
 });
 
 // --- SETTINGS ---
