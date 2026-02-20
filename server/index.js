@@ -30,7 +30,7 @@ const __dirname = path.dirname(__filename);
 const rootEnvPath = path.resolve(__dirname, '../.env');
 const localEnvPath = path.resolve(__dirname, '../.env.local');
 dotenv.config({ path: rootEnvPath });
-dotenv.config({ path: localEnvPath });
+dotenv.config({ path: localEnvPath, override: true });
 const readEnvFileValue = (key) => {
   const pattern = new RegExp(`^\\s*(?:export\\s+)?${key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*=\\s*(.*)$`, 'i');
   const readFromPath = (filePath) => {
