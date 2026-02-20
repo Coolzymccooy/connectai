@@ -5,21 +5,12 @@
 };
 
 const getTenantId = () => {
-  const raw = (
+  return (
     localStorage.getItem('connectai_tenant_id') ||
     (import.meta.env as any).VITE_TENANT_ID ||
     (import.meta.env as any).VITE_DEFAULT_TENANT_ID ||
     'default-tenant'
   );
-  const normalized = raw === 'connectai-main' ? 'default-tenant' : raw;
-  if (normalized !== raw) {
-    try {
-      localStorage.setItem('connectai_tenant_id', normalized);
-    } catch {
-      // ignore
-    }
-  }
-  return normalized;
 };
 
 const getAuthToken = () => {

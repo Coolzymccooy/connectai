@@ -713,8 +713,12 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const currentTenant = localStorage.getItem('connectai_tenant_id');
-    if (!currentTenant || currentTenant === 'connectai-main') {
-      localStorage.setItem('connectai_tenant_id', 'default-tenant');
+    if (!currentTenant) {
+      const configuredTenant =
+        (import.meta.env as any).VITE_TENANT_ID ||
+        (import.meta.env as any).VITE_DEFAULT_TENANT_ID ||
+        'default-tenant';
+      localStorage.setItem('connectai_tenant_id', configuredTenant);
     }
   }, []);
 
