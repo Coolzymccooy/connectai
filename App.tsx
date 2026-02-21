@@ -97,6 +97,12 @@ const ROUTING_DEBUG = (import.meta.env as any).VITE_DEBUG_ROUTING === 'true';
 const debugRouting = (...args: any[]) => {
   if (ROUTING_DEBUG) console.info('[routing][app]', ...args);
 };
+const DEFAULT_CALL_SIGNAL_STALE_MS = 2 * 60 * 60 * 1000;
+const CONFIGURED_CALL_SIGNAL_STALE_MS = Number((import.meta.env as any).VITE_CALL_SIGNAL_STALE_MS || DEFAULT_CALL_SIGNAL_STALE_MS);
+const CALL_SIGNAL_STALE_MS =
+  Number.isFinite(CONFIGURED_CALL_SIGNAL_STALE_MS) && CONFIGURED_CALL_SIGNAL_STALE_MS > 60 * 1000
+    ? CONFIGURED_CALL_SIGNAL_STALE_MS
+    : DEFAULT_CALL_SIGNAL_STALE_MS;
 const rolePriority: Record<Role, number> = {
   [Role.AGENT]: 1,
   [Role.SUPERVISOR]: 2,
@@ -510,6 +516,26 @@ const App: React.FC = () => {
     if (recent.id !== id) return false;
     return (Date.now() - recent.at) < 120000;
   }, []);
+
+  const isActiveLikeCallStatus = useCallback((status?: string) => {
+    const normalized = String(status || '').toUpperCase();
+    return (
+      normalized === CallStatus.DIALING ||
+      normalized === CallStatus.RINGING ||
+      normalized === CallStatus.ACTIVE ||
+      normalized === CallStatus.HOLD
+    );
+  }, []);
+
+  const isStaleNonTerminalCall = useCallback((call?: Partial<Call> | null) => {
+    if (!call) return false;
+    if (!isActiveLikeCallStatus(String(call.status || ''))) return false;
+    const startTime = Number((call as any).startTime || 0);
+    const updatedAt = Number((call as any).updatedAt || 0);
+    const lastActivityAt = Math.max(startTime, updatedAt);
+    if (!Number.isFinite(lastActivityAt) || lastActivityAt <= 0) return false;
+    return (Date.now() - lastActivityAt) > CALL_SIGNAL_STALE_MS;
+  }, [isActiveLikeCallStatus]);
 
   const normalizeCallForSession = useCallback((call: Call): Call => {
     if (!currentUser) return call;
@@ -1049,6 +1075,10 @@ const App: React.FC = () => {
       (snapshot) => {
         snapshot.docChanges().forEach((change) => {
           const callData = normalizeCallForSession(change.doc.data() as Call);
+          if (isStaleNonTerminalCall(callData)) {
+            debugRouting('skip.staleRealtimeCall', { callId: callData.id, status: callData.status, startTime: callData.startTime, updatedAt: (callData as any).updatedAt });
+            return;
+          }
           const isCurrentActive = activeCall?.id === callData.id;
           const isTarget = matchesCurrentUserAsTarget(callData);
           const isParticipant = matchesCurrentUserInCall(callData);
@@ -1103,7 +1133,7 @@ const App: React.FC = () => {
       }
     );
     return () => unsubscribe();
-  }, [currentUser, realtimeCallsEnabled, activeCall?.id, matchesCurrentUserAsTarget, matchesCurrentUserInCall, normalizeCallForSession, markCallsDegraded, markTeamPresenceByEmails, markWrapUpPending]);
+  }, [currentUser, realtimeCallsEnabled, activeCall?.id, matchesCurrentUserAsTarget, matchesCurrentUserInCall, normalizeCallForSession, markCallsDegraded, markTeamPresenceByEmails, markWrapUpPending, isStaleNonTerminalCall]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -1197,6 +1227,7 @@ const App: React.FC = () => {
           const map = new Map<string, Call>();
           for (const item of prev) map.set(item.id, item);
           for (const item of calls) {
+            if (isStaleNonTerminalCall(item)) continue;
             const existing = map.get(item.id);
             map.set(item.id, existing ? { ...existing, ...item } : item);
           }
@@ -1218,7 +1249,7 @@ const App: React.FC = () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [currentUser, realtimeCallsEnabled, activeCall?.id, activeCall?.status, isDocumentVisible, isCallsApiCoolingDown, setCallsApiCooldown]);
+  }, [currentUser, realtimeCallsEnabled, activeCall?.id, activeCall?.status, isDocumentVisible, isCallsApiCoolingDown, setCallsApiCooldown, isStaleNonTerminalCall]);
 
   useEffect(() => {
     if (!currentUser) return;
@@ -1232,6 +1263,7 @@ const App: React.FC = () => {
         const calls = await fetchCallLogs({ limit: 25 });
         if (cancelled) return;
         const signal = calls.find((c) => {
+          if (isStaleNonTerminalCall(c)) return false;
           if (!matchesCurrentUserAsTarget(c)) return false;
           return c.status === CallStatus.DIALING || c.status === CallStatus.RINGING || c.status === CallStatus.ACTIVE;
         });
@@ -1259,7 +1291,7 @@ const App: React.FC = () => {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [currentUser, realtimeCallsEnabled, activeCall?.id, activeCall?.status, persistCall, matchesCurrentUserAsTarget, normalizeCallForSession, isDocumentVisible, isCallsApiCoolingDown, setCallsApiCooldown]);
+  }, [currentUser, realtimeCallsEnabled, activeCall?.id, activeCall?.status, persistCall, matchesCurrentUserAsTarget, normalizeCallForSession, isDocumentVisible, isCallsApiCoolingDown, setCallsApiCooldown, isStaleNonTerminalCall]);
 
   useEffect(() => {
     const backoffRef = { lastPath: '', lastAt: 0 };
@@ -1439,12 +1471,14 @@ const App: React.FC = () => {
         let recovered: Call | null = null;
         if (savedId) {
           recovered = await fetchCallById(savedId).catch(() => null);
+          if (recovered && isStaleNonTerminalCall(recovered)) recovered = null;
           if (recovered && wasRecentlyEndedCall(recovered.id)) recovered = null;
         }
         if (!recovered) {
           const calls = await fetchCallLogs({ limit: 50 });
           const myEmail = normalizeEmail(currentUser.email);
           recovered = calls.find((c) => {
+            if (isStaleNonTerminalCall(c)) return false;
             const active = c.status === CallStatus.DIALING || c.status === CallStatus.RINGING || c.status === CallStatus.ACTIVE || c.status === CallStatus.HOLD;
             if (!active) return false;
             if (c.agentId === currentUser.id || c.targetAgentId === currentUser.id) return true;
@@ -1469,7 +1503,7 @@ const App: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [currentUser?.id, currentUser?.email, activeCall?.id, normalizeCallForSession, realtimeCallsEnabled, wasRecentlyEndedCall]);
+  }, [currentUser?.id, currentUser?.email, activeCall?.id, normalizeCallForSession, realtimeCallsEnabled, wasRecentlyEndedCall, isStaleNonTerminalCall]);
 
   useEffect(() => {
     if (!currentUser || activeCall || typeof window === 'undefined') return;
@@ -1491,7 +1525,7 @@ const App: React.FC = () => {
 
     const linkedMeeting = meetings.find((m) => (m.roomId || `room_${m.id}`) === room);
     const roomCall = callHistory.find(
-      (c) => c.roomId === room && c.status !== CallStatus.ENDED
+      (c) => c.roomId === room && c.status !== CallStatus.ENDED && !isStaleNonTerminalCall(c)
     );
     if (roomCall) {
       const hostId = roomCall.hostId || roomCall.agentId;
@@ -1560,7 +1594,7 @@ const App: React.FC = () => {
     params.delete('room');
     const cleanHash = `#/app${params.toString() ? `?${params.toString()}` : ''}`;
     window.history.replaceState(null, '', cleanHash);
-  }, [currentUser?.id, activeCall?.id, meetings, callHistory, aiCallIntelligenceEnabled]);
+  }, [currentUser?.id, activeCall?.id, meetings, callHistory, aiCallIntelligenceEnabled, isStaleNonTerminalCall]);
 
   useEffect(() => {
     if (!lobbyPending || activeCall || !currentUser) return;
@@ -1568,6 +1602,7 @@ const App: React.FC = () => {
       (c) =>
         (c.id === lobbyPending.callId || c.roomId === lobbyPending.roomId) &&
         c.status !== CallStatus.ENDED &&
+        !isStaleNonTerminalCall(c) &&
         (c.participants || []).includes(currentUser.id)
     );
     if (!admitted) return;
@@ -1575,7 +1610,7 @@ const App: React.FC = () => {
     setLobbyPending(null);
     setAgentStatus(AgentStatus.BUSY);
     addNotification('success', 'Host admitted you to the meeting.');
-  }, [lobbyPending, callHistory, activeCall?.id, currentUser?.id]);
+  }, [lobbyPending, callHistory, activeCall?.id, currentUser?.id, isStaleNonTerminalCall]);
 
   const selfHealTeam = useCallback(async (options?: { silent?: boolean }) => {
     const silent = Boolean(options?.silent);

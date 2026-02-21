@@ -606,6 +606,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const getUserMediaSafeRef = useRef(getUserMediaSafe);
   const resolveRemoteIdentityFromPeerRef = useRef(resolveRemoteIdentityFromPeer);
   const registerConnectionRef = useRef(registerConnection);
+  const buildPreferredMediaConstraintsRef = useRef(buildPreferredMediaConstraints);
 
   useEffect(() => {
     getUserMediaSafeRef.current = getUserMediaSafe;
@@ -618,6 +619,10 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   useEffect(() => {
     registerConnectionRef.current = registerConnection;
   }, [registerConnection]);
+
+  useEffect(() => {
+    buildPreferredMediaConstraintsRef.current = buildPreferredMediaConstraints;
+  }, [buildPreferredMediaConstraints]);
 
   // --- PEERJS INITIALIZATION ---
   useEffect(() => {
@@ -665,6 +670,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
 
     const connectPeer = () => {
       if (disposed) return;
+      const existingPeer = peerRef.current;
+      if (existingPeer && !existingPeer.destroyed) {
+        try {
+          existingPeer.destroy();
+        } catch {
+          // noop
+        }
+      }
       const peer = new Peer(id, peerClientOptions);
       peerRef.current = peer;
 
@@ -681,11 +694,6 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       });
       peer.on('disconnected', () => {
         debugRouting('peer.disconnected', { currentIdentityKey, peerId: peer.id });
-        try {
-          peer.reconnect();
-        } catch {
-          // noop
-        }
         scheduleReconnect('peer-disconnected');
       });
       peer.on('close', () => {
@@ -714,7 +722,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         try {
           const existing = localStreamRef.current;
           const stream = existing ?? await getUserMediaSafeRef.current(
-            buildPreferredMediaConstraints(isVideoEnabledRef.current)
+            buildPreferredMediaConstraintsRef.current(isVideoEnabledRef.current)
           );
           stream.getAudioTracks().forEach((track) => {
             track.enabled = !isMutedRef.current;
@@ -750,7 +758,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         if (peerRef.current === peer) peerRef.current = null;
       }
     };
-  }, [scopedPeerId, currentIdentityKey, peerClientOptions, peerEndpointLabel, buildPreferredMediaConstraints, peerEndpointValidationError]);
+  }, [scopedPeerId, currentIdentityKey, peerClientOptions, peerEndpointLabel, peerEndpointValidationError]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -894,6 +902,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       const nextAudioDevice = kind === 'audio' ? (deviceId || selectedAudioDevice) : selectedAudioDevice;
       const shouldRequestVideo = kind !== 'audio' && isVideoEnabled;
       const shouldRequestAudio = kind !== 'video';
+      if (!shouldRequestVideo && !shouldRequestAudio) {
+        return;
+      }
       const constraints: MediaStreamConstraints = {
         video: shouldRequestVideo
           ? {
