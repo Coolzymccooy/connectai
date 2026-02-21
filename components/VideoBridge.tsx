@@ -247,7 +247,12 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const peerClientOptions = useMemo(() => {
     const env = (import.meta.env as any) || {};
     const rawPath = String(env.VITE_PEER_SERVER_PATH || '/peerjs').trim() || '/peerjs';
-    const path = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+    const withLeadingPath = rawPath.startsWith('/') ? rawPath : `/${rawPath}`;
+    const collapsedPath = withLeadingPath.replace(/\/{2,}/g, '/');
+    const normalizedPath = (collapsedPath.replace(/\/+$/, '') || '/peerjs');
+    const endpointPath = normalizedPath.endsWith('/peerjs') ? normalizedPath : `${normalizedPath}/peerjs`;
+    const pathPrefix = endpointPath.slice(0, -('/peerjs'.length)) || '/';
+    const path = pathPrefix.endsWith('/') ? pathPrefix : `${pathPrefix}/`;
     const explicitHost = String(env.VITE_PEER_SERVER_HOST || '').trim();
     const explicitPort = Number(env.VITE_PEER_SERVER_PORT || 0);
     const secureOverride = String(env.VITE_PEER_SERVER_SECURE || '').trim();
@@ -265,6 +270,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       host: explicitHost || pageHost,
       port: explicitPort > 0 ? explicitPort : defaultPort,
       path,
+      endpointPath,
       secure,
       debug: 1,
       pingInterval: Number(env.VITE_PEER_PING_INTERVAL_MS || 5000),
@@ -272,8 +278,19 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   }, []);
   const peerEndpointLabel = useMemo(() => {
     const protocol = peerClientOptions.secure ? 'wss' : 'ws';
-    return `${protocol}://${peerClientOptions.host}:${peerClientOptions.port}${peerClientOptions.path}`;
+    const endpointPath = String(peerClientOptions.endpointPath || '/peerjs');
+    return `${protocol}://${peerClientOptions.host}:${peerClientOptions.port}${endpointPath}`;
   }, [peerClientOptions]);
+  const peerEndpointValidationError = useMemo(() => {
+    if (typeof window === 'undefined') return null;
+    const isSecurePage = window.location.protocol === 'https:';
+    const host = String(peerClientOptions.host || '').toLowerCase();
+    const localhostHosts = ['localhost', '127.0.0.1', '0.0.0.0'];
+    if (isSecurePage && localhostHosts.includes(host)) {
+      return `Peer signaling misconfigured for HTTPS page. Update VITE_PEER_SERVER_HOST from "${host}" to your backend host.`;
+    }
+    return null;
+  }, [peerClientOptions.host]);
 
   const buildPreferredMediaConstraints = useCallback((videoEnabled: boolean): MediaStreamConstraints => ({
     video: videoEnabled
@@ -333,9 +350,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   }, [isVideoEnabled]);
 
   useEffect(() => {
-    setPeerEndpointInfo(peerEndpointLabel);
+    setPeerEndpointInfo(peerEndpointValidationError ? `${peerEndpointLabel} (misconfigured)` : peerEndpointLabel);
     console.info('[peer] endpoint', peerEndpointLabel);
-  }, [peerEndpointLabel]);
+  }, [peerEndpointLabel, peerEndpointValidationError]);
 
   // --- DEVICE DISCOVERY ---
   useEffect(() => {
@@ -638,6 +655,14 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       debugRouting('peer.reconnect.scheduled', { reason, delay, attempts: peerReconnectAttemptRef.current });
     };
 
+    if (peerEndpointValidationError) {
+      setMediaError(peerEndpointValidationError);
+      return () => {
+        disposed = true;
+        clearRetry();
+      };
+    }
+
     const connectPeer = () => {
       if (disposed) return;
       const peer = new Peer(id, peerClientOptions);
@@ -725,7 +750,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         if (peerRef.current === peer) peerRef.current = null;
       }
     };
-  }, [scopedPeerId, currentIdentityKey, peerClientOptions, peerEndpointLabel, buildPreferredMediaConstraints]);
+  }, [scopedPeerId, currentIdentityKey, peerClientOptions, peerEndpointLabel, buildPreferredMediaConstraints, peerEndpointValidationError]);
 
   // --- DYNAMIC SESSION CLOCK ---
   useEffect(() => {
@@ -752,41 +777,73 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     if (!localStream) return;
     if (activeCall.status === CallStatus.ENDED) return;
     let cancelled = false;
-    const recoverLocalStream = async (reason: string) => {
+    const recoverLocalStream = async (reason: string, trackKind?: 'audio' | 'video') => {
       if (cancelled) return;
       try {
-        const next = await getUserMediaSafe(
-          buildPreferredMediaConstraints(isVideoEnabled)
-        );
+        const constraints: MediaStreamConstraints = trackKind === 'audio'
+          ? {
+              video: false,
+              audio: {
+                deviceId: selectedAudioDevice ? { exact: selectedAudioDevice } : undefined,
+                echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: true,
+              },
+            }
+          : trackKind === 'video'
+            ? {
+                video: isVideoEnabled
+                  ? {
+                      deviceId: selectedVideoDevice ? { exact: selectedVideoDevice } : undefined,
+                      width: { ideal: 1280 },
+                      height: { ideal: 720 },
+                      frameRate: { ideal: 30 },
+                    }
+                  : false,
+                audio: false,
+              }
+            : buildPreferredMediaConstraints(isVideoEnabled);
+        const next = await getUserMediaSafe(constraints);
         if (cancelled) {
           next.getTracks().forEach((track) => track.stop());
           return;
         }
-        next.getAudioTracks().forEach((track) => {
-          track.enabled = !isMuted;
-        });
-        const nextAudioTrack = next.getAudioTracks()[0] || null;
-        const nextVideoTrack = next.getVideoTracks()[0] || null;
+        const currentAudioTrack = localStream.getAudioTracks()[0] || null;
+        const currentVideoTrack = localStream.getVideoTracks()[0] || null;
+        const nextAudioTrack = next.getAudioTracks()[0] || (trackKind === 'video' ? currentAudioTrack : null);
+        const nextVideoTrack = next.getVideoTracks()[0] || (trackKind === 'audio' ? currentVideoTrack : null);
+        if (nextAudioTrack) {
+          nextAudioTrack.enabled = !isMuted;
+        }
         connectionsRef.current.forEach((connection) => {
           const senders = connection.peerConnection?.getSenders?.() || [];
           const audioSender = senders.find((sender) => sender.track?.kind === 'audio');
           const videoSender = senders.find((sender) => sender.track?.kind === 'video');
           if (audioSender && nextAudioTrack) audioSender.replaceTrack(nextAudioTrack).catch(() => {});
-          if (videoSender) videoSender.replaceTrack(nextVideoTrack).catch(() => {});
+          if (videoSender && nextVideoTrack) videoSender.replaceTrack(nextVideoTrack).catch(() => {});
         });
+        const merged = new MediaStream();
+        if (nextVideoTrack) merged.addTrack(nextVideoTrack);
+        if (nextAudioTrack) merged.addTrack(nextAudioTrack);
+        const mergedTrackIds = new Set(merged.getTracks().map((track) => track.id));
         localStream.getTracks().forEach((track) => {
+          if (mergedTrackIds.has(track.id)) return;
           try { track.stop(); } catch {}
         });
-        setLocalStream(next);
+        next.getTracks().forEach((track) => {
+          if (mergedTrackIds.has(track.id)) return;
+          try { track.stop(); } catch {}
+        });
+        setLocalStream(merged);
         setMediaError(null);
-        debugRouting('localStream.recovered', { reason });
+        debugRouting('localStream.recovered', { reason, trackKind: trackKind || 'all' });
       } catch (err: any) {
         setMediaError(`Local media recovery failed: ${String(err?.message || err)}`);
       }
     };
     const disposers: Array<() => void> = [];
     localStream.getTracks().forEach((track) => {
-      const handleTrackEnd = () => recoverLocalStream(`local-track-ended:${track.kind}`);
+      const handleTrackEnd = () => recoverLocalStream(`local-track-ended:${track.kind}`, track.kind as 'audio' | 'video');
       track.addEventListener('ended', handleTrackEnd);
       disposers.push(() => track.removeEventListener('ended', handleTrackEnd));
     });
@@ -794,7 +851,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       cancelled = true;
       disposers.forEach((dispose) => dispose());
     };
-  }, [localStream, activeCall.status, getUserMediaSafe, isVideoEnabled, isMuted, buildPreferredMediaConstraints]);
+  }, [localStream, activeCall.status, getUserMediaSafe, isVideoEnabled, isMuted, buildPreferredMediaConstraints, selectedAudioDevice, selectedVideoDevice]);
 
   // --- PROPRIETARY TRANSCRIPTION PROTOCOL ---
   useEffect(() => {
@@ -835,8 +892,10 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     try {
       const nextVideoDevice = kind === 'video' ? (deviceId || selectedVideoDevice) : selectedVideoDevice;
       const nextAudioDevice = kind === 'audio' ? (deviceId || selectedAudioDevice) : selectedAudioDevice;
+      const shouldRequestVideo = kind !== 'audio' && isVideoEnabled;
+      const shouldRequestAudio = kind !== 'video';
       const constraints: MediaStreamConstraints = {
-        video: isVideoEnabled
+        video: shouldRequestVideo
           ? {
               deviceId: nextVideoDevice ? { exact: nextVideoDevice } : undefined,
               width: { ideal: 1280 },
@@ -844,21 +903,25 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
               frameRate: { ideal: 30 },
             }
           : false,
-        audio: {
-          deviceId: nextAudioDevice ? { exact: nextAudioDevice } : undefined,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+        audio: shouldRequestAudio
+          ? {
+              deviceId: nextAudioDevice ? { exact: nextAudioDevice } : undefined,
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            }
+          : false,
       };
       const stream = await getUserMediaSafe(constraints);
-      stream.getAudioTracks().forEach((track) => {
-        track.enabled = !isMuted;
-      });
-      setLocalStream(stream);
-
-      const videoTrack = stream.getVideoTracks()[0];
-      const audioTrack = stream.getAudioTracks()[0];
+      const currentVideoTrack = localStream?.getVideoTracks()[0] || null;
+      const currentAudioTrack = localStream?.getAudioTracks()[0] || null;
+      const requestedVideoTrack = stream.getVideoTracks()[0] || null;
+      const requestedAudioTrack = stream.getAudioTracks()[0] || null;
+      const videoTrack = kind === 'audio' ? currentVideoTrack : (requestedVideoTrack || currentVideoTrack);
+      const audioTrack = kind === 'video' ? currentAudioTrack : (requestedAudioTrack || currentAudioTrack);
+      if (audioTrack) {
+        audioTrack.enabled = !isMuted;
+      }
       connectionsRef.current.forEach((call) => {
         const senders = call.peerConnection?.getSenders?.() || [];
         if (videoTrack) {
@@ -870,11 +933,22 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
             sender?.replaceTrack(audioTrack).catch(() => {});
         }
       });
+      const merged = new MediaStream();
+      if (videoTrack) merged.addTrack(videoTrack);
+      if (audioTrack) merged.addTrack(audioTrack);
+      const mergedTrackIds = new Set(merged.getTracks().map((track) => track.id));
       localStream?.getTracks().forEach((track) => {
+        if (mergedTrackIds.has(track.id)) return;
         try { track.stop(); } catch {}
       });
+      stream.getTracks().forEach((track) => {
+        if (mergedTrackIds.has(track.id)) return;
+        try { track.stop(); } catch {}
+      });
+      setLocalStream(merged);
       if (kind === 'video' && deviceId) setSelectedVideoDevice(deviceId);
       if (kind === 'audio' && deviceId) setSelectedAudioDevice(deviceId);
+      setMediaError(null);
 
     } catch (err) {
       console.error("Hardware Session Rejected:", err);
@@ -1173,19 +1247,28 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         return;
       }
       
-      // FIX 3: Connection Keep-Alive
-      // Don't close connection aggressively on timeout. Wait longer for ICE.
+      // Register connection listeners immediately so we never miss the first remote stream event.
+      registerConnection(call, identityKey);
+
+      // Connection keep-alive:
+      // Wait for ICE negotiation and only retry when state is terminal.
       const fallbackTimer = window.setTimeout(() => {
-        if (connected || connectionsRef.current.has(identityKey)) return;
+        if (connected || remoteStreamsRef.current.has(identityKey)) return;
+        const pcState = String(
+          call.peerConnection?.connectionState ||
+          call.peerConnection?.iceConnectionState ||
+          ''
+        ).toLowerCase();
+        const stillNegotiating = ['new', 'checking', 'connecting'].includes(pcState);
+        if (stillNegotiating) return;
         try { call.close(); } catch {}
         attemptDial();
-      }, 9000);
+      }, 18000);
       call.on('stream', (remoteStream) => {
         connected = true;
         window.clearTimeout(fallbackTimer);
         // Ensure remote tracks are active
         remoteStream.getTracks().forEach(t => t.enabled = true);
-        registerConnection(call, identityKey); 
       });
       
       call.on('close', () => {
@@ -1686,13 +1769,17 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         });
         runReconnectSweep().catch(() => {});
       }
-      const localEnded = localStream?.getTracks().some((track) => track.readyState === 'ended');
-      if (localEnded) {
+      const localAudioEnded = localStream?.getAudioTracks().some((track) => track.readyState === 'ended');
+      const localVideoEnded = localStream?.getVideoTracks().some((track) => track.readyState === 'ended');
+      if (localAudioEnded) {
         admitHardware(undefined, 'audio').catch(() => {});
+      }
+      if (isVideoEnabled && localVideoEnded) {
+        admitHardware(selectedVideoDevice || undefined, 'video').catch(() => {});
       }
     }, 5000);
     return () => window.clearInterval(interval);
-  }, [activeCall.status, remoteStreams, localStream, runReconnectSweep, admitHardware]);
+  }, [activeCall.status, remoteStreams, localStream, runReconnectSweep, admitHardware, isVideoEnabled, selectedVideoDevice]);
 
   return (
     <div ref={bridgeRootRef} className="relative h-full w-full z-[100] bg-[#111] flex flex-col overflow-hidden text-white font-sans selection:bg-brand-500/30">

@@ -214,6 +214,9 @@ export interface AppSettings {
     autoTenantByDomain: boolean;
     domainTenantMap: { domain: string; tenantId: string }[];
   };
+  organization: {
+    departments: OrganizationDepartment[];
+  };
   team: User[];
   workflows: WorkflowRule[];
 }
@@ -256,6 +259,7 @@ export interface User {
   extension?: string;
   email?: string;
   department?: string;
+  departmentId?: string;
   status: 'active' | 'invited' | 'disabled';
   currentPresence?: AgentStatus;
   allowedNumbers?: string[];
@@ -397,6 +401,12 @@ export interface DepartmentRoute {
   name: string;
   targetType: 'queue' | 'client' | 'phone';
   target: string;
+}
+
+export interface OrganizationDepartment {
+  id: string;
+  name: string;
+  active: boolean;
 }
 
 export interface IvrConfig {

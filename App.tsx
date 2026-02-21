@@ -26,6 +26,16 @@ import { sanitizeCallForStorage } from './utils/gdpr';
 import { buildIdentityKey, normalizeEmail, normalizeName } from './utils/identity';
 import { useRealtimeHealth } from './utils/realtimeHealth';
 const SHOW_DEMO_TEAM = (import.meta.env as any).VITE_ENABLE_DEMO_TEAM === 'true';
+const DEFAULT_ORGANIZATION_DEPARTMENTS = [
+  { id: 'dept_sales', name: 'Sales', active: true },
+  { id: 'dept_operations', name: 'Operations', active: true },
+  { id: 'dept_support', name: 'Support', active: true },
+  { id: 'dept_marketing', name: 'Marketing', active: true },
+  { id: 'dept_finance', name: 'Finance', active: true },
+  { id: 'dept_hr', name: 'HR', active: true },
+  { id: 'dept_engineering', name: 'Engineering', active: true },
+  { id: 'dept_other', name: 'Other', active: true },
+];
 
 const DEFAULT_SETTINGS: AppSettings = {
   broadcastCenter: {
@@ -66,10 +76,13 @@ const DEFAULT_SETTINGS: AppSettings = {
   voice: { allowedNumbers: [] },
   bot: { enabled: true, name: 'ConnectBot', persona: 'You are a helpful customer service assistant for ConnectAI.', deflectionGoal: 35 },
   auth: { inviteOnly: false, allowedDomains: [], autoTenantByDomain: false, domainTenantMap: [] },
+  organization: {
+    departments: DEFAULT_ORGANIZATION_DEPARTMENTS,
+  },
   team: SHOW_DEMO_TEAM ? [
-    { id: 'u_agent', name: 'Sarah Agent', role: Role.AGENT, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sarah', status: 'active', extension: '101', currentPresence: AgentStatus.AVAILABLE, email: 'sarah@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: false },
-    { id: 'u_supervisor', name: 'Mike Supervisor', role: Role.SUPERVISOR, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Mike', status: 'active', extension: '201', currentPresence: AgentStatus.AVAILABLE, email: 'mike@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: false },
-    { id: 'u_admin', name: 'Sys Admin', role: Role.ADMIN, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Admin', status: 'active', extension: '999', currentPresence: AgentStatus.AVAILABLE, email: 'admin@connectai.io', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: true }
+    { id: 'u_agent', name: 'Sarah Agent', role: Role.AGENT, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Sarah', status: 'active', extension: '101', currentPresence: AgentStatus.AVAILABLE, email: 'sarah@connectai.io', departmentId: 'dept_sales', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: false },
+    { id: 'u_supervisor', name: 'Mike Supervisor', role: Role.SUPERVISOR, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Mike', status: 'active', extension: '201', currentPresence: AgentStatus.AVAILABLE, email: 'mike@connectai.io', departmentId: 'dept_support', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: false },
+    { id: 'u_admin', name: 'Sys Admin', role: Role.ADMIN, avatarUrl: 'https://api.dicebear.com/7.x/avataaars/svg?seed=Admin', status: 'active', extension: '999', currentPresence: AgentStatus.AVAILABLE, email: 'admin@connectai.io', departmentId: 'dept_operations', allowedNumbers: [], restrictOutboundNumbers: false, canAccessRecordings: true }
   ] : [],
   workflows: []
 };
@@ -163,9 +176,37 @@ const mergeTeamWithDirectory = (team: User[], members: User[]): User[] => {
   return dedupeTeamMembers(merged);
 };
 
+const normalizeOrganizationDepartments = (value: any) => {
+  const source = Array.isArray(value) ? value : DEFAULT_ORGANIZATION_DEPARTMENTS;
+  const seen = new Set<string>();
+  const normalized = source
+    .map((dept: any, idx: number) => {
+      const id = String(dept?.id || `dept_${idx + 1}`).trim();
+      const name = String(dept?.name || '').trim();
+      const active = dept?.active !== false;
+      if (!id || !name || seen.has(id)) return null;
+      seen.add(id);
+      return { id, name, active };
+    })
+    .filter(Boolean) as Array<{ id: string; name: string; active: boolean }>;
+  return normalized.length ? normalized : DEFAULT_ORGANIZATION_DEPARTMENTS;
+};
+
+const resolveDepartmentForUser = (member: User, departments: Array<{ id: string; name: string; active: boolean }>) => {
+  const byId = String(member.departmentId || '').trim();
+  if (byId && departments.some((dept) => dept.id === byId)) return byId;
+  const byLegacyName = normalizeName(member.department || '');
+  if (byLegacyName) {
+    const hit = departments.find((dept) => normalizeName(dept.name) === byLegacyName);
+    if (hit) return hit.id;
+  }
+  return undefined;
+};
+
   const buildMergedSettings = (saved: Partial<AppSettings> | null | undefined): AppSettings => {
     const source = saved || {};
     const sourceTeam = Array.isArray((source as any).team) ? (source as any).team : [];
+  const organizationDepartments = normalizeOrganizationDepartments((source as any).organization?.departments);
   const merged = {
     ...DEFAULT_SETTINGS,
     ...source,
@@ -198,10 +239,25 @@ const mergeTeamWithDirectory = (team: User[], members: User[]): User[] => {
     },
     voice: { ...DEFAULT_SETTINGS.voice, ...((source as any).voice || {}) },
     auth: { ...DEFAULT_SETTINGS.auth, ...((source as any).auth || {}) },
+    organization: {
+      ...DEFAULT_SETTINGS.organization,
+      ...((source as any).organization || {}),
+      departments: organizationDepartments,
+    },
   };
+  const normalizedTeam = (sourceTeam || DEFAULT_SETTINGS.team).map((member: User) => {
+    const departmentId = resolveDepartmentForUser(member, organizationDepartments);
+    if (!departmentId) return member;
+    const departmentName = organizationDepartments.find((dept) => dept.id === departmentId)?.name;
+    return {
+      ...member,
+      departmentId,
+      department: member.department || departmentName,
+    };
+  });
   return {
     ...merged,
-    team: dedupeTeamMembers(mergeTeamWithDirectory(DEFAULT_SETTINGS.team, sourceTeam || DEFAULT_SETTINGS.team)),
+    team: dedupeTeamMembers(mergeTeamWithDirectory(DEFAULT_SETTINGS.team, normalizedTeam)),
   };
 };
 
@@ -887,6 +943,14 @@ const App: React.FC = () => {
         (knownMember && knownMember.role === effectiveRole ? knownMember : null) ||
         appSettings.team.find(u => u.role === effectiveRole) ||
         DEFAULT_SETTINGS.team.find(u => u.role === effectiveRole);
+      const activeDepartments = normalizeOrganizationDepartments(appSettings.organization?.departments);
+      const resolvedDepartmentId =
+        knownMember?.departmentId ||
+        roleTemplate?.departmentId ||
+        resolveDepartmentForUser(knownMember || roleTemplate || ({} as User), activeDepartments);
+      const resolvedDepartmentName = resolvedDepartmentId
+        ? activeDepartments.find((dept) => dept.id === resolvedDepartmentId)?.name
+        : undefined;
       const safeEmail = user.email || `${user.uid}@placeholder.local`;
       const profile: User = {
         id: user.uid,
@@ -895,6 +959,8 @@ const App: React.FC = () => {
         avatarUrl: roleTemplate?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${user.uid}`,
         extension: roleTemplate?.extension || '',
         email: safeEmail,
+        departmentId: resolvedDepartmentId,
+        department: knownMember?.department || roleTemplate?.department || resolvedDepartmentName,
         status: 'active',
         currentPresence: roleTemplate?.currentPresence || AgentStatus.AVAILABLE,
         canAccessRecordings: effectiveRole === Role.ADMIN ? true : (roleTemplate?.canAccessRecordings ?? false)
@@ -983,8 +1049,6 @@ const App: React.FC = () => {
       (snapshot) => {
         snapshot.docChanges().forEach((change) => {
           const callData = normalizeCallForSession(change.doc.data() as Call);
-          const isStale = callData.startTime && (Date.now() - callData.startTime) > 5 * 60 * 1000;
-          if (isStale) return;
           const isCurrentActive = activeCall?.id === callData.id;
           const isTarget = matchesCurrentUserAsTarget(callData);
           const isParticipant = matchesCurrentUserInCall(callData);
@@ -1201,11 +1265,14 @@ const App: React.FC = () => {
     const backoffRef = { lastPath: '', lastAt: 0 };
     const handler = (event: any) => {
       const path = event?.detail?.path || '';
+      const status = Number(event?.detail?.status || 0);
       const now = Date.now();
       if (path === backoffRef.lastPath && (now - backoffRef.lastAt) < 15000) return;
       backoffRef.lastPath = path;
       backoffRef.lastAt = now;
-      addNotification('info', 'Backend is rate limiting; retrying shortly.');
+      const statusSuffix = status ? ` (${status})` : '';
+      const endpoint = path || 'api';
+      addNotification('info', `Backend is rate limiting${statusSuffix} on ${endpoint}; retrying shortly.`);
       if (ROUTING_DEBUG) console.info('[backoff]', path, event?.detail?.until);
     };
     window.addEventListener('connectai-api-backoff', handler);
@@ -1603,6 +1670,8 @@ const App: React.FC = () => {
         ...currentUser,
         role: nextRole,
         extension: member.extension || currentUser.extension,
+        departmentId: member.departmentId || currentUser.departmentId,
+        department: member.department || currentUser.department,
         canAccessRecordings: nextRole === Role.ADMIN ? true : (member.canAccessRecordings ?? currentUser.canAccessRecordings ?? false),
       };
       setCurrentUser(corrected);
@@ -2113,7 +2182,7 @@ const App: React.FC = () => {
     setAgentStatus(AgentStatus.BUSY);
   };
 
-  const handleLogin = async (role: Role, profile?: { uid: string; email?: string | null; displayName?: string | null }) => {
+  const handleLogin = async (role: Role, profile?: { uid: string; email?: string | null; displayName?: string | null; departmentId?: string | null }) => {
     const roleResolution = resolveRoleForAccount({
       email: profile?.email,
       selectedRole: role,
@@ -2132,6 +2201,19 @@ const App: React.FC = () => {
     const fallbackId = base?.id || `u_${effectiveRole.toLowerCase()}`;
     const userId = profile?.uid || fallbackId;
     const displayName = profile?.displayName || profile?.email || base?.name || `${effectiveRole.charAt(0) + effectiveRole.slice(1).toLowerCase()} User`;
+    const activeDepartments = normalizeOrganizationDepartments(appSettings.organization?.departments);
+    const requestedDepartmentId = String(profile?.departmentId || '').trim();
+    const validatedRequestedDepartmentId = requestedDepartmentId && activeDepartments.some((dept) => dept.id === requestedDepartmentId)
+      ? requestedDepartmentId
+      : undefined;
+    const resolvedDepartmentId =
+      knownMember?.departmentId ||
+      validatedRequestedDepartmentId ||
+      base?.departmentId ||
+      resolveDepartmentForUser(knownMember || base || ({} as User), activeDepartments);
+    const resolvedDepartmentName = resolvedDepartmentId
+      ? activeDepartments.find((dept) => dept.id === resolvedDepartmentId)?.name
+      : undefined;
     const user: User = {
       id: userId,
       name: displayName,
@@ -2139,6 +2221,8 @@ const App: React.FC = () => {
       avatarUrl: base?.avatarUrl || `https://api.dicebear.com/7.x/avataaars/svg?seed=${encodeURIComponent(userId)}`,
       extension: base?.extension,
       email: profile?.email || base?.email,
+      departmentId: resolvedDepartmentId,
+      department: knownMember?.department || base?.department || resolvedDepartmentName,
       status: 'active',
       currentPresence: base?.currentPresence || AgentStatus.AVAILABLE,
       canAccessRecordings: effectiveRole === Role.ADMIN ? true : (base?.canAccessRecordings ?? false)
@@ -2352,7 +2436,7 @@ const App: React.FC = () => {
     );
   }
   if (!isAppRoute && !currentUser) return <LandingPage />;
-  if (!currentUser) return <LoginScreen onLogin={handleLogin} externalMessage={authNotice} onClearExternalMessage={() => setAuthNotice(null)} />;
+  if (!currentUser) return <LoginScreen onLogin={handleLogin} departments={appSettings.organization?.departments || DEFAULT_ORGANIZATION_DEPARTMENTS} externalMessage={authNotice} onClearExternalMessage={() => setAuthNotice(null)} />;
 
   const acceptIncomingBannerCall = async () => {
     if (!incomingCallBanner) return;
@@ -2525,7 +2609,7 @@ const App: React.FC = () => {
                 <div className="p-4 md:p-8 h-full bg-[radial-gradient(110%_100%_at_50%_0%,rgba(15,23,42,0.55)_0%,rgba(2,6,23,0.15)_55%,rgba(2,6,23,0)_100%)]">
                   <div className="h-full relative">
                     <div className="h-full">
-                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} onEndActiveCall={handleHangup} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} onUpdateCampaign={handleUpdateCampaign} onCreateLead={handleCreateLead} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} chatHealth={{ chatHealthy, callsHealthy, offline: realtimeOffline, lastError: realtimeError }} focusInboxRequest={inboxFocusRequest} />
+                      <AgentConsole activeCall={activeCall} agentStatus={agentStatus} onCompleteWrapUp={handleCompleteWrapUp} onEndActiveCall={handleHangup} settings={appSettings} addNotification={addNotification} leads={leads} onOutboundCall={startExternalCall} onInternalCall={startInternalCall} history={callHistory} campaigns={campaigns} onUpdateCampaigns={handleUpdateCampaigns} onUpdateCampaign={handleUpdateCampaign} onCreateLead={handleCreateLead} meetings={meetings} onUpdateMeetings={handleUpdateMeetings} user={currentUser} onAddParticipant={addParticipantToCall} onJoinMeeting={startMeeting} isFirebaseConfigured={isFirebaseConfigured} startupGuardReport={startupGuardReport} chatHealth={{ chatHealthy, callsHealthy, offline: realtimeOffline, lastError: realtimeError }} focusInboxRequest={inboxFocusRequest} />
                     </div>
 
                   </div>

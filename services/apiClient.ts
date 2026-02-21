@@ -23,6 +23,7 @@ type BackoffState = {
   backoffUntil: number;
   attempt: number;
   lastGoodResponse?: any;
+  lastStatus?: number;
 };
 
 const backoffByPath: Record<string, BackoffState> = {};
@@ -38,6 +39,21 @@ const jitteredDelay = (baseMs: number, attempt: number) => {
   const exp = Math.min(60_000, baseMs * Math.pow(2, attempt - 1));
   const jitter = exp * (0.2 * Math.random());
   return Math.min(60_000, exp + jitter);
+};
+
+const parseRetryAfterMs = (value: string | null | undefined) => {
+  const raw = String(value || '').trim();
+  if (!raw) return 0;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds > 0) {
+    return Math.min(60_000, Math.max(1000, seconds * 1000));
+  }
+  const dateMs = Date.parse(raw);
+  if (Number.isFinite(dateMs)) {
+    const delta = dateMs - Date.now();
+    if (delta > 0) return Math.min(60_000, Math.max(1000, delta));
+  }
+  return 0;
 };
 
 const shouldCachePath = (path: string) => {
@@ -61,12 +77,12 @@ export const isBackoffActive = (path?: string) => {
 const notifyBackoff = (() => {
   let lastAt = 0;
   const MIN_INTERVAL = 15000; // 15s to avoid toast floods
-  return (path: string, until: number) => {
+  return (path: string, until: number, status?: number) => {
     const now = Date.now();
     if (now - lastAt < MIN_INTERVAL) return;
     lastAt = now;
     try {
-      window.dispatchEvent(new CustomEvent('connectai-api-backoff', { detail: { path, until } }));
+      window.dispatchEvent(new CustomEvent('connectai-api-backoff', { detail: { path, until, status } }));
     } catch {
       // ignore
     }
@@ -91,6 +107,8 @@ export const apiRequest = async <T = any>(path: string, options: ApiOptions = {}
     if (state.lastGoodResponse !== undefined) return state.lastGoodResponse as T;
     const err: any = new Error('temporarily throttled');
     err.code = 'backoff';
+    err.status = state.lastStatus || 429;
+    err.path = path;
     throw err;
   }
 
@@ -106,22 +124,25 @@ export const apiRequest = async <T = any>(path: string, options: ApiOptions = {}
       const retryable = res.status === 429 || res.status === 503 || res.status === 502 || res.status === 500;
       if (retryable && shouldCachePath(path)) {
         const nextAttempt = state.attempt + 1;
-        const delay = jitteredDelay(1000, nextAttempt);
+        const retryAfterDelay = parseRetryAfterMs(res.headers.get('Retry-After'));
+        const delay = retryAfterDelay || jitteredDelay(1000, nextAttempt);
         backoffByPath[backoffKey] = {
           backoffUntil: Date.now() + delay,
           attempt: nextAttempt,
           lastGoodResponse: state.lastGoodResponse,
+          lastStatus: res.status,
         };
-        notifyBackoff(backoffKey, Date.now() + delay);
+        notifyBackoff(backoffKey, Date.now() + delay, res.status);
       }
       const err = new Error(text || `Request failed: ${res.status}`);
       (err as any).status = res.status;
+      (err as any).path = path;
       throw err;
     }
 
     const payload = await res.json();
     if (shouldCachePath(path)) {
-      backoffByPath[backoffKey] = { backoffUntil: 0, attempt: 0, lastGoodResponse: payload };
+      backoffByPath[backoffKey] = { backoffUntil: 0, attempt: 0, lastGoodResponse: payload, lastStatus: 200 };
     }
     return payload;
   } catch (err: any) {
@@ -133,9 +154,11 @@ export const apiRequest = async <T = any>(path: string, options: ApiOptions = {}
         backoffUntil: Date.now() + delay,
         attempt: nextAttempt,
         lastGoodResponse: state.lastGoodResponse,
+        lastStatus: err?.status || state.lastStatus || 503,
       };
-      notifyBackoff(backoffKey, Date.now() + delay);
+      notifyBackoff(backoffKey, Date.now() + delay, err?.status || state.lastStatus || 503);
     }
+    if (!err?.path) err.path = path;
     throw err;
   }
 };

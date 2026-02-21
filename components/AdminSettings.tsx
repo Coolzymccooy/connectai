@@ -1,5 +1,5 @@
 ﻿
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { 
   Shield, Database, Workflow, Plus, UserPlus, Trash2, Zap, CreditCard, 
   Bot, PhoneCall, Settings2, CloudDownload, Infinity, RefreshCw, CheckCircle, 
@@ -9,7 +9,7 @@ import {
   ArrowRight, Play, FileJson, Share, UserMinus, Key, Server, Hash, Layers3, Phone,
   ChevronUp, Sliders, Sparkles, Wand2, ShieldAlert, Check
 } from 'lucide-react';
-import { AppSettings, DepartmentRoute, Role, Notification, User, WorkflowRule, MigrationProvider, IntegrationLog, ChannelType, IvrConfig, WebhookConfig, SchemaMapping, IvrOption, BroadcastAudience, BroadcastMessage, StartupGuardReport } from '../types';
+import { AppSettings, DepartmentRoute, OrganizationDepartment, Role, Notification, User, WorkflowRule, MigrationProvider, IntegrationLog, ChannelType, IvrConfig, WebhookConfig, SchemaMapping, IvrOption, BroadcastAudience, BroadcastMessage, StartupGuardReport } from '../types';
 import { VisualIvr } from './VisualIvr';
 import { startLegacyMigration } from '../services/migrationService';
 import { exportClusterData, downloadJson } from '../services/exportService';
@@ -25,12 +25,39 @@ const PERSONA_TEMPLATES = [
   { name: 'Technical Support', prompt: 'Initializing ConnectAI Technical Gateway. Current cluster latency is low. Press 1 for engineering support or 2 for status updates.' }
 ];
 
+const DEFAULT_ORGANIZATION_DEPARTMENTS: OrganizationDepartment[] = [
+  { id: 'dept_sales', name: 'Sales', active: true },
+  { id: 'dept_operations', name: 'Operations', active: true },
+  { id: 'dept_support', name: 'Support', active: true },
+  { id: 'dept_marketing', name: 'Marketing', active: true },
+  { id: 'dept_finance', name: 'Finance', active: true },
+  { id: 'dept_hr', name: 'HR', active: true },
+  { id: 'dept_engineering', name: 'Engineering', active: true },
+  { id: 'dept_other', name: 'Other', active: true },
+];
+
 interface ExportRecord {
   id: string;
   timestamp: string;
   size: string;
   status: 'Ready' | 'Expired';
 }
+
+const normalizeOrganizationDepartments = (source: any): OrganizationDepartment[] => {
+  const base = Array.isArray(source) ? source : DEFAULT_ORGANIZATION_DEPARTMENTS;
+  const seen = new Set<string>();
+  const normalized = base
+    .map((dept: any, idx: number) => {
+      const id = String(dept?.id || `dept_${idx + 1}`).trim();
+      const name = String(dept?.name || '').trim();
+      const active = dept?.active !== false;
+      if (!id || !name || seen.has(id)) return null;
+      seen.add(id);
+      return { id, name, active };
+    })
+    .filter(Boolean) as OrganizationDepartment[];
+  return normalized.length ? normalized : DEFAULT_ORGANIZATION_DEPARTMENTS;
+};
 
 interface AdminSettingsProps {
   settings: AppSettings;
@@ -86,9 +113,17 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   const [exportPayloads, setExportPayloads] = useState<Record<string, string>>({});
 
   // Form States
-  const [newUser, setNewUser] = useState({ name: '', email: '', role: Role.AGENT });
+  const initialDepartments = useMemo(
+    () => normalizeOrganizationDepartments(settings.organization?.departments),
+    [settings.organization?.departments]
+  );
+  const [newUser, setNewUser] = useState({ name: '', email: '', role: Role.AGENT, departmentId: initialDepartments[0]?.id || DEFAULT_ORGANIZATION_DEPARTMENTS[0].id });
   const [editIvr, setEditIvr] = useState<IvrConfig>(settings.ivr);
   const [editDepartments, setEditDepartments] = useState<DepartmentRoute[]>(settings.ivr.departments || []);
+  const [editOrgDepartments, setEditOrgDepartments] = useState<OrganizationDepartment[]>(initialDepartments);
+  const [orgSaving, setOrgSaving] = useState(false);
+  const [saveAllBusy, setSaveAllBusy] = useState(false);
+  const saveAllInFlightRef = useRef(false);
   const [editAllowedNumbers, setEditAllowedNumbers] = useState(settings.voice.allowedNumbers.join('\n'));
   const [scalePlan, setScalePlan] = useState(settings.subscription.plan);
   const [scaleSeats, setScaleSeats] = useState(settings.subscription.seats);
@@ -227,6 +262,19 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     (import.meta.env as any).VITE_DEFAULT_TENANT_ID ||
     'default-tenant';
   const defaultTenantId = startupGuardReport?.defaultTenantId || activeTenantId;
+  const activeOrganizationDepartments = useMemo(
+    () => editOrgDepartments.filter((dept) => dept.active !== false),
+    [editOrgDepartments]
+  );
+  const resolveDepartmentName = useCallback((departmentId?: string, legacyName?: string) => {
+    const normalizedId = String(departmentId || '').trim();
+    if (normalizedId) {
+      const hit = editOrgDepartments.find((dept) => dept.id === normalizedId);
+      if (hit) return hit.name;
+    }
+    const rawLegacy = String(legacyName || '').trim();
+    return rawLegacy || 'Unassigned';
+  }, [editOrgDepartments]);
 
   const parsedAllowedDomains = useMemo(() => authDomains
     .split('\n')
@@ -406,6 +454,15 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   }, [settings.ivr]);
 
   useEffect(() => {
+    const normalized = normalizeOrganizationDepartments(settings.organization?.departments);
+    setEditOrgDepartments(normalized);
+    setNewUser((prev) => {
+      if (prev.departmentId && normalized.some((dept) => dept.id === prev.departmentId)) return prev;
+      return { ...prev, departmentId: normalized[0]?.id || DEFAULT_ORGANIZATION_DEPARTMENTS[0].id };
+    });
+  }, [settings.organization?.departments]);
+
+  useEffect(() => {
     setAuthSettings(settings.auth);
     setAuthDomains(settings.auth.allowedDomains.join('\n'));
     setDomainTenantMap(settings.auth.domainTenantMap.map((m) => `${m.domain}=${m.tenantId}`).join('\n'));
@@ -497,21 +554,34 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
   };
 
   const handleSaveAll = async () => {
+    if (saveAllInFlightRef.current) return;
+    saveAllInFlightRef.current = true;
+    setSaveAllBusy(true);
     try {
-      await saveSettingsApi(settings);
+      const saved = await saveSettingsApi(settings);
+      onUpdateSettings(saved);
       addNotification('success', 'Admin settings saved.');
-    } catch {
-      addNotification('error', 'Failed to save admin settings.');
+    } catch (err: any) {
+      const status = Number(err?.status || 0);
+      const statusLabel = status ? ` (${status})` : '';
+      const endpointClass = '/api/settings';
+      addNotification('error', `Failed to save admin settings${statusLabel} on ${endpointClass}.`);
+    } finally {
+      setSaveAllBusy(false);
+      saveAllInFlightRef.current = false;
     }
   };
 
   const handleAddUser = () => {
     if (!newUser.name || !newUser.email) return;
+    const resolvedDepartment = editOrgDepartments.find((dept) => dept.id === newUser.departmentId);
     const user: User = {
       id: `u_${Date.now()}`,
       name: newUser.name,
       email: newUser.email,
       role: newUser.role,
+      departmentId: resolvedDepartment?.id,
+      department: resolvedDepartment?.name,
       avatarUrl: `https://api.dicebear.com/7.x/avataaars/svg?seed=${newUser.name}`,
       status: 'active',
       extension: (101 + settings.team.length).toString(),
@@ -521,7 +591,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     onUpdateSettings(next);
     saveSettingsApi(next).catch(() => {});
     setShowInviteModal(false);
-    setNewUser({ name: '', email: '', role: Role.AGENT });
+    setNewUser({ name: '', email: '', role: Role.AGENT, departmentId: activeOrganizationDepartments[0]?.id || DEFAULT_ORGANIZATION_DEPARTMENTS[0].id });
     addNotification('success', `${user.name} admitted to neural core.`);
   };
 
@@ -568,7 +638,89 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
     addNotification('success', 'Call Routing Architecture Deployed.');
   };
 
+  const sanitizeOrganizationDepartments = useCallback((items: OrganizationDepartment[]) => {
+    const seen = new Set<string>();
+    return items
+      .map((dept, idx) => ({
+        id: String(dept?.id || `dept_${idx + 1}`).trim(),
+        name: String(dept?.name || '').trim(),
+        active: dept?.active !== false,
+      }))
+      .filter((dept) => {
+        if (!dept.id || !dept.name) return false;
+        if (seen.has(dept.id)) return false;
+        seen.add(dept.id);
+        return true;
+      });
+  }, []);
+
+  const handleAddOrganizationDepartment = () => {
+    const nextId = `dept_custom_${Date.now()}`;
+    setEditOrgDepartments((prev) => [
+      ...prev,
+      { id: nextId, name: `Department ${prev.length + 1}`, active: true },
+    ]);
+  };
+
+  const handleUpdateOrganizationDepartment = (id: string, patch: Partial<OrganizationDepartment>) => {
+    setEditOrgDepartments((prev) => prev.map((dept) => (dept.id === id ? { ...dept, ...patch } : dept)));
+  };
+
+  const handleRemoveOrganizationDepartment = (id: string) => {
+    setEditOrgDepartments((prev) => {
+      const next = prev.filter((dept) => dept.id !== id);
+      setNewUser((current) => (
+        current.departmentId === id
+          ? { ...current, departmentId: next[0]?.id || DEFAULT_ORGANIZATION_DEPARTMENTS[0].id }
+          : current
+      ));
+      return next;
+    });
+  };
+
+  const handleSaveOrganizationDepartments = async () => {
+    if (orgSaving) return;
+    const sanitized = sanitizeOrganizationDepartments(editOrgDepartments);
+    if (!sanitized.length) {
+      addNotification('error', 'At least one active department is required.');
+      return;
+    }
+    const nextSettings: AppSettings = {
+      ...settings,
+      organization: {
+        ...(settings.organization || {}),
+        departments: sanitized,
+      },
+      team: settings.team.map((member) => {
+        const fallbackDeptId = sanitized[0]?.id;
+        const departmentId = member.departmentId && sanitized.some((dept) => dept.id === member.departmentId)
+          ? member.departmentId
+          : fallbackDeptId;
+        const departmentName = sanitized.find((dept) => dept.id === departmentId)?.name;
+        return {
+          ...member,
+          departmentId,
+          department: departmentName || member.department,
+        };
+      }),
+    };
+    setOrgSaving(true);
+    onUpdateSettings(nextSettings);
+    try {
+      const saved = await saveSettingsApi(nextSettings);
+      setEditOrgDepartments(sanitized);
+      onUpdateSettings(saved);
+      addNotification('success', 'Departments updated.');
+    } catch (err: any) {
+      const status = Number(err?.status || 0);
+      addNotification('error', `Department save failed${status ? ` (${status})` : ''} on /api/settings.`);
+    } finally {
+      setOrgSaving(false);
+    }
+  };
+
   const executeSaveAuth = async (nextSettings: AppSettings) => {
+    if (authSaving) return;
     setAuthSaving(true);
     try {
       const saved = await saveSettingsApi(nextSettings);
@@ -579,9 +731,12 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       if (onRefreshStartupGuard) {
         await Promise.resolve(onRefreshStartupGuard());
       }
-    } catch {
+    } catch (err: any) {
       setAuthDirty(true);
-      addNotification('error', 'Access policy save failed. Check rate limit and retry.');
+      const status = Number(err?.status || 0);
+      const statusLabel = status ? ` (${status})` : '';
+      const endpointClass = '/api/settings';
+      addNotification('error', `Access policy save failed${statusLabel} on ${endpointClass}. Check rate limit and retry.`);
     } finally {
       setAuthSaving(false);
     }
@@ -951,8 +1106,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
          <div className="flex flex-col md:flex-row md:justify-between md:items-center mb-6 gap-4">
             <h2 className="text-2xl font-black text-slate-800 italic uppercase tracking-tighter">Admin Settings</h2>
             <div className="flex items-center gap-4">
-               <button onClick={handleSaveAll} className="px-5 py-2 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all">
-                 Save Settings
+               <button onClick={handleSaveAll} disabled={saveAllBusy} className="px-5 py-2 rounded-xl bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all disabled:opacity-60 disabled:cursor-not-allowed">
+                 {saveAllBusy ? 'Saving...' : 'Save Settings'}
                </button>
                <div className="px-3 py-1.5 bg-brand-50 rounded-xl border border-brand-100 flex items-center gap-2">
                   <div className="w-1.5 h-1.5 bg-green-500 rounded-full animate-pulse"></div>
@@ -1748,8 +1903,8 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                   No stale aliases detected.
                 </div>
               ) : (
-                <div className="space-y-2.5">
-                  {identityDiagnostics.map((entry) => (
+            <div className="space-y-2.5">
+              {identityDiagnostics.map((entry) => (
                     <div key={`${entry.member.id}:${entry.reason}`} className="flex items-center justify-between gap-3 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2.5">
                       <div className="min-w-0">
                         <p className="text-[10px] font-black uppercase tracking-widest text-slate-700 truncate">
@@ -1773,6 +1928,52 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                 </div>
               )}
             </div>
+            <div className="bg-white rounded-[1.6rem] border border-slate-200 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Organization Departments</p>
+                  <p className="text-[10px] font-bold text-slate-400">Manage login/team department options.</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button type="button" onClick={handleAddOrganizationDepartment} className="px-3 py-2 rounded-lg border border-slate-200 text-[9px] font-black uppercase tracking-widest text-slate-600 hover:bg-slate-50">
+                    Add
+                  </button>
+                  <button type="button" onClick={handleSaveOrganizationDepartments} disabled={orgSaving} className="px-3 py-2 rounded-lg bg-slate-900 text-white text-[9px] font-black uppercase tracking-widest disabled:opacity-60 disabled:cursor-not-allowed">
+                    {orgSaving ? 'Saving...' : 'Save Departments'}
+                  </button>
+                </div>
+              </div>
+              <div className="space-y-2">
+                {editOrgDepartments.map((dept) => (
+                  <div key={dept.id} className="grid grid-cols-12 gap-2 items-center">
+                    <input
+                      value={dept.name}
+                      onChange={(e) => handleUpdateOrganizationDepartment(dept.id, { name: e.target.value })}
+                      className="col-span-5 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest outline-none focus:border-brand-500"
+                      placeholder="Department name"
+                    />
+                    <input
+                      value={dept.id}
+                      onChange={(e) => handleUpdateOrganizationDepartment(dept.id, { id: e.target.value })}
+                      className="col-span-4 bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-[10px] font-bold uppercase tracking-widest outline-none focus:border-brand-500"
+                      placeholder="department id"
+                    />
+                    <label className="col-span-2 flex items-center justify-center gap-1 text-[9px] font-black uppercase tracking-widest text-slate-500">
+                      Active
+                      <input
+                        type="checkbox"
+                        checked={dept.active !== false}
+                        onChange={(e) => handleUpdateOrganizationDepartment(dept.id, { active: e.target.checked })}
+                        className="h-4 w-4 rounded border-slate-300"
+                      />
+                    </label>
+                    <button type="button" onClick={() => handleRemoveOrganizationDepartment(dept.id)} className="col-span-1 p-2 rounded-lg text-slate-300 hover:text-red-500 hover:bg-red-50 transition-all">
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
               {teamMembers.map(member => (
                 <div key={member.id} className="bg-white/95 backdrop-blur-sm p-5 rounded-[1.8rem] border border-slate-200 group hover:border-brand-500/30 hover:shadow-xl transition-all">
@@ -1782,6 +1983,7 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                       <div>
                         <h4 className="text-lg font-black italic uppercase tracking-tight text-slate-800 line-clamp-1">{member.name}</h4>
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{member.role} â€¢ EXT {member.extension}</p>
+                        <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{resolveDepartmentName(member.departmentId, member.department)}</p>
                       </div>
                     </div>
                     <button onClick={() => handleRemoveUser(member.id)} className="p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"><UserMinus size={16}/></button>
@@ -1805,6 +2007,22 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
                         className="h-4 w-4 rounded border-slate-300"
                       />
                     </label>
+                    <div>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Department</label>
+                      <select
+                        className="mt-2 w-full bg-slate-50 p-3 rounded-xl border border-slate-200 font-black text-[10px] uppercase tracking-widest outline-none focus:border-brand-500"
+                        value={member.departmentId || activeOrganizationDepartments[0]?.id || ''}
+                        onChange={(e) => {
+                          const departmentId = e.target.value;
+                          const departmentName = resolveDepartmentName(departmentId);
+                          handleUpdateMember(member.id, { departmentId, department: departmentName });
+                        }}
+                      >
+                        {activeOrganizationDepartments.map((dept) => (
+                          <option key={dept.id} value={dept.id}>{dept.name}</option>
+                        ))}
+                      </select>
+                    </div>
                     <div>
                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Allowed Numbers (one per line)</label>
                       <textarea
@@ -2201,7 +2419,25 @@ export const AdminSettings: React.FC<AdminSettingsProps> = ({ settings, onUpdate
       {/* INVITE MODAL */}
       {showInviteModal && (
         <div className="fixed inset-0 z-[110] bg-slate-900/60 backdrop-blur-md flex items-center justify-center p-6 animate-in fade-in">
-           <div className="bg-white rounded-[3.5rem] shadow-2xl w-full max-w-md p-12 border border-white/20 relative overflow-hidden text-center"><h3 className="text-3xl font-black italic tracking-tighter uppercase text-slate-800 mb-8">Add Team Member</h3><div className="space-y-6"><input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold text-center" placeholder="Member Name" value={newUser.name} onChange={e => setNewUser({...newUser, name: e.target.value})}/><input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold text-center" placeholder="Email Address" value={newUser.email} onChange={e => setNewUser({...newUser, email: e.target.value})}/><select className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-black uppercase tracking-widest text-xs" value={newUser.role} onChange={e => setNewUser({...newUser, role: e.target.value as any})}><option value={Role.AGENT}>Agent</option><option value={Role.SUPERVISOR}>Supervisor</option><option value={Role.ADMIN}>Admin</option></select><button onClick={handleAddUser} className="w-full py-6 bg-brand-600 text-white rounded-3xl font-black uppercase tracking-widest shadow-2xl">Add Member</button></div><button onClick={() => setShowInviteModal(false)} className="mt-6 text-slate-400 font-bold uppercase tracking-widest text-xs">Cancel</button></div>
+          <div className="bg-white rounded-[3.5rem] shadow-2xl w-full max-w-md p-12 border border-white/20 relative overflow-hidden text-center">
+            <h3 className="text-3xl font-black italic tracking-tighter uppercase text-slate-800 mb-8">Add Team Member</h3>
+            <div className="space-y-6">
+              <input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold text-center" placeholder="Member Name" value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })} />
+              <input className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-bold text-center" placeholder="Email Address" value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })} />
+              <select className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-black uppercase tracking-widest text-xs" value={newUser.role} onChange={e => setNewUser({ ...newUser, role: e.target.value as any })}>
+                <option value={Role.AGENT}>Agent</option>
+                <option value={Role.SUPERVISOR}>Supervisor</option>
+                <option value={Role.ADMIN}>Admin</option>
+              </select>
+              <select className="w-full bg-slate-50 p-5 rounded-2xl border-2 border-slate-100 font-black uppercase tracking-widest text-xs" value={newUser.departmentId} onChange={(e) => setNewUser({ ...newUser, departmentId: e.target.value })}>
+                {activeOrganizationDepartments.map((dept) => (
+                  <option key={dept.id} value={dept.id}>{dept.name}</option>
+                ))}
+              </select>
+              <button onClick={handleAddUser} className="w-full py-6 bg-brand-600 text-white rounded-3xl font-black uppercase tracking-widest shadow-2xl">Add Member</button>
+            </div>
+            <button onClick={() => setShowInviteModal(false)} className="mt-6 text-slate-400 font-bold uppercase tracking-widest text-xs">Cancel</button>
+          </div>
         </div>
       )}
     </div>

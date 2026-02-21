@@ -6,12 +6,25 @@ import { acceptInvite, fetchAuthPolicy } from '../services/authPolicyService';
 import { BrandLogo } from './BrandLogo';
 
 interface LoginScreenProps {
-  onLogin: (role: Role, profile?: { uid: string; email?: string | null; displayName?: string | null }) => void;
+  onLogin: (role: Role, profile?: { uid: string; email?: string | null; displayName?: string | null; departmentId?: string | null }) => void;
+  departments?: Array<{ id: string; name: string; active: boolean }>;
   externalMessage?: string | null;
   onClearExternalMessage?: () => void;
 }
 
-export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessage, onClearExternalMessage }) => {
+const FALLBACK_LOGIN_DEPARTMENTS = [
+  { id: 'dept_sales', name: 'Sales', active: true },
+  { id: 'dept_operations', name: 'Operations', active: true },
+  { id: 'dept_support', name: 'Support', active: true },
+  { id: 'dept_marketing', name: 'Marketing', active: true },
+  { id: 'dept_finance', name: 'Finance', active: true },
+  { id: 'dept_hr', name: 'HR', active: true },
+  { id: 'dept_engineering', name: 'Engineering', active: true },
+  { id: 'dept_other', name: 'Other', active: true },
+];
+const LOGIN_DEPARTMENT_PREF_KEY = 'connectai_login_department_id';
+
+export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, departments = FALLBACK_LOGIN_DEPARTMENTS, externalMessage, onClearExternalMessage }) => {
   const [mode, setMode] = useState<'login' | 'signup' | 'reset'>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -20,6 +33,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [name, setName] = useState('');
   const [role, setRole] = useState<Role>(Role.AGENT);
+  const activeDepartments = (Array.isArray(departments) ? departments : FALLBACK_LOGIN_DEPARTMENTS).filter((entry) => entry?.active !== false);
+  const [departmentId, setDepartmentId] = useState<string>(activeDepartments[0]?.id || FALLBACK_LOGIN_DEPARTMENTS[0].id);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +74,20 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
       if (!email) setEmail(stored);
     }
   }, []);
+
+  useEffect(() => {
+    const next = activeDepartments[0]?.id || FALLBACK_LOGIN_DEPARTMENTS[0].id;
+    const stored = localStorage.getItem(LOGIN_DEPARTMENT_PREF_KEY);
+    const preferred = stored && activeDepartments.some((dept) => dept.id === stored) ? stored : next;
+    if (!departmentId || !activeDepartments.some((dept) => dept.id === departmentId)) {
+      setDepartmentId(preferred);
+    }
+  }, [activeDepartments, departmentId]);
+
+  useEffect(() => {
+    if (!departmentId) return;
+    localStorage.setItem(LOGIN_DEPARTMENT_PREF_KEY, departmentId);
+  }, [departmentId]);
 
   useEffect(() => {
     if (resendCooldownSec <= 0) return;
@@ -213,7 +242,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
       // Resolve role: explicit selection overrides default if allowed, but invite role takes precedence
       const finalRole = policyCheck.policy?.invite?.role || role; 
       
-      onLogin(finalRole, { uid: user.uid, email: user.email, displayName: user.displayName });
+      onLogin(finalRole, { uid: user.uid, email: user.email, displayName: user.displayName, departmentId });
     } catch (err: any) {
       setError(friendlyError(err));
       setBusy(false);
@@ -290,7 +319,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
         await acceptInvite(policyCheck.policy.invite.id);
       }
       const finalRole = policyCheck.policy?.invite?.role || role;
-      onLogin(finalRole, { uid: user.uid, email: user.email, displayName: user.displayName });
+      onLogin(finalRole, { uid: user.uid, email: user.email, displayName: user.displayName, departmentId });
     } catch (err: any) {
       setError(friendlyError(err));
       setBusy(false);
@@ -441,6 +470,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin, externalMessa
                    <option value={Role.ADMIN}>Admin Console</option>
                  </select>
                </div>
+            )}
+
+            {mode !== 'reset' && (
+              <div className="flex items-center gap-3 px-4 py-3 border border-slate-200 rounded-xl focus-within:border-brand-500 transition-all">
+                <LayoutDashboard size={16} className="text-slate-400" />
+                <select
+                  className="w-full bg-transparent text-sm font-semibold text-slate-600 outline-none cursor-pointer"
+                  value={departmentId}
+                  onChange={(e) => setDepartmentId(e.target.value)}
+                >
+                  {activeDepartments.map((dept) => (
+                    <option key={dept.id} value={dept.id}>{dept.name}</option>
+                  ))}
+                </select>
+              </div>
             )}
 
             {mode === 'login' && (

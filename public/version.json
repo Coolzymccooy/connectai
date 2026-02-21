@@ -1,7 +1,7 @@
 {
   "version": "0.0.0",
-  "buildTime": "2026-02-20T05:01:21.141Z",
-  "gitSha": "6f94f77afc9907bbafc6140cf68595bbf0ce4151",
-  "gitBranch": "master",
+  "buildTime": "2026-02-21T13:43:44.962Z",
+  "gitSha": "4cd0a35f102de8ce8923cfe80e7eeec19f919039",
+  "gitBranch": "feature/p0-p1-stabilization-tenant-media-departments",
   "source": "local"
 }

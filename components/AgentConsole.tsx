@@ -8,7 +8,7 @@ import {
   ShieldCheck, Terminal, Download, ClipboardList, Database, FileJson, CheckCircle2,
   ExternalLink, Layers, Eye, Settings, VideoOff, MoreVertical
 } from 'lucide-react';
-import { Call, CallStatus, TranscriptSegment, AppSettings, Notification, Lead, User, AiSuggestion, AgentStatus, Message, CallAnalysis, CrmContact, Campaign, Conversation, Meeting, ToolAction, Attachment, Role } from '../types';
+import { Call, CallStatus, TranscriptSegment, AppSettings, Notification, Lead, User, AiSuggestion, AgentStatus, Message, CallAnalysis, CrmContact, Campaign, Conversation, Meeting, ToolAction, Attachment, Role, StartupGuardReport } from '../types';
 import { generateLeadBriefing, generateAiDraft, analyzeCallTranscript, extractToolActions, generateCampaignDraft, enrichLead, generateHelpAnswer } from '../services/geminiService';
 import { upsertCrmContact, fetchCrmContacts, fetchCrmDeals, createCrmTask } from '../services/crmService';
 import { updateCall as updateCallLog } from '../services/callLogService';
@@ -37,6 +37,7 @@ interface AgentConsoleProps {
   onUpdateMeetings: (m: Meeting[]) => void;
   user: User;
   isFirebaseConfigured?: boolean;
+  startupGuardReport?: StartupGuardReport | null;
   chatHealth?: { chatHealthy: boolean; callsHealthy?: boolean; offline?: boolean; lastError?: string };
   focusInboxRequest?: { conversationId: string; at: number } | null;
 }
@@ -117,7 +118,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   activeCall, agentStatus, onCompleteWrapUp, onEndActiveCall, settings, addNotification,
   leads = [], onOutboundCall, onInternalCall, onAddParticipant, history = [],
   campaigns, onUpdateCampaigns, onUpdateCampaign, onCreateLead, meetings, onUpdateMeetings, user, onJoinMeeting, isFirebaseConfigured = false, chatHealth
-  , focusInboxRequest
+  , startupGuardReport, focusInboxRequest
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const inboxScrollRef = useRef<HTMLDivElement>(null);
@@ -142,6 +143,31 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   });
   const aiCallIntelligenceEnabled = settings.aiCallIntelligence?.enabled !== false;
   const autoCrmWrapUpEnabled = aiCallIntelligenceEnabled && settings.aiCallIntelligence?.autoSyncCrm !== false;
+  const wrapUpStatusBadges = useMemo(() => {
+    const workerDisabled = Boolean(
+      startupGuardReport?.warnings?.some((warning) => warning.code === 'jobs.worker_disabled')
+    );
+    const transcriptReady = Boolean((lastEndedCall?.transcript || []).length > 0);
+    const summaryReady = Boolean(wrapUpAnalysis?.summary);
+    const crmSynced = Boolean(wrapUpActions.crmSynced || lastEndedCall?.crmData?.status === 'synced');
+    const statuses: Array<{ key: string; label: string; tone: 'warn' | 'ready' | 'idle' }> = [];
+    if (workerDisabled) {
+      statuses.push({ key: 'worker', label: 'Worker disabled', tone: 'warn' });
+    }
+    if (!summaryReady && transcriptReady && aiCallIntelligenceEnabled) {
+      statuses.push({ key: 'pending', label: 'Pending transcription', tone: 'idle' });
+    }
+    if (summaryReady) {
+      statuses.push({ key: 'summary', label: 'Summary ready', tone: 'ready' });
+    }
+    if (crmSynced) {
+      statuses.push({ key: 'crm', label: 'CRM synced', tone: 'ready' });
+    }
+    if (!statuses.length) {
+      statuses.push({ key: 'waiting', label: 'Wrap-up in progress', tone: 'idle' });
+    }
+    return statuses;
+  }, [startupGuardReport?.warnings, lastEndedCall?.transcript, lastEndedCall?.crmData?.status, wrapUpAnalysis?.summary, wrapUpActions.crmSynced, aiCallIntelligenceEnabled]);
   const autoCrmSyncInFlightRef = useRef<Record<string, boolean>>({});
   const buildWrapUpActionsForCall = useCallback((call?: Call | null) => ({
     qaApproved: false,
@@ -2036,6 +2062,25 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                      </div>
                      
                      <div className="flex-1 p-8">
+                        <div className="mb-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                          <p className="text-[9px] font-black uppercase tracking-[0.2em] text-slate-500 mb-3">Wrap-Up Status</p>
+                          <div className="flex flex-wrap gap-2">
+                            {wrapUpStatusBadges.map((status) => (
+                              <span
+                                key={status.key}
+                                className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest ${
+                                  status.tone === 'ready'
+                                    ? 'bg-green-100 text-green-700 border border-green-200'
+                                    : status.tone === 'warn'
+                                      ? 'bg-rose-100 text-rose-700 border border-rose-200'
+                                      : 'bg-slate-200 text-slate-700 border border-slate-300'
+                                }`}
+                              >
+                                {status.label}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
                         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
                            <div className="col-span-12 lg:col-span-7 space-y-8">
                               <section>

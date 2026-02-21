@@ -33,12 +33,30 @@ const stripSettingsMeta = (settings: AppSettings) => {
   return payload as AppSettings;
 };
 
+let inFlightSave: Promise<AppSettings> | null = null;
+let queuedSavePayload: AppSettings | null = null;
+
 export const saveSettingsApi = async (settings: AppSettings) => {
   const payload = stripSettingsMeta(settings);
   writeCachedSettings(payload);
-  const saved = await apiPut('/api/settings', payload);
-  writeCachedSettings(saved);
-  return saved;
+  queuedSavePayload = payload;
+  if (inFlightSave) return inFlightSave;
+
+  const runner = async () => {
+    let latestSaved: AppSettings = payload;
+    while (queuedSavePayload) {
+      const nextPayload = queuedSavePayload;
+      queuedSavePayload = null;
+      latestSaved = await apiPut('/api/settings', nextPayload);
+      writeCachedSettings(latestSaved);
+    }
+    return latestSaved;
+  };
+
+  inFlightSave = runner().finally(() => {
+    inFlightSave = null;
+  });
+  return inFlightSave;
 };
 
 export const fetchSettingsApi = async (): Promise<AppSettings> => {

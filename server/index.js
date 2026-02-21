@@ -74,6 +74,8 @@ const httpServer = http.createServer(app);
 app.set('trust proxy', 1);
 const isDevEnv = process.env.NODE_ENV !== 'production';
 const isJobWorkerInlineEnabled = String(process.env.RUN_JOB_WORKER_INLINE || 'true').toLowerCase() !== 'false';
+const apiRateLimitWindowMs = Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
+const apiRateLimitMax = Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 6000));
 
 // --- GLOBAL SECURITY & PERFORMANCE ---
 app.use(helmet()); // Secure HTTP headers
@@ -86,8 +88,8 @@ app.use(cors({
 
 // --- RATE LIMITING (DDoS Protection) ---
 const limiter = rateLimit({
-  windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000),
-  max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 2000)),
+  windowMs: apiRateLimitWindowMs,
+  max: apiRateLimitMax,
   standardHeaders: true,
   legacyHeaders: false,
   skip: (req) => req.path && (req.path.startsWith('/auth/policy') || req.path === '/startup-guard'),
@@ -113,12 +115,23 @@ app.use('/api/rag', aiLimiter);
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: '2mb' }));
 
-const peerServerPathRaw = (process.env.PEER_SERVER_PATH || '/peerjs').trim() || '/peerjs';
-const peerServerPath = peerServerPathRaw.startsWith('/') ? peerServerPathRaw : `/${peerServerPathRaw}`;
+const normalizePeerPath = (value) => {
+  const raw = String(value || '/peerjs').trim() || '/peerjs';
+  const withLeading = raw.startsWith('/') ? raw : `/${raw}`;
+  const collapsed = withLeading.replace(/\/{2,}/g, '/');
+  if (collapsed === '/') return '/peerjs';
+  return collapsed.replace(/\/+$/, '') || '/peerjs';
+};
+const configuredPeerServerPath = normalizePeerPath(process.env.PEER_SERVER_PATH || '/peerjs');
+const peerEndpointPath = configuredPeerServerPath.endsWith('/peerjs') ? configuredPeerServerPath : `${configuredPeerServerPath}/peerjs`;
+const peerPrefixPath = peerEndpointPath.slice(0, -('/peerjs'.length)) || '/';
+const peerServerApiPath = peerPrefixPath.endsWith('/') ? peerPrefixPath : `${peerPrefixPath}/`;
+const peerSecure = String(process.env.PEER_SERVER_SECURE || (isDevEnv ? 'false' : 'true')).toLowerCase() !== 'false';
+const peerWsExample = `${peerSecure ? 'wss' : 'ws'}://HOST${peerEndpointPath}`;
 const peerServer = ExpressPeerServer(httpServer, {
   proxied: true,
   allow_discovery: false,
-  path: peerServerPath,
+  path: peerServerApiPath,
   pingInterval: Number(process.env.PEER_PING_INTERVAL_MS || 5000),
 });
 peerServer.on('connection', (client) => {
@@ -129,9 +142,9 @@ peerServer.on('disconnect', (client) => {
   const id = client?.getId?.() || client?.id || 'unknown';
   log('info', 'peer.disconnected', { peerId: id });
 });
-// Mount at root so the configured peer path remains a single segment (e.g. /peerjs),
-// avoiding accidental double-prefix routes such as /peerjs/peerjs.
-app.use('/', peerServer);
+// Keep PeerJS mounted at root so the effective websocket endpoint
+// is controlled by `path` above (e.g. /peerjs).
+app.use(peerServer);
 
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || 'default-tenant';
 const AUTH_MODE = String(process.env.AUTH_MODE || 'dev').toLowerCase() === 'strict' ? 'strict' : 'dev';
@@ -413,6 +426,18 @@ const normalizeSettingsShape = (input = {}) => {
     autoTenantByDomain: false,
     domainTenantMap: [],
   };
+  const fallbackOrganization = {
+    departments: [
+      { id: 'dept_sales', name: 'Sales', active: true },
+      { id: 'dept_operations', name: 'Operations', active: true },
+      { id: 'dept_support', name: 'Support', active: true },
+      { id: 'dept_marketing', name: 'Marketing', active: true },
+      { id: 'dept_finance', name: 'Finance', active: true },
+      { id: 'dept_hr', name: 'HR', active: true },
+      { id: 'dept_engineering', name: 'Engineering', active: true },
+      { id: 'dept_other', name: 'Other', active: true },
+    ],
+  };
   const fallbackAiCallIntelligence = {
     enabled: true,
     autoSyncCrm: true,
@@ -454,6 +479,19 @@ const normalizeSettingsShape = (input = {}) => {
     auth: {
       ...fallbackAuth,
       ...(input?.auth || {}),
+    },
+    organization: {
+      ...fallbackOrganization,
+      ...(input?.organization || {}),
+      departments: Array.isArray(input?.organization?.departments)
+        ? input.organization.departments
+          .map((dept, idx) => ({
+            id: String(dept?.id || `dept_${idx + 1}`).trim(),
+            name: String(dept?.name || '').trim(),
+            active: dept?.active !== false,
+          }))
+          .filter((dept) => dept.id && dept.name)
+        : fallbackOrganization.departments,
     },
     aiCallIntelligence: {
       ...fallbackAiCallIntelligence,
@@ -750,13 +788,13 @@ const buildStartupGuardWarnings = (authSettings = {}) => {
     });
   }
 
-  const configuredApiLimit = Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 2000));
-  if (!isDevEnv && configuredApiLimit < 1000) {
+  const configuredApiLimit = Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 6000));
+  if (!isDevEnv && configuredApiLimit < 2500) {
     warnings.push({
       code: 'api.rate_limit_low',
       severity: 'warn',
       message: `API_RATE_LIMIT_MAX is low for active-call polling (${configuredApiLimit}/15m).`,
-      detail: 'Increase API_RATE_LIMIT_MAX (for example 1500-3000) to avoid false-positive throttling during calls.',
+      detail: 'Increase API_RATE_LIMIT_MAX (for example 3000-6000) to avoid false-positive throttling during calls.',
     });
   }
 
@@ -1632,6 +1670,18 @@ const defaultSettings = {
     autoTenantByDomain: false,
     domainTenantMap: [],
   },
+  organization: {
+    departments: [
+      { id: 'dept_sales', name: 'Sales', active: true },
+      { id: 'dept_operations', name: 'Operations', active: true },
+      { id: 'dept_support', name: 'Support', active: true },
+      { id: 'dept_marketing', name: 'Marketing', active: true },
+      { id: 'dept_finance', name: 'Finance', active: true },
+      { id: 'dept_hr', name: 'HR', active: true },
+      { id: 'dept_engineering', name: 'Engineering', active: true },
+      { id: 'dept_other', name: 'Other', active: true },
+    ],
+  },
   aiCallIntelligence: {
     enabled: true,
     autoSyncCrm: true,
@@ -2129,10 +2179,20 @@ app.get('/api/health/deps', async (req, res) => {
     },
     requestMetrics: summarizeLatencies(),
     rateLimits: {
-      api: { windowMs: Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000), max: Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 2000)) },
+      api: { windowMs: apiRateLimitWindowMs, max: apiRateLimitMax },
       twilio: { windowMs: Number(process.env.TWILIO_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.TWILIO_RATE_LIMIT_MAX || (isDevEnv ? 800 : 250)) },
       ai: { windowMs: Number(process.env.AI_RATE_LIMIT_WINDOW_MS || 60 * 1000), max: Number(process.env.AI_RATE_LIMIT_MAX || (isDevEnv ? 240 : 120)) },
     },
+  });
+});
+
+app.get('/api/health/peer', (_req, res) => {
+  res.json({
+    ok: true,
+    expectedPath: peerEndpointPath,
+    peerMounted: true,
+    wsUrlExample: peerWsExample,
+    serverTime: Date.now(),
   });
 });
 

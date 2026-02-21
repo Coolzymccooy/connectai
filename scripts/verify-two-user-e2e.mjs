@@ -39,6 +39,22 @@ const waitFor = async (predicate, timeoutMs, stepMs = 300, label = 'condition') 
   throw new Error(`Timeout after ${timeoutMs}ms waiting for ${label}`);
 };
 
+const assertPeerEndpointHealth = async () => {
+  const normalizedBase = String(baseUrl || '').replace(/\/+$/, '');
+  const healthRes = await fetch(`${normalizedBase}/api/health/peer`);
+  if (!healthRes.ok) {
+    throw new Error(`peer health endpoint failed: ${healthRes.status}`);
+  }
+  const peerHealth = await healthRes.json();
+  assert.equal(Boolean(peerHealth?.ok), true, 'peer health should report ok');
+  const expectedPath = String(peerHealth?.expectedPath || '/peerjs').trim() || '/peerjs';
+  const idRes = await fetch(`${normalizedBase}${expectedPath}/id`);
+  const peerId = await idRes.text();
+  assert.equal(idRes.ok, true, `peer id endpoint should respond on ${expectedPath}`);
+  assert.ok(String(peerId || '').trim().length > 3, `peer id endpoint returned invalid id on ${expectedPath}`);
+  console.log(`[verify] PASS peer_endpoint path=${expectedPath}`);
+};
+
 const decodeFirestoreValue = (value) => {
   if (!value || typeof value !== 'object') return undefined;
   if ('stringValue' in value) return value.stringValue;
@@ -358,6 +374,7 @@ const clearClientActiveState = async (page, label) => {
 };
 
 const run = async () => {
+  await assertPeerEndpointHealth();
   const { agent, supervisor } = readDemoUsers();
   const marker = Date.now();
   const dmText = `E2E DM ${marker}`;
