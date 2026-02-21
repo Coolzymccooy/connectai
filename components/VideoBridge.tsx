@@ -212,6 +212,9 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const callParticipantIdentityKeysRef = useRef<string[]>([]);
   const screenShareAttemptingRef = useRef(false);
   const screenSharePromptCooldownRef = useRef(0);
+  const screenShareStopPendingRef = useRef(false);
+  const screenShareDesiredActiveRef = useRef(false);
+  const screenShareToggleSyncPendingRef = useRef(false);
   
   // Feature States
   const [intelligence, setIntelligence] = useState<{ text: string, links: {title: string, uri: string}[] } | null>(null);
@@ -991,26 +994,56 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     });
   }, []);
 
-  const stopScreenShare = useCallback(() => {
-    if (screenStream) {
-      screenStream.getTracks().forEach(t => t.stop());
+  const syncScreenShareCallState = useCallback(() => {
+    if (!onToggleMedia) return;
+    if (screenShareToggleSyncPendingRef.current) return;
+    screenShareToggleSyncPendingRef.current = true;
+    try {
+      const maybePromise = onToggleMedia('screen') as unknown as Promise<unknown>;
+      if (maybePromise && typeof (maybePromise as any).finally === 'function') {
+        (maybePromise as any).finally(() => {
+          screenShareToggleSyncPendingRef.current = false;
+        });
+        return;
+      }
+    } catch {
+      // fallback timeout reset below
+    }
+    window.setTimeout(() => {
+      screenShareToggleSyncPendingRef.current = false;
+    }, 300);
+  }, [onToggleMedia]);
+
+  const stopScreenShare = useCallback((opts?: { syncCallState?: boolean; suppressPromptMs?: number }) => {
+    if (screenShareStopPendingRef.current) return;
+    screenShareStopPendingRef.current = true;
+    screenSharePromptCooldownRef.current = Date.now() + (opts?.suppressPromptMs ?? 4500);
+    const stream = screenStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((t) => {
+        t.onended = null;
+        try { t.stop(); } catch {}
+      });
     }
     setScreenStream(null);
-    const cameraTrack = localStream?.getVideoTracks()[0] || null;
+    const cameraTrack = localStreamRef.current?.getVideoTracks()[0] || null;
     if (cameraTrack) replaceOutgoingVideoTrack(cameraTrack);
-    
-    if (activeCall.isScreenSharing && activeCall.screenShareOwnerId === currentUser.id && onToggleMedia) {
-        onToggleMedia('screen');
+    if (opts?.syncCallState && activeCall.isScreenSharing && activeCall.screenShareOwnerId === currentUser.id) {
+      syncScreenShareCallState();
     }
-  }, [screenStream, localStream, replaceOutgoingVideoTrack, activeCall.isScreenSharing, activeCall.screenShareOwnerId, currentUser.id, onToggleMedia]);
+    window.setTimeout(() => {
+      screenShareStopPendingRef.current = false;
+    }, 250);
+  }, [replaceOutgoingVideoTrack, activeCall.isScreenSharing, activeCall.screenShareOwnerId, currentUser.id, syncScreenShareCallState]);
 
   const startScreenShare = useCallback(async () => {
     try {
       const now = Date.now();
       if (activeCall.screenShareOwnerId && activeCall.screenShareOwnerId !== currentUser.id) return;
+      if (screenShareStopPendingRef.current) return;
       if (screenShareAttemptingRef.current) return;
       if (now < screenSharePromptCooldownRef.current) return;
-      if (screenStream) return;
+      if (screenStreamRef.current) return;
       screenShareAttemptingRef.current = true;
       const stream = await getDisplayMediaSafe({ 
           video: { displaySurface: 'monitor' }, 
@@ -1018,37 +1051,40 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       });
       const videoTrack = stream.getVideoTracks()[0];
       
-      if (!videoTrack) return;
+      if (!videoTrack) {
+        stream.getTracks().forEach((track) => {
+          try { track.stop(); } catch {}
+        });
+        return;
+      }
       
-      videoTrack.onended = () => stopScreenShare();
+      videoTrack.onended = () => stopScreenShare({ syncCallState: true });
       setScreenStream(stream);
       replaceOutgoingVideoTrack(videoTrack);
-      
-      // Ensure we explicitly set active state
-      if (!activeCall.isScreenSharing) {
-        onToggleMedia('screen');
-      }
 
     } catch (err) {
       console.error('Screen share rejected:', err);
       // Avoid re-prompt loops when user cancels browser picker.
-      screenSharePromptCooldownRef.current = Date.now() + 4000;
+      screenSharePromptCooldownRef.current = Date.now() + 5000;
       if (activeCall.isScreenSharing && activeCall.screenShareOwnerId === currentUser.id) {
-        onToggleMedia('screen');
+        syncScreenShareCallState();
       }
     } finally {
       screenShareAttemptingRef.current = false;
     }
-  }, [replaceOutgoingVideoTrack, stopScreenShare, activeCall.isScreenSharing, activeCall.screenShareOwnerId, onToggleMedia, screenStream, currentUser.id, getDisplayMediaSafe]);
+  }, [replaceOutgoingVideoTrack, stopScreenShare, activeCall.isScreenSharing, activeCall.screenShareOwnerId, currentUser.id, getDisplayMediaSafe, syncScreenShareCallState]);
 
   useEffect(() => {
     const isLocalShareOwner = activeCall.screenShareOwnerId === currentUser.id;
-    if (activeCall.isScreenSharing && isLocalShareOwner && !screenStream) {
+    const shouldShareLocally = activeCall.isScreenSharing && isLocalShareOwner;
+    const previous = screenShareDesiredActiveRef.current;
+    screenShareDesiredActiveRef.current = shouldShareLocally;
+    if (shouldShareLocally && !previous) {
       startScreenShare();
-    } else if ((!activeCall.isScreenSharing || !isLocalShareOwner) && screenStream) {
-      stopScreenShare();
+    } else if (!shouldShareLocally && previous) {
+      stopScreenShare({ syncCallState: false, suppressPromptMs: 1200 });
     }
-  }, [activeCall.isScreenSharing, activeCall.screenShareOwnerId, currentUser.id, startScreenShare, stopScreenShare, screenStream]);
+  }, [activeCall.isScreenSharing, activeCall.screenShareOwnerId, currentUser.id, startScreenShare, stopScreenShare]);
 
   // --- REACTIONS ---
   const triggerReaction = (emoji: string) => {
@@ -1854,7 +1890,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
             <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 bg-red-600/90 backdrop-blur-md px-6 py-2 rounded-full flex items-center gap-3 shadow-2xl border border-red-400/30">
                 <Monitor size={16} className="animate-pulse"/>
                 <span className="text-xs font-bold uppercase tracking-wider">You are presenting</span>
-                <button onClick={stopScreenShare} className="bg-white text-red-600 px-3 py-1 rounded-full text-[10px] font-black hover:bg-gray-100 transition-colors">STOP</button>
+                <button onClick={() => stopScreenShare({ syncCallState: true })} className="bg-white text-red-600 px-3 py-1 rounded-full text-[10px] font-black hover:bg-gray-100 transition-colors">STOP</button>
             </div>
         )}
 
