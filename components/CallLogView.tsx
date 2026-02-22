@@ -1,5 +1,5 @@
 ﻿
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Play, Download, Search, Filter, Calendar, ArrowUpRight, ArrowDownLeft, ArrowRightLeft, Clock, User, Phone } from 'lucide-react';
 import { Call, CallDirection, CallStatus } from '../types';
 import { fetchCallLogs, CallLogFilters } from '../services/callLogService';
@@ -18,6 +18,8 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
     const [searchText, setSearchText] = useState('');
     const [minDuration, setMinDuration] = useState('');
     const [playbackUrl, setPlaybackUrl] = useState<string | null>(null);
+    const [playbackError, setPlaybackError] = useState<string | null>(null);
+    const playbackAudioRef = useRef<HTMLAudioElement | null>(null);
 
     const fetchLogs = async () => {
         setLoading(true);
@@ -51,18 +53,32 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
         fetchLogs();
     }, [filters, searchText, minDuration]);
 
+    useEffect(() => {
+        if (!playbackUrl || !playbackAudioRef.current) return;
+        const audioEl = playbackAudioRef.current;
+        audioEl.muted = false;
+        audioEl.volume = 1;
+        audioEl.play().catch(() => {
+            setPlaybackError('Browser blocked autoplay. Press play on the recorder control.');
+        });
+    }, [playbackUrl]);
+
     const handleApplyFilter = (key: keyof CallLogFilters, value: any) => {
         setFilters(prev => ({ ...prev, [key]: value }));
     };
 
     const extractRecordingId = (call: Call) => {
         if (call.recordingId) return call.recordingId;
-        if (!call.recordingUrl) return '';
+        if (!call.recordingUrl) return call.status === CallStatus.ENDED ? call.id : '';
         const tokenMatch = call.recordingUrl.match(/[?&]token=([^&]+)/);
-        if (!tokenMatch) return '';
+        if (!tokenMatch) {
+            return call.status === CallStatus.ENDED ? call.id : '';
+        }
         const token = tokenMatch[1];
         const parts = token.split('.');
-        return parts.length >= 2 ? parts[1] : '';
+        const extracted = parts.length >= 2 ? parts[1] : '';
+        if (extracted) return extracted;
+        return call.status === CallStatus.ENDED ? call.id : '';
     };
 
     const resolveRecordingUrl = async (call: Call) => {
@@ -80,6 +96,7 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                 return;
             }
             setPlaybackUrl(url);
+            setPlaybackError(null);
         } catch {
             alert("Recording access denied or unavailable.");
         }
@@ -353,9 +370,19 @@ export const CallLogView: React.FC<CallLogViewProps> = ({ currentUser }) => {
                     <div className="flex-1">
                         <h4 className="text-white font-bold text-sm">Playing Recording</h4>
                         <p className="text-slate-400 text-xs truncate">{playbackUrl}</p>
+                        {playbackError && <p className="text-amber-300 text-[11px] mt-1">{playbackError}</p>}
                     </div>
-                    <audio controls src={playbackUrl} autoPlay className="h-8 w-64" />
-                    <button onClick={() => setPlaybackUrl(null)} className="text-slate-400 hover:text-white px-4">Close</button>
+                    <audio
+                        ref={playbackAudioRef}
+                        controls
+                        src={playbackUrl}
+                        autoPlay
+                        className="h-8 w-64"
+                        preload="metadata"
+                        onPlay={() => setPlaybackError(null)}
+                        onError={() => setPlaybackError('Recording stream failed. Refresh token and try again.')}
+                    />
+                    <button onClick={() => { setPlaybackUrl(null); setPlaybackError(null); }} className="text-slate-400 hover:text-white px-4">Close</button>
                 </div>
             )}
         </div>

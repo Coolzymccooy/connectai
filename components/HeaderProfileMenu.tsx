@@ -69,10 +69,25 @@ export const HeaderProfileMenu: React.FC<HeaderProfileMenuProps> = ({ user, stat
   const stopMicTest = () => {
     if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
     if (streamRef.current) streamRef.current.getTracks().forEach(track => track.stop());
-    if (audioContextRef.current) audioContextRef.current.close();
+    if (sourceRef.current) sourceRef.current.disconnect();
+    if (audioContextRef.current) audioContextRef.current.close().catch(() => {});
+    streamRef.current = null;
+    sourceRef.current = null;
+    analyserRef.current = null;
+    audioContextRef.current = null;
+    animationFrameRef.current = null;
     setIsTestingMic(false);
     setAudioLevel(0);
   };
+
+  useEffect(() => {
+    const forceStop = () => stopMicTest();
+    window.addEventListener('connectai:force-media-stop', forceStop);
+    return () => {
+      window.removeEventListener('connectai:force-media-stop', forceStop);
+      stopMicTest();
+    };
+  }, []);
 
   const playTestSound = () => {
     const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();

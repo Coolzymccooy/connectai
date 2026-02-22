@@ -31,6 +31,16 @@ export interface TranscriptSegment {
   isFinal?: boolean;
 }
 
+export type CallTranscriptionStatus = 'pending' | 'processing' | 'ready' | 'unavailable';
+
+export interface CallTranscriptionLifecycle {
+  status: CallTranscriptionStatus;
+  attempts: number;
+  lastTriedAt?: number;
+  sourceRecordingId?: string;
+  reason?: string;
+}
+
 export interface CallAnalysis {
   summary: string;
   sentimentScore: number;
@@ -89,6 +99,7 @@ export interface Call {
   emailSynced?: boolean;
   isRecording?: boolean;
   transcriptionEnabled?: boolean;
+  transcription?: CallTranscriptionLifecycle;
   expiresAt?: number;
   piiRedacted?: boolean;
   recordingUrl?: string;

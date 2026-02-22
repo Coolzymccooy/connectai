@@ -821,6 +821,25 @@ const App: React.FC = () => {
     };
   }, []);
 
+  const releaseBrowserMediaHandles = useCallback(() => {
+    try {
+      window.dispatchEvent(new CustomEvent('connectai:force-media-stop'));
+    } catch {
+      // noop
+    }
+    if (typeof document === 'undefined') return;
+    document.querySelectorAll('audio,video').forEach((node) => {
+      const mediaEl = node as HTMLMediaElement & { srcObject?: MediaStream | null };
+      const stream = mediaEl.srcObject;
+      if (stream && typeof stream.getTracks === 'function') {
+        stream.getTracks().forEach((track) => {
+          try { track.stop(); } catch {}
+        });
+        try { mediaEl.srcObject = null; } catch {}
+      }
+    });
+  }, []);
+
   // Activity Tracking: 5 minutes idle -> sign out
   const resetIdleTimer = useCallback(() => {
     if (!currentUser || activeCall) return;
@@ -835,9 +854,12 @@ const App: React.FC = () => {
       if (activeCall) return;
       setAuthNotice('Session expired due to inactivity.');
       setAgentStatus(AgentStatus.OFFLINE);
+      releaseBrowserMediaHandles();
+      try { liveService?.stop(); } catch {}
+      setLiveService(null);
       signOut(auth).catch(() => {}).finally(() => setCurrentUser(null));
     }, 5 * 60 * 1000); // 5 minutes
-  }, [currentUser, activeCall, agentStatus]);
+  }, [currentUser, activeCall, agentStatus, releaseBrowserMediaHandles, liveService]);
 
   useEffect(() => {
     window.addEventListener('mousemove', resetIdleTimer);
@@ -2081,6 +2103,7 @@ const App: React.FC = () => {
     liveService?.stop();
     setLiveService(null);
     setAudioLevel(0);
+    releaseBrowserMediaHandles();
     setIncomingCallBanner(null);
     const callToEnd = activeCall;
     if (callToEnd) {
@@ -2103,6 +2126,21 @@ const App: React.FC = () => {
       persistCall(finalCall).catch(() => {});
     }
   };
+
+  const handleUserSignOut = useCallback(async (clearUnverified = false) => {
+    if (activeCall) {
+      await handleHangup().catch(() => {});
+    } else {
+      try { liveService?.stop(); } catch {}
+      setLiveService(null);
+      setAudioLevel(0);
+      releaseBrowserMediaHandles();
+      setIncomingCallBanner(null);
+    }
+    await signOut(auth).catch(() => {});
+    if (clearUnverified) setIsUnverified(false);
+    setCurrentUser(null);
+  }, [activeCall, handleHangup, liveService, releaseBrowserMediaHandles]);
 
   const handleSoftphoneCallEnded = async (endedCall: Call) => {
     setCallHistory(h => [endedCall, ...h]);
@@ -2452,7 +2490,7 @@ const App: React.FC = () => {
                 <button onClick={() => window.location.reload()} className="w-full py-4 bg-slate-900 text-white rounded-2xl text-[11px] font-black uppercase tracking-widest hover:bg-slate-800 transition-all shadow-lg">
                     I've Verified My Email
                 </button>
-                <button onClick={() => signOut(auth).then(() => { setIsUnverified(false); setCurrentUser(null); })} className="mt-4 text-slate-400 text-xs font-bold uppercase tracking-widest hover:text-slate-600">
+                <button onClick={() => handleUserSignOut(true)} className="mt-4 text-slate-400 text-xs font-bold uppercase tracking-widest hover:text-slate-600">
                     Sign Out
                 </button>
             </div>
@@ -2530,7 +2568,7 @@ const App: React.FC = () => {
             {(currentUser.role === Role.ADMIN) && <button onClick={() => { minimizeCallForNavigation(); setView('admin'); }} className={`p-2.5 rounded-xl transition-all ${view === 'admin' ? 'bg-white/10 text-white' : 'text-slate-400 hover:text-white'}`} title="Admin"><Settings size={20} /></button>}
           </nav>
 
-          <button onClick={() => signOut(auth).then(() => setCurrentUser(null))} className="text-slate-400 hover:text-white p-2.5 md:mt-auto md:mb-4"><LogOut size={20} /></button>
+          <button onClick={() => handleUserSignOut()} className="text-slate-400 hover:text-white p-2.5 md:mt-auto md:mb-4"><LogOut size={20} /></button>
         </div>
       )}
       <div className="flex-1 flex flex-col h-full overflow-hidden relative">
@@ -2547,7 +2585,7 @@ const App: React.FC = () => {
                 </span>
               )}
             </div>
-            <HeaderProfileMenu user={currentUser} status={agentStatus} onStatusChange={setAgentStatus} onLogout={() => signOut(auth).then(() => setCurrentUser(null))} onUpdateUser={updateUserProfile} />
+            <HeaderProfileMenu user={currentUser} status={agentStatus} onStatusChange={setAgentStatus} onLogout={() => handleUserSignOut()} onUpdateUser={updateUserProfile} />
           </header>
         )}
         {hasStartupWarnings && (

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 
 const baseUrl = process.env.CONNECTAI_BASE_URL || 'http://127.0.0.1:3090';
-const callStabilityWindowMs = Number(process.env.CONNECTAI_CALL_STABILITY_MS || 0);
+const callStabilityWindowMs = Number(process.env.CONNECTAI_CALL_STABILITY_MS || 20000);
 const debugPeerLogs = String(process.env.CONNECTAI_DEBUG_PEER || '').trim() === '1';
 const skipAudioAssert = String(process.env.CONNECTAI_SKIP_AUDIO_ASSERT || '').trim() === '1';
 
@@ -232,10 +232,19 @@ const focusConversationWithMessage = async (page, contactHint, messageText, time
   return false;
 };
 
-const placeInboxCall = async (page) => {
-  const header = page.locator('div.p-6.border-b.bg-slate-900').first();
-  await header.waitFor({ timeout: 10000 });
-  await header.locator('button').first().click();
+const placeTeamVideoCall = async (page, teammateName) => {
+  await page.getByRole('button', { name: 'TEAM' }).click();
+  const searchInput = page.getByPlaceholder('Search roster...');
+  await searchInput.waitFor({ timeout: 15000 });
+  await searchInput.fill(teammateName);
+  let videoButton = page.locator('button:not([disabled])').filter({ hasText: /^Video Call$/i }).first();
+  try {
+    await videoButton.waitFor({ timeout: 8000 });
+  } catch {
+    videoButton = page.locator('button:not([disabled])').filter({ hasText: /^Video$/i }).first();
+    await videoButton.waitFor({ timeout: 8000 });
+  }
+  await videoButton.click();
 };
 
 const acceptIncomingCall = async (page) => {
@@ -262,6 +271,20 @@ const waitForRemoteAudioTrack = async (page, label) => {
       return Array.isArray(tracks) && tracks.length > 0;
     });
   }), 45000, 500, `${label} remote audio track`);
+};
+
+const waitForRemoteVideoTrack = async (page, label) => {
+  await waitFor(async () => page.evaluate(() => {
+    const nodes = Array.from(document.querySelectorAll('video'));
+    return nodes.some((node) => {
+      const stream = node.srcObject;
+      if (!stream || typeof stream.getVideoTracks !== 'function') return false;
+      const tracks = stream.getVideoTracks();
+      if (!Array.isArray(tracks) || tracks.length === 0) return false;
+      if (node.muted) return false;
+      return tracks.some((track) => track.readyState === 'live');
+    });
+  }), 45000, 500, `${label} remote video track`);
 };
 
 const verifyCallStability = async (page1, page2, durationMs) => {
@@ -291,6 +314,27 @@ const verifyCallStability = async (page1, page2, durationMs) => {
     });
     if (!senderAudio || !receiverAudio) {
       throw new Error(`remote audio track missing during stability window at ${Date.now() - startedAt}ms`);
+    }
+    const senderVideo = await page1.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll('video'));
+      return nodes.some((node) => {
+        const stream = node.srcObject;
+        if (!stream || typeof stream.getVideoTracks !== 'function') return false;
+        if (node.muted) return false;
+        return stream.getVideoTracks().some((track) => track.readyState === 'live');
+      });
+    });
+    const receiverVideo = await page2.evaluate(() => {
+      const nodes = Array.from(document.querySelectorAll('video'));
+      return nodes.some((node) => {
+        const stream = node.srcObject;
+        if (!stream || typeof stream.getVideoTracks !== 'function') return false;
+        if (node.muted) return false;
+        return stream.getVideoTracks().some((track) => track.readyState === 'live');
+      });
+    });
+    if (!senderVideo || !receiverVideo) {
+      throw new Error(`remote video track missing during stability window at ${Date.now() - startedAt}ms`);
     }
     await sleep(3000);
   }
@@ -506,18 +550,20 @@ const run = async () => {
     assert.ok(dmCountUser2 >= 1, 'receiver can read first DM from Firestore');
     assert.ok(secondDmCountUser2 >= 1, 'receiver can read follow-up DM from Firestore');
 
-    console.log('[verify] step: inbox call');
+    console.log('[verify] step: internal video call');
     await clearClientActiveState(page1, 'sender-before-call');
     await clearClientActiveState(page2, 'receiver-before-call');
     await clearActiveCalls(page1, 'sender-before-call');
     await clearActiveCalls(page2, 'receiver-before-call');
     await endAnyLiveCall(page1);
     await endAnyLiveCall(page2);
-    await placeInboxCall(page1);
+    await placeTeamVideoCall(page1, 'olua-supervisor1');
     await page2.getByText(/Incoming (Video|Voice) Call/i).waitFor({ timeout: 30000 });
     await acceptIncomingCall(page2);
     await waitForMeetingActiveUi(page1, 'sender');
     await waitForMeetingActiveUi(page2, 'receiver');
+    await waitForRemoteVideoTrack(page1, 'sender');
+    await waitForRemoteVideoTrack(page2, 'receiver');
     if (!skipAudioAssert) {
       await waitForRemoteAudioTrack(page1, 'sender');
       await waitForRemoteAudioTrack(page2, 'receiver');
@@ -609,8 +655,9 @@ const run = async () => {
 
     console.log(`[verify] PASS dm_once sender=${dmCountUser1} receiver=${dmCountUser2}`);
     console.log(`[verify] PASS bootstrap_once count=${introCountUser1}`);
-    console.log('[verify] PASS inbox_call incoming banner detected on target user');
-    console.log('[verify] PASS inbox_call accepted and active on both users');
+    console.log('[verify] PASS internal_video_call incoming banner detected on target user');
+    console.log('[verify] PASS internal_video_call accepted and active on both users');
+    console.log('[verify] PASS call_video_track remote video tracks detected on both users');
     if (skipAudioAssert) {
       console.log('[verify] SKIP call_audio_track assertion disabled via CONNECTAI_SKIP_AUDIO_ASSERT=1');
     } else {

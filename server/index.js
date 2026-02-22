@@ -76,6 +76,18 @@ const isDevEnv = process.env.NODE_ENV !== 'production';
 const isJobWorkerInlineEnabled = String(process.env.RUN_JOB_WORKER_INLINE || 'true').toLowerCase() !== 'false';
 const apiRateLimitWindowMs = Number(process.env.API_RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
 const apiRateLimitMax = Number(process.env.API_RATE_LIMIT_MAX || (isDevEnv ? 10000 : 6000));
+const maxTranscriptionAudioBytes = Number(process.env.MAX_TRANSCRIPTION_AUDIO_BYTES || (20 * 1024 * 1024));
+const minUsableRecordingBytes = Number(process.env.MIN_RECORDING_AUDIO_BYTES || 2048);
+const isTranscriptionMultiCandidateEnabled = String(process.env.TRANSCRIPTION_MULTI_CANDIDATE || 'true').toLowerCase() !== 'false';
+const maxTranscriptionCandidates = Math.max(1, Number(process.env.MAX_TRANSCRIPTION_CANDIDATES || 3));
+const transcriptionRetryDelaysMs = String(process.env.TRANSCRIPTION_RETRY_DELAYS_MS || '0,20000,60000')
+  .split(',')
+  .map((value) => Number(String(value || '').trim()))
+  .filter((value) => Number.isFinite(value) && value >= 0);
+const normalizedTranscriptionRetryDelaysMs = transcriptionRetryDelaysMs.length
+  ? transcriptionRetryDelaysMs
+  : [0, 20000, 60000];
+const maxTranscriptionAttempts = Math.max(1, normalizedTranscriptionRetryDelaysMs.length);
 
 // --- GLOBAL SECURITY & PERFORMANCE ---
 app.use(helmet()); // Secure HTTP headers
@@ -556,8 +568,15 @@ const enqueuePostCallJobs = async (tenantId, callId, settingsOverride) => {
   const settings = settingsOverride || await getSettingsForTenant(tenantId);
   const policy = getAiCallIntelligencePolicy(settings);
   if (policy.enabled) {
-    await enqueueJob(tenantId, 'transcription', { callId });
-    await enqueueJob(tenantId, 'summary', { callId });
+    const call = await getCallForJob(tenantId, callId).catch(() => null);
+    const existingLifecycle = getTranscriptionLifecycleForCall(call || { transcript: [], analysis: {} });
+    const nextLifecycle = mergeTranscriptionLifecycle(existingLifecycle, {
+      status: existingLifecycle.status === 'ready' ? 'ready' : 'pending',
+      attempts: existingLifecycle.status === 'ready' ? existingLifecycle.attempts : 0,
+      reason: '',
+    });
+    await setCallTranscriptionLifecycle(tenantId, callId, nextLifecycle, call || null).catch(() => {});
+    await enqueueJob(tenantId, 'transcription', { callId, attempt: 1, retryReason: 'post_call_enqueue' });
   }
   await enqueueJob(tenantId, 'report', { callId });
   return policy;
@@ -1111,6 +1130,311 @@ const getCallForJob = async (tenantId, callId) => {
   return stores.calls.find(c => c.tenantId === tenantId && (c.id === callId || c.twilioCallSid === callId));
 };
 
+const VALID_TRANSCRIPTION_STATUSES = new Set(['pending', 'processing', 'ready', 'unavailable']);
+
+const normalizeTranscriptionStatus = (value, fallback = '') => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (VALID_TRANSCRIPTION_STATUSES.has(normalized)) return normalized;
+  const fallbackNormalized = String(fallback || '').trim().toLowerCase();
+  if (VALID_TRANSCRIPTION_STATUSES.has(fallbackNormalized)) return fallbackNormalized;
+  return '';
+};
+
+const isTranscriptUnavailableSummary = (summary = '') => /transcript unavailable/i.test(String(summary || ''));
+
+const getTranscriptionLifecycleForCall = (call) => {
+  const existing = call?.transcription && typeof call.transcription === 'object'
+    ? call.transcription
+    : {};
+  const transcriptLen = Array.isArray(call?.transcript) ? call.transcript.length : 0;
+  const explicitStatus = normalizeTranscriptionStatus(existing.status);
+  let status = explicitStatus;
+  if (!status) {
+    if (transcriptLen > 0) {
+      status = 'ready';
+    } else if (isTranscriptUnavailableSummary(call?.analysis?.summary)) {
+      status = 'unavailable';
+    } else {
+      status = 'pending';
+    }
+  }
+  const attempts = Math.max(0, Number(existing.attempts || 0));
+  const lastTriedAt = Number(existing.lastTriedAt || 0);
+  const sourceRecordingId = String(existing.sourceRecordingId || '').trim();
+  const reason = String(existing.reason || '').trim();
+  const lifecycle = {
+    status,
+    attempts,
+  };
+  if (lastTriedAt > 0) lifecycle.lastTriedAt = lastTriedAt;
+  if (sourceRecordingId) lifecycle.sourceRecordingId = sourceRecordingId;
+  if (reason && status === 'unavailable') lifecycle.reason = reason;
+  return lifecycle;
+};
+
+const mergeTranscriptionLifecycle = (callOrLifecycle, patch = {}) => {
+  const hasStatus = Object.prototype.hasOwnProperty.call(callOrLifecycle || {}, 'status');
+  const base = hasStatus
+    ? getTranscriptionLifecycleForCall({ transcript: [], analysis: {}, transcription: callOrLifecycle })
+    : getTranscriptionLifecycleForCall(callOrLifecycle);
+  const next = { ...base };
+  if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+    next.status = normalizeTranscriptionStatus(patch.status, next.status || 'pending') || 'pending';
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'attempts')) {
+    next.attempts = Math.max(0, Number(patch.attempts || 0));
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'lastTriedAt')) {
+    const ts = Number(patch.lastTriedAt || 0);
+    if (ts > 0) next.lastTriedAt = ts;
+    else delete next.lastTriedAt;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'sourceRecordingId')) {
+    const sourceRecordingId = String(patch.sourceRecordingId || '').trim();
+    if (sourceRecordingId) next.sourceRecordingId = sourceRecordingId;
+    else delete next.sourceRecordingId;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'reason')) {
+    const reason = String(patch.reason || '').trim();
+    if (reason && next.status === 'unavailable') next.reason = reason;
+    else delete next.reason;
+  } else if (next.status !== 'unavailable') {
+    delete next.reason;
+  }
+  return next;
+};
+
+const setCallTranscriptionLifecycle = async (tenantId, callId, patch = {}, callSnapshot = null) => {
+  if (!tenantId || !callId) return null;
+  const call = callSnapshot || await getCallForJob(tenantId, callId);
+  if (!call) return null;
+  const mergedLifecycle = mergeTranscriptionLifecycle(call, patch);
+  if (isMongoReady()) {
+    const matcher = call?._id
+      ? { _id: call._id }
+      : { tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }] };
+    await Call.findOneAndUpdate(matcher, {
+      transcription: mergedLifecycle,
+      transcriptionEnabled: true,
+    });
+  } else {
+    stores.calls = (stores.calls || []).map((entry) => (
+      entry.tenantId === tenantId && (entry.id === callId || entry.externalId === callId || entry.twilioCallSid === callId)
+        ? { ...entry, transcription: mergedLifecycle, transcriptionEnabled: true }
+        : entry
+    ));
+    await saveStore('calls', stores.calls);
+  }
+  return mergedLifecycle;
+};
+
+const getRecordingForCall = async (tenantId, callId) => {
+  if (!callId) return null;
+  if (isMongoReady()) {
+    const candidates = await Recording.find({ tenantId, callId }).sort({ createdAt: -1 }).limit(20).lean();
+    return pickBestRecording(candidates);
+  }
+  const candidates = (stores.recordings || [])
+    .filter((recording) => recording.tenantId === tenantId && recording.callId === callId)
+    .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  return pickBestRecording(candidates);
+};
+
+const getRecordingCandidatesForCall = async (tenantId, callId, limit = maxTranscriptionCandidates) => {
+  if (!callId) return [];
+  const candidateLimit = Math.max(1, Number(limit || maxTranscriptionCandidates || 1));
+  const primary = await getRecordingForCall(tenantId, callId).catch(() => null);
+  let pool = [];
+  if (isMongoReady()) {
+    pool = await Recording.find({ tenantId, callId }).sort({ createdAt: -1 }).limit(40).lean();
+  } else {
+    pool = (stores.recordings || [])
+      .filter((recording) => recording.tenantId === tenantId && recording.callId === callId)
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0));
+  }
+  if (primary) pool.unshift(primary);
+  const unique = [];
+  const seen = new Set();
+  pool
+    .slice()
+    .sort((left, right) => {
+      if (preferCandidateRecording(left, right)) return -1;
+      if (preferCandidateRecording(right, left)) return 1;
+      return 0;
+    })
+    .forEach((recording) => {
+      const recordingId = getRecordingExternalId(recording) || String(recording?.storagePath || '').trim();
+      if (!recordingId || seen.has(recordingId)) return;
+      seen.add(recordingId);
+      unique.push(recording);
+    });
+  return unique.slice(0, candidateLimit);
+};
+
+const buildTranscriptionMimeCandidates = (recording) => {
+  const raw = String(recording?.mimeType || '').trim();
+  const lower = raw.toLowerCase();
+  const candidates = [];
+  if (raw) candidates.push(raw);
+  if (lower.includes('webm')) {
+    candidates.push('audio/webm;codecs=opus');
+    candidates.push('audio/webm');
+  }
+  if (!candidates.length) {
+    candidates.push('audio/webm;codecs=opus');
+    candidates.push('audio/webm');
+  }
+  return Array.from(new Set(candidates));
+};
+
+const SYNTHETIC_TRANSCRIPT_PHRASES = [
+  'Analyzing the current cluster performance metrics...',
+  'I believe we need to update the HubSpot schema for better synchronization.',
+  'Could we schedule a follow-up for next Tuesday at 10 AM?',
+  'The neural bridge latency is currently within acceptable parameters.',
+  "Let's ensure the CRM records are dispatched before the meeting concludes.",
+].map((phrase) => String(phrase).trim().toLowerCase());
+const SYNTHETIC_TRANSCRIPT_PHRASE_SET = new Set(SYNTHETIC_TRANSCRIPT_PHRASES);
+
+const normalizeTranscriptLine = (value) => String(value || '').trim().toLowerCase();
+
+const isLikelySyntheticTranscript = (transcript = []) => {
+  const lines = (Array.isArray(transcript) ? transcript : [])
+    .map((segment) => normalizeTranscriptLine(segment?.text))
+    .filter(Boolean);
+  if (lines.length < 3) return false;
+  const matched = lines.filter((line) => SYNTHETIC_TRANSCRIPT_PHRASE_SET.has(line));
+  if (!matched.length) return false;
+  const ratio = matched.length / lines.length;
+  const uniqueMatched = new Set(matched).size;
+  return matched.length >= 3 && ratio >= 0.6 && uniqueMatched >= 2;
+};
+
+const buildTranscriptUnavailableSummary = (call) => {
+  const customer = call?.customerName || call?.phoneNumber || call?.customerEmail || 'customer';
+  const duration = Math.max(0, Math.floor(Number(call?.durationSeconds || 0)));
+  return `Call with ${customer} ended after ${duration}s. Transcript unavailable; verify recording and disposition manually.`;
+};
+
+const buildTranscriptFromAudio = async (call, recording) => {
+  if (!GEMINI_API_KEY) return [];
+  if (!recording?.storagePath) return [];
+  let audioBuffer = null;
+  try {
+    if (recording.storageProvider === 'gcs') {
+      audioBuffer = await downloadRecordingBuffer(recording.storagePath);
+    } else {
+      audioBuffer = await fs.readFile(recording.storagePath);
+    }
+  } catch {
+    audioBuffer = null;
+  }
+  if (!audioBuffer || !audioBuffer.length) return [];
+  if (audioBuffer.length > maxTranscriptionAudioBytes) {
+    console.warn(`transcription skipped for ${call?.externalId || call?.id}: audio size ${audioBuffer.length} exceeds ${maxTranscriptionAudioBytes}`);
+    return [];
+  }
+  const mimeType = String(recording.mimeType || detectAudioMimeFromBuffer(audioBuffer) || 'audio/webm');
+  const ai = getClient();
+  const prompt = `Transcribe this customer call audio. Return strict JSON array only with items:
+[{ "speaker": "agent" | "customer" | "teammate", "text": "utterance text" }]
+Rules:
+- Keep spoken wording concise and faithful.
+- Skip non-speech noises.
+- Merge tiny filler words into nearby utterances.
+- Do not include markdown or explanations.`;
+  try {
+    const response = await ai.models.generateContent({
+      model: TEXT_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [
+          { text: prompt },
+          { inlineData: { mimeType, data: audioBuffer.toString('base64') } },
+        ],
+      }],
+      config: {
+        responseMimeType: 'application/json',
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              speaker: { type: Type.STRING },
+              text: { type: Type.STRING },
+            },
+            required: ['speaker', 'text'],
+          },
+        },
+      },
+    });
+    let parsed = [];
+    try {
+      parsed = JSON.parse(response.text || '[]');
+    } catch {
+      parsed = [];
+    }
+    if (!Array.isArray(parsed)) return [];
+    const allowedSpeakers = new Set(['agent', 'customer', 'teammate', 'bot']);
+    const baseTs = Number(call?.startTime || Date.now());
+    return parsed
+      .map((item, index) => {
+        const text = String(item?.text || '').trim();
+        if (!text) return null;
+        const rawSpeaker = String(item?.speaker || '').trim().toLowerCase();
+        const speaker = allowedSpeakers.has(rawSpeaker) ? rawSpeaker : 'customer';
+        return {
+          id: `ts_${Date.now()}_${index}`,
+          speaker,
+          text: text.slice(0, 800),
+          timestamp: baseTs + (index * 5000),
+          isFinal: true,
+        };
+      })
+      .filter(Boolean);
+  } catch (err) {
+    console.warn('Recording transcription fallback:', err?.message || err);
+    return [];
+  }
+};
+
+const buildDeterministicSummary = (call, transcript = []) => {
+  const customer = call?.customerName || call?.customerEmail || call?.phoneNumber || 'customer';
+  const agent = call?.agentName || call?.agentEmail || 'agent';
+  const duration = Math.max(0, Math.floor(Number(call?.durationSeconds || 0)));
+  const lines = (Array.isArray(transcript) ? transcript : [])
+    .map((segment) => String(segment?.text || '').trim())
+    .filter(Boolean);
+  if (!lines.length) {
+    return buildTranscriptUnavailableSummary(call);
+  }
+  const uniqueLines = [];
+  const seen = new Set();
+  for (const line of lines) {
+    const key = line.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniqueLines.push(line);
+    if (uniqueLines.length >= 4) break;
+  }
+  const actionHints = lines
+    .filter((line) => /\b(follow[- ]?up|schedule|send|email|call back|review|share|next step|action)\b/i.test(line))
+    .slice(0, 2);
+  const keyPoints = uniqueLines.slice(0, 3).map((line) => `- ${line.slice(0, 180)}`);
+  const actions = actionHints.length
+    ? actionHints.map((line) => `- ${line.slice(0, 180)}`)
+    : ['- Confirm disposition and owner for next step.'];
+  return [
+    `Call recap: ${agent} and ${customer} discussed ${uniqueLines[0]?.slice(0, 120) || 'the call objectives'} during a ${duration}s session.`,
+    '',
+    'Key points:',
+    ...keyPoints,
+    '',
+    'Action items:',
+    ...actions,
+  ].join('\n');
+};
+
 const fetchLeadsForCampaign = async () => {
   const db = await getFirestore().catch(() => null);
   if (!db) return [];
@@ -1199,26 +1523,333 @@ const processJobs = async () => {
     await updateJob(jobId, { status: 'running', attempts: (job.attempts || 0) + 1 });
     try {
       if (job.type === 'transcription') {
-        await updateJob(jobId, { status: 'completed', result: { ok: true, note: 'Transcript already provided.' } });
-        continue;
-      }
-      if (job.type === 'summary') {
         const call = await getCallForJob(job.tenantId, job.payload?.callId);
-        if (!call) throw new Error('Call not found');
+        if (!call) {
+          await updateJob(jobId, { status: 'completed', result: { skipped: 'call_not_found' } });
+          continue;
+        }
         const settings = await getSettingsForTenant(job.tenantId);
         const policy = getAiCallIntelligencePolicy(settings);
         if (!policy.enabled) {
           await updateJob(jobId, { status: 'completed', result: { skipped: 'ai_call_intelligence_disabled' } });
           continue;
         }
-        const text = (call.transcript || []).map((t) => `${t.speaker}: ${t.text}`).join('\n');
-        const duration = Number(call.durationSeconds || 0);
-        const customer = call.customerName || call.phoneNumber || 'Customer';
+        const forceTranscription = Boolean(job.payload?.force);
+        const existingTranscript = Array.isArray(call.transcript) ? call.transcript : [];
+        const syntheticTranscript = isLikelySyntheticTranscript(existingTranscript);
+        const callId = call.externalId || call.id || call.twilioCallSid;
+        if (!callId) {
+          await updateJob(jobId, { status: 'completed', result: { skipped: 'call_id_missing' } });
+          continue;
+        }
+        const requestedAttempt = Math.max(1, Number(job.payload?.attempt || ((job.attempts || 0) + 1)));
+        const nowTs = Date.now();
+        await setCallTranscriptionLifecycle(job.tenantId, callId, {
+          status: 'processing',
+          attempts: requestedAttempt,
+          lastTriedAt: nowTs,
+          reason: '',
+        }, call).catch(() => {});
+        if (existingTranscript.length > 0 && !forceTranscription && !syntheticTranscript) {
+          await setCallTranscriptionLifecycle(job.tenantId, callId, {
+            status: 'ready',
+            attempts: Math.max(requestedAttempt, Number(call?.transcription?.attempts || 0)),
+            lastTriedAt: nowTs,
+            reason: '',
+          }, call).catch(() => {});
+          await enqueueJobIfMissing(job.tenantId, 'summary', {
+            callId,
+            force: false,
+            retryReason: 'transcription_already_available',
+            attempt: requestedAttempt,
+          });
+          await updateJob(jobId, {
+            status: 'completed',
+            result: {
+              ok: true,
+              note: 'Transcript already available.',
+              segments: existingTranscript.length,
+              attempt: requestedAttempt,
+            },
+          });
+          continue;
+        }
+        const recordingCandidates = isTranscriptionMultiCandidateEnabled
+          ? await getRecordingCandidatesForCall(job.tenantId, callId, maxTranscriptionCandidates)
+          : [await getRecordingForCall(job.tenantId, callId)].filter(Boolean);
+        if (!recordingCandidates.length) {
+          const failureReason = 'recording_not_found';
+          const shouldRetry = requestedAttempt < maxTranscriptionAttempts;
+          if (shouldRetry) {
+            const delayMs = normalizedTranscriptionRetryDelaysMs[Math.min(requestedAttempt, normalizedTranscriptionRetryDelaysMs.length - 1)] || 60000;
+            await setCallTranscriptionLifecycle(job.tenantId, callId, {
+              status: 'pending',
+              attempts: requestedAttempt,
+              lastTriedAt: nowTs,
+              reason: '',
+            }, call).catch(() => {});
+            await updateJob(jobId, {
+              status: 'pending',
+              nextRunAt: Date.now() + delayMs,
+              payload: {
+                ...(job.payload || {}),
+                callId,
+                attempt: requestedAttempt + 1,
+                retryReason: failureReason,
+              },
+              result: { retryScheduled: true, retryDelayMs: delayMs, reason: failureReason, attempt: requestedAttempt },
+            });
+            continue;
+          }
+          await setCallTranscriptionLifecycle(job.tenantId, callId, {
+            status: 'unavailable',
+            attempts: requestedAttempt,
+            lastTriedAt: nowTs,
+            reason: failureReason,
+          }, call).catch(() => {});
+          await enqueueJobIfMissing(job.tenantId, 'summary', {
+            callId,
+            force: true,
+            retryReason: failureReason,
+            attempt: requestedAttempt,
+          });
+          log('info', 'transcription.terminal', {
+            tenantId: job.tenantId,
+            callId,
+            attempt: requestedAttempt,
+            reason: failureReason,
+          });
+          await updateJob(jobId, { status: 'completed', result: { skipped: failureReason, terminal: true, attempt: requestedAttempt } });
+          continue;
+        }
+        let transcript = [];
+        let selectedRecording = null;
+        let selectedMimeType = '';
+        for (const recordingCandidate of recordingCandidates) {
+          const recordingId = getRecordingExternalId(recordingCandidate);
+          const mimeCandidates = buildTranscriptionMimeCandidates(recordingCandidate);
+          for (const mimeType of mimeCandidates) {
+            log('info', 'transcription.attempt', {
+              tenantId: job.tenantId,
+              callId,
+              attempt: requestedAttempt,
+              candidateRecordingId: recordingId || '',
+              mimeType,
+              retryReason: String(job.payload?.retryReason || ''),
+            });
+            const nextTranscript = await buildTranscriptFromAudio(call, {
+              ...recordingCandidate,
+              mimeType,
+            });
+            if (!nextTranscript.length) continue;
+            transcript = nextTranscript;
+            selectedRecording = recordingCandidate;
+            selectedMimeType = mimeType;
+            break;
+          }
+          if (transcript.length) break;
+        }
+        if (!transcript.length) {
+          const failureReason = syntheticTranscript
+            ? 'synthetic_transcript_rebuild_unavailable'
+            : 'transcription_unavailable';
+          const shouldRetry = requestedAttempt < maxTranscriptionAttempts;
+          if (shouldRetry) {
+            const delayMs = normalizedTranscriptionRetryDelaysMs[Math.min(requestedAttempt, normalizedTranscriptionRetryDelaysMs.length - 1)] || 60000;
+            await setCallTranscriptionLifecycle(job.tenantId, callId, {
+              status: 'pending',
+              attempts: requestedAttempt,
+              lastTriedAt: nowTs,
+              reason: '',
+            }, call).catch(() => {});
+            await updateJob(jobId, {
+              status: 'pending',
+              nextRunAt: Date.now() + delayMs,
+              payload: {
+                ...(job.payload || {}),
+                callId,
+                attempt: requestedAttempt + 1,
+                retryReason: failureReason,
+              },
+              result: { retryScheduled: true, retryDelayMs: delayMs, reason: failureReason, attempt: requestedAttempt },
+            });
+            continue;
+          }
+          await setCallTranscriptionLifecycle(job.tenantId, callId, {
+            status: 'unavailable',
+            attempts: requestedAttempt,
+            lastTriedAt: nowTs,
+            reason: failureReason,
+          }, call).catch(() => {});
+          await enqueueJobIfMissing(job.tenantId, 'summary', {
+            callId,
+            force: true,
+            retryReason: failureReason,
+            attempt: requestedAttempt,
+          });
+          log('info', 'transcription.terminal', {
+            tenantId: job.tenantId,
+            callId,
+            attempt: requestedAttempt,
+            reason: failureReason,
+          });
+          await updateJob(jobId, {
+            status: 'completed',
+            result: { skipped: failureReason, terminal: true, attempt: requestedAttempt },
+          });
+          continue;
+        }
+        const sourceRecordingId = getRecordingExternalId(selectedRecording);
+        const readyLifecycle = mergeTranscriptionLifecycle(call, {
+          status: 'ready',
+          attempts: requestedAttempt,
+          lastTriedAt: nowTs,
+          sourceRecordingId,
+          reason: '',
+        });
+        if (isMongoReady()) {
+          await Call.findOneAndUpdate(
+            { tenantId: job.tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }] },
+            {
+              transcript,
+              transcriptionEnabled: true,
+              transcription: readyLifecycle,
+            }
+          );
+        } else {
+          stores.calls = stores.calls.map((entry) => (
+            entry.tenantId === job.tenantId && (entry.id === callId || entry.twilioCallSid === callId)
+              ? { ...entry, transcript, transcriptionEnabled: true, transcription: readyLifecycle }
+              : entry
+          ));
+          await saveStore('calls', stores.calls);
+        }
+        await enqueueJobIfMissing(job.tenantId, 'summary', {
+          callId,
+          force: forceTranscription || syntheticTranscript,
+          candidateRecordingId: sourceRecordingId,
+          retryReason: String(job.payload?.retryReason || 'transcription_ready'),
+          attempt: requestedAttempt,
+        });
+        await updateJob(jobId, {
+          status: 'completed',
+          result: {
+            ok: true,
+            segments: transcript.length,
+            callId,
+            rebuiltSyntheticTranscript: syntheticTranscript,
+            sourceRecordingId,
+            selectedMimeType,
+            attempt: requestedAttempt,
+          },
+        });
+        continue;
+      }
+      if (job.type === 'summary') {
+        const call = await getCallForJob(job.tenantId, job.payload?.callId);
+        if (!call) throw new Error('Call not found');
+        const callId = call.externalId || call.id || call.twilioCallSid;
+        if (!callId) {
+          await updateJob(jobId, { status: 'completed', result: { skipped: 'call_id_missing' } });
+          continue;
+        }
+        const settings = await getSettingsForTenant(job.tenantId);
+        const policy = getAiCallIntelligencePolicy(settings);
+        if (!policy.enabled) {
+          await updateJob(jobId, { status: 'completed', result: { skipped: 'ai_call_intelligence_disabled' } });
+          continue;
+        }
+        const forceSummary = Boolean(job.payload?.force);
+        let transcriptForSummary = Array.isArray(call.transcript) ? call.transcript : [];
+        const explicitTranscriptionStatus = normalizeTranscriptionStatus(call?.transcription?.status);
+        const syntheticTranscript = isLikelySyntheticTranscript(transcriptForSummary);
+        const transcriptionLifecycle = getTranscriptionLifecycleForCall(call);
+        let text = transcriptForSummary.map((t) => `${t.speaker}: ${t.text}`).join('\n');
+        if (
+          !forceSummary &&
+          (explicitTranscriptionStatus === 'pending' || explicitTranscriptionStatus === 'processing') &&
+          !syntheticTranscript &&
+          !text.trim()
+        ) {
+          await updateJob(jobId, {
+            status: 'pending',
+            nextRunAt: Date.now() + 5000,
+            payload: {
+              ...(job.payload || {}),
+              callId,
+              retryReason: 'awaiting_transcription',
+            },
+            result: { waiting: true, reason: 'awaiting_transcription' },
+          });
+          continue;
+        }
+        if (forceSummary || syntheticTranscript || !text.trim()) {
+          await setCallTranscriptionLifecycle(job.tenantId, callId, {
+            status: 'processing',
+            attempts: Math.max(1, Number(call?.transcription?.attempts || 0)),
+            lastTriedAt: Date.now(),
+            reason: '',
+          }, call).catch(() => {});
+          const recordingCandidates = isTranscriptionMultiCandidateEnabled
+            ? await getRecordingCandidatesForCall(job.tenantId, callId, maxTranscriptionCandidates)
+            : [await getRecordingForCall(job.tenantId, callId)].filter(Boolean);
+          let rebuiltFromAudio = false;
+          let sourceRecordingId = '';
+          if (recordingCandidates.length) {
+            for (const recordingCandidate of recordingCandidates) {
+              const recordingId = getRecordingExternalId(recordingCandidate);
+              const mimeCandidates = buildTranscriptionMimeCandidates(recordingCandidate);
+              for (const mimeType of mimeCandidates) {
+                const rebuiltTranscript = await buildTranscriptFromAudio(call, {
+                  ...recordingCandidate,
+                  mimeType,
+                });
+                if (!rebuiltTranscript.length) continue;
+                transcriptForSummary = rebuiltTranscript;
+                text = rebuiltTranscript.map((entry) => `${entry.speaker}: ${entry.text}`).join('\n');
+                rebuiltFromAudio = true;
+                sourceRecordingId = recordingId;
+                const readyLifecycle = mergeTranscriptionLifecycle(transcriptionLifecycle, {
+                  status: 'ready',
+                  attempts: Math.max(Number(call?.transcription?.attempts || 0), 1),
+                  lastTriedAt: Date.now(),
+                  sourceRecordingId,
+                  reason: '',
+                });
+                if (isMongoReady()) {
+                  await Call.findOneAndUpdate(
+                    { tenantId: job.tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }] },
+                    { transcript: rebuiltTranscript, transcriptionEnabled: true, transcription: readyLifecycle }
+                  );
+                } else {
+                  stores.calls = stores.calls.map((entry) => (
+                    entry.tenantId === job.tenantId && (entry.id === callId || entry.twilioCallSid === callId)
+                      ? { ...entry, transcript: rebuiltTranscript, transcriptionEnabled: true, transcription: readyLifecycle }
+                      : entry
+                  ));
+                  await saveStore('calls', stores.calls);
+                }
+                break;
+              }
+              if (rebuiltFromAudio) break;
+            }
+          }
+          if (syntheticTranscript && !rebuiltFromAudio) {
+            transcriptForSummary = [];
+            text = '';
+            await setCallTranscriptionLifecycle(job.tenantId, callId, {
+              status: 'unavailable',
+              attempts: Math.max(1, Number(call?.transcription?.attempts || 0)),
+              lastTriedAt: Date.now(),
+              reason: 'synthetic_transcript_rebuild_unavailable',
+            }, call).catch(() => {});
+          }
+        }
         const fallbackSummary = text.trim().length > 0
-          ? 'Call completed. Transcript captured and ready for review.'
-          : `Call with ${customer} ended after ${Math.max(0, duration)}s. Transcript unavailable; verify recording and disposition manually.`;
+          ? buildDeterministicSummary(call, transcriptForSummary)
+          : buildTranscriptUnavailableSummary(call);
         let summary = fallbackSummary;
-        if (GEMINI_API_KEY) {
+        if (GEMINI_API_KEY && text.trim().length > 0) {
           try {
             const ai = getClient();
             const prompt = `Provide a concise call summary and action items.\nTranscript:\n${text}`;
@@ -1231,11 +1862,37 @@ const processJobs = async () => {
         }
         if (isMongoReady()) {
           await Call.findOneAndUpdate(
-            { tenantId: job.tenantId, externalId: call.externalId || call.id },
-            { analysis: { ...(call.analysis || {}), summary } }
+            { tenantId: job.tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }] },
+            {
+              analysis: { ...(call.analysis || {}), summary },
+              ...(text.trim().length > 0
+                ? { transcription: mergeTranscriptionLifecycle(call, { status: 'ready', reason: '' }) }
+                : { transcription: mergeTranscriptionLifecycle(call, {
+                  status: 'unavailable',
+                  reason: String(call?.transcription?.reason || 'transcription_unavailable'),
+                }) }),
+            }
           );
         } else {
-          stores.calls = stores.calls.map(c => c.id === call.id ? { ...c, analysis: { ...(c.analysis || {}), summary } } : c);
+          stores.calls = stores.calls.map((entry) => {
+            const matches = entry.tenantId === job.tenantId && (
+              entry.id === callId ||
+              entry.externalId === callId ||
+              entry.twilioCallSid === callId
+            );
+            if (!matches) return entry;
+            const nextTranscription = text.trim().length > 0
+              ? mergeTranscriptionLifecycle(entry, { status: 'ready', reason: '' })
+              : mergeTranscriptionLifecycle(entry, {
+                status: 'unavailable',
+                reason: String(entry?.transcription?.reason || 'transcription_unavailable'),
+              });
+            return {
+              ...entry,
+              analysis: { ...(entry.analysis || {}), summary },
+              transcription: nextTranscription,
+            };
+          });
           await saveStore('calls', stores.calls);
         }
         await syncAiWrapUpToCrm(job.tenantId, call, summary, settings);
@@ -1344,6 +2001,13 @@ const processJobs = async () => {
     log('warn', 'jobs.backlog', { count: jobStats.pendingCount });
   }
   await cleanupRetention();
+};
+
+const kickInlineJobWorker = () => {
+  if (!isJobWorkerInlineEnabled) return;
+  setTimeout(() => {
+    processJobs().catch(() => {});
+  }, 75);
 };
 
 if (process.env.RUN_JOB_WORKER_INLINE !== 'false') {
@@ -1802,6 +2466,40 @@ const extractRecordingIdFromUrl = (url = '') => {
   return parts.length >= 2 ? parts[1] : '';
 };
 
+const getRecordingExternalId = (recording) => String(recording?.externalId || recording?.id || '').trim();
+const getRecordingSizeBytes = (recording) => Math.max(0, Number(recording?.size || recording?.sizeBytes || 0));
+const getRecordingCreatedAt = (recording) => Number(recording?.createdAt || recording?.updatedAt || 0);
+
+const rankRecordingCandidate = (recording) => {
+  const size = getRecordingSizeBytes(recording);
+  return {
+    usable: size >= minUsableRecordingBytes ? 1 : 0,
+    size,
+    createdAt: getRecordingCreatedAt(recording),
+  };
+};
+
+const preferCandidateRecording = (candidate, incumbent) => {
+  if (!candidate) return false;
+  if (!incumbent) return true;
+  const c = rankRecordingCandidate(candidate);
+  const i = rankRecordingCandidate(incumbent);
+  if (c.usable !== i.usable) return c.usable > i.usable;
+  if (c.size !== i.size) return c.size > i.size;
+  return c.createdAt > i.createdAt;
+};
+
+const pickBestRecording = (items = []) => {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  const cloned = items.slice();
+  cloned.sort((left, right) => {
+    if (preferCandidateRecording(left, right)) return -1;
+    if (preferCandidateRecording(right, left)) return 1;
+    return 0;
+  });
+  return cloned[0] || null;
+};
+
 const detectAudioMimeFromBuffer = (buffer) => {
   if (!buffer || buffer.length < 4) return 'application/octet-stream';
   const header = buffer.subarray(0, 4).toString('ascii');
@@ -1869,11 +2567,63 @@ const buildRecordingUrl = (req, tenantId, externalId, ttlSeconds = 3600) => {
   return `${getBaseUrl(req)}/api/recordings/download?token=${token}`;
 };
 
+const findRecordingByExternalId = async (tenantId, externalId) => {
+  if (!externalId) return null;
+  if (isMongoReady()) {
+    return Recording.findOne({ tenantId, externalId }).lean();
+  }
+  return (stores.recordings || []).find((recording) => (
+    recording.tenantId === tenantId &&
+    (recording.externalId === externalId || recording.id === externalId)
+  )) || null;
+};
+
+const attachPreferredRecordingToCall = async (tenantId, callId, candidateRecording, options = {}) => {
+  if (!tenantId || !callId || !candidateRecording) return false;
+  const persist = options.persist !== false;
+  const candidateExternalId = getRecordingExternalId(candidateRecording);
+  if (!candidateExternalId) return false;
+  const candidateUrl = String(candidateRecording.recordingUrl || candidateRecording.recordingURL || '').trim();
+  const callMatcher = { tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }, { id: callId }] };
+  const existingCall = isMongoReady()
+    ? await Call.findOne(callMatcher).lean()
+    : (stores.calls || []).find((call) => call.tenantId === tenantId && (call.id === callId || call.externalId === callId || call.twilioCallSid === callId));
+  if (!existingCall) return false;
+  const existingRecordingId = String(existingCall.recordingId || extractRecordingIdFromUrl(existingCall.recordingUrl) || '').trim();
+  const existingRecording = existingRecordingId
+    ? await findRecordingByExternalId(tenantId, existingRecordingId)
+    : null;
+  if (!preferCandidateRecording(candidateRecording, existingRecording)) {
+    return false;
+  }
+  if (isMongoReady()) {
+    const updatePayload = { recordingId: candidateExternalId };
+    if (candidateUrl) updatePayload.recordingUrl = candidateUrl;
+    await Call.findOneAndUpdate(callMatcher, updatePayload);
+  } else {
+    stores.calls = (stores.calls || []).map((entry) => (
+      entry.tenantId === tenantId && (entry.id === callId || entry.externalId === callId || entry.twilioCallSid === callId)
+        ? { ...entry, recordingUrl: candidateUrl || entry.recordingUrl, recordingId: candidateExternalId }
+        : entry
+    ));
+    if (persist) {
+      await saveStore('calls', stores.calls);
+    }
+  }
+  return true;
+};
+
 const ensureRecordingForCall = async (req, call) => {
   if (!call) return;
   const tenantId = call.tenantId || req.tenantId || DEFAULT_TENANT_ID;
   const callId = call.externalId || call.id;
   if (!callId) return;
+  const callDirection = String(call.direction || '').toLowerCase();
+  if (callDirection === 'internal') {
+    // Internal WebRTC recordings are uploaded explicitly from clients.
+    // Avoid generating silent synthetic files that look "playable" but contain no audio.
+    return;
+  }
   const callDuration = Number(call.durationSeconds);
   const derivedDuration = Number(call.endTime) > Number(call.startTime)
     ? Math.ceil((Number(call.endTime) - Number(call.startTime)) / 1000)
@@ -1934,18 +2684,166 @@ const ensureRecordingForCall = async (req, call) => {
         recording,
         { upsert: true, new: true }
       );
-      await Call.findOneAndUpdate(
-        { tenantId, $or: [{ externalId: callId }, { twilioCallSid: callId }] },
-        { recordingUrl, recordingId: externalId }
-      );
+      await attachPreferredRecordingToCall(tenantId, callId, { ...recording, externalId, recordingUrl });
     } else {
       const stored = { id: externalId, ...recording };
       stores.recordings = upsertById(stores.recordings, stored);
       await saveStore('recordings', stores.recordings);
-      stores.calls = stores.calls.map(c => ((c.id === callId || c.twilioCallSid === callId) && c.tenantId === tenantId) ? { ...c, recordingUrl, recordingId: externalId } : c);
-      await saveStore('calls', stores.calls);
+      await attachPreferredRecordingToCall(tenantId, callId, stored);
     }
   };
+
+const hasQueuedJob = async (tenantId, type, callId) => {
+  if (!tenantId || !type || !callId) return false;
+  if (isMongoReady()) {
+    const existing = await Job.findOne({
+      tenantId,
+      type,
+      status: { $in: ['pending', 'running'] },
+      'payload.callId': callId,
+    }).lean();
+    return Boolean(existing);
+  }
+  return Boolean((stores.jobs || []).find((job) => (
+    job.tenantId === tenantId &&
+    job.type === type &&
+    (job.status === 'pending' || job.status === 'running') &&
+    job.payload?.callId === callId
+  )));
+};
+
+const enqueueJobIfMissing = async (tenantId, type, payload = {}) => {
+  const callId = String(payload?.callId || '').trim();
+  if (callId && await hasQueuedJob(tenantId, type, callId)) {
+    return false;
+  }
+  await enqueueJob(tenantId, type, payload);
+  return true;
+};
+
+const runStartupCallDataRepairs = async () => {
+  const stats = {
+    recordingLinksBackfilled: 0,
+    syntheticTranscriptJobsQueued: 0,
+    syntheticTranscriptCleared: 0,
+  };
+  let shouldKickWorker = false;
+
+  if (isMongoReady()) {
+    const endedCalls = await Call.find({ status: 'ENDED' }).limit(5000).lean();
+    for (const call of endedCalls) {
+      const tenantId = call.tenantId || DEFAULT_TENANT_ID;
+      const callId = call.externalId || call.id || call.twilioCallSid;
+      if (!callId) continue;
+      let callSnapshot = call;
+      const bestRecording = await getRecordingForCall(tenantId, callId).catch(() => null);
+      const hasRecordingLink = Boolean(callSnapshot.recordingId || extractRecordingIdFromUrl(callSnapshot.recordingUrl));
+      if (!hasRecordingLink && bestRecording) {
+        const linked = await attachPreferredRecordingToCall(tenantId, callId, bestRecording).catch(() => false);
+        if (linked) {
+          stats.recordingLinksBackfilled += 1;
+          callSnapshot = await getCallForJob(tenantId, callId).catch(() => callSnapshot) || callSnapshot;
+        }
+      }
+      const transcript = Array.isArray(callSnapshot.transcript) ? callSnapshot.transcript : [];
+      if (!isLikelySyntheticTranscript(transcript)) continue;
+      if (bestRecording) {
+        const queuedTranscription = await enqueueJobIfMissing(tenantId, 'transcription', { callId, force: true, reason: 'startup_synthetic_repair' });
+        const queuedSummary = await enqueueJobIfMissing(tenantId, 'summary', { callId, force: true, reason: 'startup_synthetic_repair' });
+        await setCallTranscriptionLifecycle(tenantId, callId, {
+          status: 'pending',
+          attempts: 0,
+          reason: '',
+        }, callSnapshot).catch(() => {});
+        if (queuedTranscription || queuedSummary) {
+          stats.syntheticTranscriptJobsQueued += 1;
+          shouldKickWorker = true;
+        }
+        continue;
+      }
+      await Call.findOneAndUpdate(
+        { _id: callSnapshot._id },
+        {
+          transcript: [],
+          analysis: { ...(callSnapshot.analysis || {}), summary: buildTranscriptUnavailableSummary(callSnapshot) },
+          transcriptionEnabled: true,
+          transcription: mergeTranscriptionLifecycle(callSnapshot, {
+            status: 'unavailable',
+            reason: 'recording_not_found',
+          }),
+        }
+      );
+      stats.syntheticTranscriptCleared += 1;
+    }
+  } else {
+    let callsChanged = false;
+    const endedCalls = (stores.calls || []).filter((call) => call.status === 'ENDED');
+    for (const call of endedCalls) {
+      const tenantId = call.tenantId || DEFAULT_TENANT_ID;
+      const callId = call.externalId || call.id || call.twilioCallSid;
+      if (!callId) continue;
+      const bestRecording = await getRecordingForCall(tenantId, callId).catch(() => null);
+      const hasRecordingLink = Boolean(call.recordingId || extractRecordingIdFromUrl(call.recordingUrl));
+      if (!hasRecordingLink && bestRecording) {
+        const linked = await attachPreferredRecordingToCall(tenantId, callId, bestRecording, { persist: false }).catch(() => false);
+        if (linked) {
+          stats.recordingLinksBackfilled += 1;
+          callsChanged = true;
+        }
+      }
+      const latestCall = (stores.calls || []).find((entry) => entry.tenantId === tenantId && (entry.id === callId || entry.externalId === callId || entry.twilioCallSid === callId)) || call;
+      const transcript = Array.isArray(latestCall.transcript) ? latestCall.transcript : [];
+      if (!isLikelySyntheticTranscript(transcript)) continue;
+      if (bestRecording) {
+        const queuedTranscription = await enqueueJobIfMissing(tenantId, 'transcription', { callId, force: true, reason: 'startup_synthetic_repair' });
+        const queuedSummary = await enqueueJobIfMissing(tenantId, 'summary', { callId, force: true, reason: 'startup_synthetic_repair' });
+        const pendingLifecycle = mergeTranscriptionLifecycle(latestCall, {
+          status: 'pending',
+          attempts: 0,
+          reason: '',
+        });
+        stores.calls = (stores.calls || []).map((entry) => (
+          entry.tenantId === tenantId && (entry.id === callId || entry.externalId === callId || entry.twilioCallSid === callId)
+            ? { ...entry, transcription: pendingLifecycle, transcriptionEnabled: true }
+            : entry
+        ));
+        callsChanged = true;
+        if (queuedTranscription || queuedSummary) {
+          stats.syntheticTranscriptJobsQueued += 1;
+          shouldKickWorker = true;
+        }
+        continue;
+      }
+      stores.calls = (stores.calls || []).map((entry) => (
+        entry.tenantId === tenantId && (entry.id === callId || entry.externalId === callId || entry.twilioCallSid === callId)
+          ? {
+              ...entry,
+              transcript: [],
+              analysis: { ...(entry.analysis || {}), summary: buildTranscriptUnavailableSummary(entry) },
+              transcriptionEnabled: true,
+              transcription: mergeTranscriptionLifecycle(entry, {
+                status: 'unavailable',
+                reason: 'recording_not_found',
+              }),
+            }
+          : entry
+      ));
+      callsChanged = true;
+      stats.syntheticTranscriptCleared += 1;
+    }
+    if (callsChanged) {
+      await saveStore('calls', stores.calls);
+    }
+  }
+
+  if (shouldKickWorker) {
+    kickInlineJobWorker();
+  }
+
+  if (stats.recordingLinksBackfilled || stats.syntheticTranscriptJobsQueued || stats.syntheticTranscriptCleared) {
+    log('info', 'startup.call_repairs', stats);
+  }
+};
 
 const removeById = (items, id) => items.filter(i => i.id !== id);
 
@@ -2939,6 +3837,46 @@ app.delete('/api/dispositions/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+const mergeCallUpdatePayload = (existingCall, incomingPayload = {}, tenantId, externalId) => {
+  const existing = existingCall || {};
+  const incoming = incomingPayload || {};
+  const merged = { ...existing, ...incoming, tenantId, externalId };
+  const existingTranscript = Array.isArray(existing.transcript) ? existing.transcript : [];
+  const incomingTranscript = Array.isArray(incoming.transcript) ? incoming.transcript : null;
+  if (incomingTranscript) {
+    merged.transcript = incomingTranscript.length >= existingTranscript.length
+      ? incomingTranscript
+      : existingTranscript;
+  } else if (existingTranscript.length) {
+    merged.transcript = existingTranscript;
+  }
+  const existingAnalysis = existing.analysis && typeof existing.analysis === 'object' ? existing.analysis : {};
+  const incomingAnalysis = incoming.analysis && typeof incoming.analysis === 'object' ? incoming.analysis : null;
+  if (incomingAnalysis && Object.keys(incomingAnalysis).length > 0) {
+    merged.analysis = { ...existingAnalysis, ...incomingAnalysis };
+  } else if (Object.keys(existingAnalysis).length > 0) {
+    merged.analysis = existingAnalysis;
+  }
+  const existingTranscription = existing.transcription && typeof existing.transcription === 'object'
+    ? existing.transcription
+    : null;
+  const incomingTranscription = incoming.transcription && typeof incoming.transcription === 'object'
+    ? incoming.transcription
+    : null;
+  if (incomingTranscription && Object.keys(incomingTranscription).length > 0) {
+    merged.transcription = mergeTranscriptionLifecycle(existingTranscription || existing, incomingTranscription);
+  } else if (existingTranscription && Object.keys(existingTranscription).length > 0) {
+    merged.transcription = mergeTranscriptionLifecycle(existingTranscription, {});
+  }
+  if (!incoming.recordingUrl && existing.recordingUrl) {
+    merged.recordingUrl = existing.recordingUrl;
+  }
+  if (!incoming.recordingId && existing.recordingId) {
+    merged.recordingId = existing.recordingId;
+  }
+  return merged;
+};
+
 // --- CALLS ---
 app.get('/api/calls', authenticate, async (req, res) => {
     const tenantId = req.tenantId;
@@ -3044,9 +3982,10 @@ app.put('/api/calls/:id', authenticate, async (req, res) => {
     if (existing && payload.status && !isValidCallTransition(existing.status, payload.status)) {
       return res.status(400).json({ error: `Invalid status transition ${existing.status} -> ${payload.status}` });
     }
+    const mergedPayload = mergeCallUpdatePayload(existing?.toObject?.() || existing, payload, tenantId, externalId);
     const updated = await Call.findOneAndUpdate(
       { tenantId, externalId },
-      { ...payload, tenantId, externalId },
+      mergedPayload,
       { upsert: true, new: true }
     );
     if (payload.status) {
@@ -3063,7 +4002,8 @@ app.put('/api/calls/:id', authenticate, async (req, res) => {
   if (existing && payload.status && !isValidCallTransition(existing.status, payload.status)) {
     return res.status(400).json({ error: `Invalid status transition ${existing.status} -> ${payload.status}` });
   }
-  const stored = { ...(existing || {}), ...payload, id: externalId, tenantId };
+  const stored = mergeCallUpdatePayload(existing, payload, tenantId, externalId);
+  stored.id = externalId;
   stores.calls = upsertById(stores.calls, stored);
   await saveStore('calls', stores.calls);
   if (payload.status === 'ENDED') {
@@ -3092,7 +4032,7 @@ app.post('/api/jobs', authorize([UserRole.ADMIN, UserRole.SUPERVISOR]), async (r
 });
 
 // --- RECORDINGS ---
-app.get('/api/recordings', async (req, res) => {
+app.get('/api/recordings', authenticate, async (req, res) => {
     const tenantId = req.tenantId;
     if (!(await canAccessRecordings(req))) {
       return res.status(403).json({ error: 'forbidden' });
@@ -3104,7 +4044,7 @@ app.get('/api/recordings', async (req, res) => {
     res.json(stores.recordings.filter(r => r.tenantId === tenantId));
   });
 
-app.post('/api/recordings', async (req, res) => {
+app.post('/api/recordings', authenticate, async (req, res) => {
   const tenantId = req.tenantId;
   const payload = req.body || {};
   const externalId = payload.id || crypto.randomUUID();
@@ -3121,7 +4061,7 @@ app.post('/api/recordings', async (req, res) => {
   res.json(stored);
 });
 
-app.put('/api/recordings/:id', async (req, res) => {
+app.put('/api/recordings/:id', authenticate, async (req, res) => {
   const tenantId = req.tenantId;
   const externalId = req.params.id;
   const recording = { ...req.body, tenantId, externalId, updatedAt: Date.now() };
@@ -3141,7 +4081,7 @@ app.put('/api/recordings/:id', async (req, res) => {
   res.json(stored);
 });
 
-app.post('/api/recordings/upload', async (req, res) => {
+app.post('/api/recordings/upload', authenticate, async (req, res) => {
     const tenantId = req.tenantId;
     const { base64, mimeType = 'audio/wav', filename, callId } = req.body || {};
     if (!base64) return res.status(400).json({ error: 'base64 required' });
@@ -3176,34 +4116,58 @@ app.post('/api/recordings/upload', async (req, res) => {
       createdAt: Date.now(),
       expiresAt,
     };
+  const recordingUrl = buildRecordingUrl(req, tenantId, externalId);
   if (isMongoReady()) {
-    const created = await Recording.create(recording);
+    const created = await Recording.create({ ...recording, recordingUrl });
+    const createdView = toPublic(created);
+    if (callId) {
+      await attachPreferredRecordingToCall(tenantId, callId, { ...createdView, externalId, recordingUrl }).catch(() => {});
+      await enqueuePostCallJobs(tenantId, callId).catch(() => {});
+      kickInlineJobWorker();
+    }
     await writeAuditLog(req, 'RECORDING_UPLOAD', externalId, { callId });
-    return res.json(toPublic(created));
+    return res.json({ ...createdView, recordingUrl });
   }
-  const stored = { id: externalId, ...recording };
+  const stored = { id: externalId, ...recording, recordingUrl };
   stores.recordings = upsertById(stores.recordings, stored);
   await saveStore('recordings', stores.recordings);
+  if (callId) {
+    await attachPreferredRecordingToCall(tenantId, callId, stored).catch(() => {});
+    await enqueuePostCallJobs(tenantId, callId).catch(() => {});
+    kickInlineJobWorker();
+  }
   await writeAuditLog(req, 'RECORDING_UPLOAD', externalId, { callId });
   res.json(stored);
 });
 
-app.post('/api/recordings/:id/signed-url', async (req, res) => {
+app.post('/api/recordings/:id/signed-url', authenticate, async (req, res) => {
     const tenantId = req.tenantId;
     if (!(await canAccessRecordings(req))) {
       return res.status(403).json({ error: 'forbidden' });
     }
     const { ttlSeconds = 3600 } = req.body || {};
-    const externalId = req.params.id;
-  const rec = isMongoReady()
+    const externalId = String(req.params.id || '').trim();
+  let rec = isMongoReady()
     ? await Recording.findOne({ tenantId, externalId }).lean()
-    : stores.recordings.find(r => r.tenantId === tenantId && r.id === externalId);
+    : stores.recordings.find(r => r.tenantId === tenantId && (r.id === externalId || r.externalId === externalId));
+  if (!rec && externalId) {
+    rec = await getRecordingForCall(tenantId, externalId).catch(() => null);
+  }
   if (!rec) return res.status(404).json({ error: 'recording not found' });
+  const callId = rec.callId || null;
+  if (callId) {
+    const preferred = await getRecordingForCall(tenantId, callId).catch(() => null);
+    if (preferred && preferCandidateRecording(preferred, rec)) {
+      rec = preferred;
+    }
+  }
+  const resolvedExternalId = getRecordingExternalId(rec);
+  if (!resolvedExternalId) return res.status(404).json({ error: 'recording not found' });
   const expires = Date.now() + Number(ttlSeconds) * 1000;
-  const payload = `${tenantId}:${externalId}:${expires}`;
+  const payload = `${tenantId}:${resolvedExternalId}:${expires}`;
   const sig = signToken(payload);
-  const url = `/api/recordings/download?token=${tenantId}.${externalId}.${expires}.${sig}`;
-  res.json({ url, expiresAt: expires });
+  const url = `/api/recordings/download?token=${tenantId}.${resolvedExternalId}.${expires}.${sig}`;
+  res.json({ url, expiresAt: expires, recordingId: resolvedExternalId });
 });
 
 app.get('/api/recordings/download', async (req, res) => {
@@ -3217,7 +4181,7 @@ app.get('/api/recordings/download', async (req, res) => {
     if (Date.now() > Number(expires)) return res.status(403).send('token expired');
   const rec = isMongoReady()
     ? await Recording.findOne({ tenantId, externalId }).lean()
-    : stores.recordings.find(r => r.tenantId === tenantId && r.id === externalId);
+    : stores.recordings.find(r => r.tenantId === tenantId && (r.id === externalId || r.externalId === externalId));
     if (!rec) return res.status(404).send('not found');
     try {
       let data = null;
@@ -4098,16 +5062,12 @@ app.post('/twilio/recording/status', verifyTwilioSignature, async (req, res) => 
         recording,
         { upsert: true, new: true }
       );
-      await Call.findOneAndUpdate(
-        { tenantId, $or: [{ externalId: callSid }, { twilioCallSid: callSid }] },
-        { recordingUrl: signedUrl, recordingId: externalId }
-      );
+      await attachPreferredRecordingToCall(tenantId, resolvedCallId, { ...recording, externalId, recordingUrl: signedUrl });
     } else {
       const stored = { id: externalId, ...recording };
       stores.recordings = upsertById(stores.recordings, stored);
       await saveStore('recordings', stores.recordings);
-      stores.calls = stores.calls.map(c => ((c.id === callSid || c.twilioCallSid === callSid) && c.tenantId === tenantId) ? { ...c, recordingUrl: signedUrl, recordingId: externalId } : c);
-      await saveStore('calls', stores.calls);
+      await attachPreferredRecordingToCall(tenantId, resolvedCallId, stored);
     }
 
     const callbackUrl = `${getBaseUrl(req)}/twilio/transcription/status`;
@@ -4147,14 +5107,20 @@ app.post('/twilio/transcription/status', verifyTwilioSignature, async (req, res)
       if (!policy.enabled) {
         return res.json({ ok: true, skipped: 'ai_call_intelligence_disabled' });
       }
+      const readyLifecycle = mergeTranscriptionLifecycle(existingCall, {
+        status: 'ready',
+        attempts: Math.max(1, Number(existingCall?.transcription?.attempts || 0)),
+        lastTriedAt: Date.now(),
+        reason: '',
+      });
       const call = await Call.findOneAndUpdate(
         { _id: existingCall._id },
-        { $push: { transcript: segment }, transcriptionEnabled: true },
+        { $push: { transcript: segment }, transcriptionEnabled: true, transcription: readyLifecycle },
         { new: true }
       ).lean();
       if (call?.tenantId) {
         const resolvedCallId = call.externalId || call.id || callSid;
-        await enqueueJob(call.tenantId, 'summary', { callId: resolvedCallId });
+        await enqueueJobIfMissing(call.tenantId, 'summary', { callId: resolvedCallId, retryReason: 'twilio_callback' });
         await enqueueJob(call.tenantId, 'report', { callId: resolvedCallId });
       }
     } else {
@@ -4168,10 +5134,16 @@ app.post('/twilio/transcription/status', verifyTwilioSignature, async (req, res)
           return res.json({ ok: true, skipped: 'ai_call_intelligence_disabled' });
         }
         const transcript = Array.isArray(existing.transcript) ? [...existing.transcript, segment] : [segment];
-        stores.calls[idx] = { ...existing, transcript, transcriptionEnabled: true };
+        const readyLifecycle = mergeTranscriptionLifecycle(existing, {
+          status: 'ready',
+          attempts: Math.max(1, Number(existing?.transcription?.attempts || 0)),
+          lastTriedAt: Date.now(),
+          reason: '',
+        });
+        stores.calls[idx] = { ...existing, transcript, transcriptionEnabled: true, transcription: readyLifecycle };
         await saveStore('calls', stores.calls);
         const resolvedCallId = existing.id || callSid;
-        await enqueueJob(tenantId, 'summary', { callId: resolvedCallId });
+        await enqueueJobIfMissing(tenantId, 'summary', { callId: resolvedCallId, retryReason: 'twilio_callback' });
         await enqueueJob(tenantId, 'report', { callId: resolvedCallId });
       }
     }
@@ -4462,4 +5434,7 @@ app.use((err, req, res, next) => {
 
 httpServer.listen(PORT, () => {
   console.log(`[server] listening on http://localhost:${PORT}`);
+  runStartupCallDataRepairs().catch((err) => {
+    console.warn('startup call repairs failed:', err?.message || err);
+  });
 });

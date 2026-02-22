@@ -11,7 +11,7 @@ import {
   Network, Command, Link as LinkIcon, Share2, Paperclip, FileText, ToggleLeft, ToggleRight, Download,
   ThumbsUp, Heart, Laugh, MonitorOff, MoreHorizontal, StopCircle, ArrowUp, GripHorizontal
 } from 'lucide-react';
-import { Call, User, MeetingMessage, Reaction, ToolAction, CallStatus, Attachment, TranscriptSegment } from '../types';
+import { Call, User, MeetingMessage, Reaction, ToolAction, CallStatus, Attachment } from '../types';
 import { getStrategicIntelligence, extractToolActions, analyzeCallTranscript } from '../services/geminiService';
 import { apiGet, apiPost } from '../services/apiClient';
 import * as dbService from '../services/dbService';
@@ -150,6 +150,11 @@ type SessionParticipant = {
 };
 
 const ROUTING_DEBUG = (import.meta.env as any).VITE_DEBUG_ROUTING === 'true';
+const PEER_METADATA_IDENTITY_ENABLED = String((import.meta.env as any).VITE_PEER_METADATA_IDENTITY ?? '1').toLowerCase() !== 'false' && String((import.meta.env as any).VITE_PEER_METADATA_IDENTITY ?? '1') !== '0';
+const PEER_VIDEO_TRACK_RECOVERY_ENABLED = String((import.meta.env as any).VITE_PEER_VIDEO_TRACK_RECOVERY ?? '1').toLowerCase() !== 'false' && String((import.meta.env as any).VITE_PEER_VIDEO_TRACK_RECOVERY ?? '1') !== '0';
+const VIDEO_TRACK_MISSING_GRACE_MS = 8000;
+const VIDEO_TRACK_RECOVERY_COOLDOWN_MS = 12000;
+const DUPLICATE_CONNECTION_GRACE_MS = 2200;
 const debugRouting = (...args: any[]) => {
   if (ROUTING_DEBUG) console.info('[routing][bridge]', ...args);
 };
@@ -188,7 +193,6 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const [showNames, setShowNames] = useState(true);
   const [mirrorVideo, setMirrorVideo] = useState(true);
   const [backgroundEffect, setBackgroundEffect] = useState<'none' | 'blur' | 'virtual'>('none');
-  const [transcriptionActive, setTranscriptionActive] = useState(activeCall.transcriptionEnabled || false);
 
   // Streams
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -209,12 +213,24 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   const connectionsRef = useRef<Map<string, MediaConnection>>(new Map());
   const dialingPeersRef = useRef<Set<string>>(new Set());
   const peerIdentityLookupRef = useRef<Map<string, string>>(new Map());
+  const peerIdentityResolutionSourceRef = useRef<Map<string, 'metadata' | 'lookup' | 'legacy' | 'fallback'>>(new Map());
   const callParticipantIdentityKeysRef = useRef<string[]>([]);
+  const videoTrackMissingSinceRef = useRef<Map<string, number>>(new Map());
+  const videoTrackRecoveryCooldownRef = useRef<Map<string, number>>(new Map());
   const screenShareAttemptingRef = useRef(false);
   const screenSharePromptCooldownRef = useRef(0);
   const screenShareStopPendingRef = useRef(false);
   const screenShareDesiredActiveRef = useRef(false);
   const screenShareToggleSyncPendingRef = useRef(false);
+  const internalRecorderRef = useRef<MediaRecorder | null>(null);
+  const internalRecorderChunksRef = useRef<BlobPart[]>([]);
+  const internalRecorderStreamRef = useRef<MediaStream | null>(null);
+  const internalRecorderCallIdRef = useRef<string>('');
+  const internalRecorderUploadInFlightRef = useRef<Set<string>>(new Set());
+  const internalRecorderCompletedCallsRef = useRef<Set<string>>(new Set());
+  const internalRecorderAudioContextRef = useRef<AudioContext | null>(null);
+  const internalRecorderDestinationRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const internalRecorderSourceNodesRef = useRef<Map<string, { source: MediaStreamAudioSourceNode; gain: GainNode }>>(new Map());
   
   // Feature States
   const [intelligence, setIntelligence] = useState<{ text: string, links: {title: string, uri: string}[] } | null>(null);
@@ -343,6 +359,21 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     setMediaError(null);
     return fn(constraints);
   }, [mediaDevicesRef]);
+
+  const toBase64 = useCallback((blob: Blob) => new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const value = String(reader.result || '');
+      const idx = value.indexOf(',');
+      if (idx < 0) {
+        reject(new Error('base64 conversion failed'));
+        return;
+      }
+      resolve(value.slice(idx + 1));
+    };
+    reader.onerror = () => reject(reader.error || new Error('base64 conversion failed'));
+    reader.readAsDataURL(blob);
+  }), []);
 
   useEffect(() => {
     isMutedRef.current = isMuted;
@@ -492,25 +523,102 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     };
   }, [activeCall.id, isVideoEnabled, localStream, isMuted, getUserMediaSafe, buildPreferredMediaConstraints]);
 
-  const resolveRemoteIdentityFromPeer = useCallback((peerValue: string): string => {
+  const hasLiveVideoTrack = useCallback((stream: MediaStream | null | undefined): boolean => {
+    if (!stream) return false;
+    return (stream.getVideoTracks() || []).some((track) => track.readyState === 'live' && track.enabled !== false);
+  }, []);
+
+  const hasLiveVideoTrackOnConnection = useCallback((connection: MediaConnection | null | undefined): boolean => {
+    const receivers = connection?.peerConnection?.getReceivers?.() || [];
+    return receivers.some((receiver) => receiver?.track?.kind === 'video' && receiver.track.readyState === 'live');
+  }, []);
+
+  const resolveRemoteIdentityFromPeer = useCallback((peerValue: string, metadata?: any): string => {
     const peerKey = String(peerValue || '').trim();
+    const metadataIdentity = PEER_METADATA_IDENTITY_ENABLED
+      ? String(metadata?.identityKey || metadata?.senderIdentityKey || '').trim()
+      : '';
+    if (metadataIdentity && metadataIdentity !== currentIdentityKey) {
+      peerIdentityResolutionSourceRef.current.set(peerKey, 'metadata');
+      console.info('peer.identity_resolved', {
+        source: 'metadata',
+        peer: peerKey,
+        remoteIdentityKey: metadataIdentity,
+        roomId: String(metadata?.roomId || ''),
+        callId: String(metadata?.callId || ''),
+      });
+      return metadataIdentity;
+    }
     const mapped = peerIdentityLookupRef.current.get(peerKey);
-    if (mapped) return mapped;
+    if (mapped) {
+      peerIdentityResolutionSourceRef.current.set(peerKey, 'lookup');
+      console.info('peer.identity_resolved', {
+        source: 'lookup',
+        peer: peerKey,
+        remoteIdentityKey: mapped,
+      });
+      return mapped;
+    }
     if (peerKey.startsWith('connectai-user-')) {
       const legacyId = peerKey.slice('connectai-user-'.length).trim();
       const member = team.find((candidate) => candidate.id === legacyId);
-      return buildIdentityKey({ id: legacyId, email: member?.email, name: member?.name });
+      const resolved = buildIdentityKey({ id: legacyId, email: member?.email, name: member?.name });
+      peerIdentityResolutionSourceRef.current.set(peerKey, 'legacy');
+      console.info('peer.identity_resolved', {
+        source: 'legacy',
+        peer: peerKey,
+        remoteIdentityKey: resolved,
+      });
+      return resolved;
     }
     const fallbackTargets = callParticipantIdentityKeysRef.current.filter((identityKey) => identityKey !== currentIdentityKey);
-    if (fallbackTargets.length === 1) return fallbackTargets[0];
+    if (fallbackTargets.length === 1) {
+      peerIdentityResolutionSourceRef.current.set(peerKey, 'fallback');
+      return fallbackTargets[0];
+    }
     const notConnected = fallbackTargets.find((identityKey) => !connectionsRef.current.has(identityKey));
-    if (notConnected) return notConnected;
-    return `peer:${peerKey || 'unknown'}`;
+    if (notConnected) {
+      peerIdentityResolutionSourceRef.current.set(peerKey, 'fallback');
+      return notConnected;
+    }
+    const fallback = `peer:${peerKey || 'unknown'}`;
+    peerIdentityResolutionSourceRef.current.set(peerKey, 'fallback');
+    return fallback;
   }, [team, currentIdentityKey]);
 
   const registerConnection = useCallback((call: MediaConnection, remoteIdentityKey: string) => {
     let recovered = false;
     let disconnectTimer: number | null = null;
+    const previousConnection = connectionsRef.current.get(remoteIdentityKey);
+    if (previousConnection && previousConnection !== call) {
+      window.setTimeout(() => {
+        const incomingHasVideo = hasLiveVideoTrackOnConnection(call);
+        const previousHasVideo = hasLiveVideoTrackOnConnection(previousConnection);
+        const keepIncoming = incomingHasVideo || !previousHasVideo;
+        const stale = keepIncoming ? previousConnection : call;
+        const active = keepIncoming ? call : previousConnection;
+        if (!keepIncoming && connectionsRef.current.get(remoteIdentityKey) === call) {
+          connectionsRef.current.set(remoteIdentityKey, previousConnection);
+        }
+        if (keepIncoming && connectionsRef.current.get(remoteIdentityKey) !== call) {
+          connectionsRef.current.set(remoteIdentityKey, call);
+        }
+        debugRouting('peer.duplicateArbitration', {
+          remoteIdentityKey,
+          keepIncoming,
+          incomingHasVideo,
+          previousHasVideo,
+        });
+        try {
+          stale.close();
+        } catch {
+          // noop
+        }
+        if (connectionsRef.current.get(remoteIdentityKey) !== active) {
+          connectionsRef.current.set(remoteIdentityKey, active);
+        }
+      }, DUPLICATE_CONNECTION_GRACE_MS);
+    }
     const recoverConnection = (reason: string) => {
       if (recovered) return;
       recovered = true;
@@ -519,13 +627,16 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
         disconnectTimer = null;
       }
       debugRouting('connection.recover', { remoteIdentityKey, reason, peer: call.peer });
-      connectionsRef.current.delete(remoteIdentityKey);
-      dialingPeersRef.current.delete(remoteIdentityKey);
-      setRemoteStreams(prev => {
-        const next = new Map(prev);
-        next.delete(remoteIdentityKey);
-        return next;
-      });
+      const isCurrentConnection = connectionsRef.current.get(remoteIdentityKey) === call;
+      if (isCurrentConnection) {
+        connectionsRef.current.delete(remoteIdentityKey);
+        dialingPeersRef.current.delete(remoteIdentityKey);
+        setRemoteStreams(prev => {
+          const next = new Map(prev);
+          next.delete(remoteIdentityKey);
+          return next;
+        });
+      }
       try {
         call.close();
       } catch {
@@ -590,10 +701,42 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       remoteStream.getTracks().forEach((track) => {
         track.addEventListener('ended', () => recoverConnection(`track-ended:${track.kind}`));
       });
+      const currentStream = remoteStreamsRef.current.get(remoteIdentityKey);
+      const incomingHasVideo = hasLiveVideoTrack(remoteStream);
+      const currentHasVideo = hasLiveVideoTrack(currentStream);
+      if (currentStream && currentHasVideo && !incomingHasVideo) {
+        debugRouting('peer.streamArbitration.keepExisting', {
+          remoteIdentityKey,
+          incomingHasVideo,
+          currentHasVideo,
+        });
+        window.setTimeout(() => {
+          const latestStream = remoteStreamsRef.current.get(remoteIdentityKey);
+          if (hasLiveVideoTrack(latestStream)) {
+            if (previousConnection && connectionsRef.current.get(remoteIdentityKey) === call) {
+              connectionsRef.current.set(remoteIdentityKey, previousConnection);
+            }
+            try {
+              call.close();
+            } catch {
+              // noop
+            }
+          }
+        }, DUPLICATE_CONNECTION_GRACE_MS);
+        return;
+      }
+      if (incomingHasVideo && previousConnection && previousConnection !== call) {
+        try {
+          previousConnection.close();
+        } catch {
+          // noop
+        }
+      }
       debugRouting('remoteStream.received', {
         remoteIdentityKey,
         peer: call.peer,
         audioTracks: remoteStream.getAudioTracks().length,
+        videoTracks: remoteStream.getVideoTracks().length,
       });
       setRemoteStreams(prev => new Map(prev).set(remoteIdentityKey, remoteStream));
     });
@@ -732,10 +875,15 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
           });
           if (!existing) setLocalStream(stream);
           call.answer(stream);
-          const remoteIdentityKey = resolveRemoteIdentityFromPeerRef.current(call.peer);
+          const callMetadata = (call as any)?.metadata || {};
+          const remoteIdentityKey = resolveRemoteIdentityFromPeerRef.current(call.peer, callMetadata);
+          const resolutionSource = peerIdentityResolutionSourceRef.current.get(String(call.peer || '').trim()) || 'fallback';
           debugRouting('peer.incomingCall', {
             peer: call.peer,
             remoteIdentityKey,
+            resolutionSource,
+            metadataRoomId: String(callMetadata?.roomId || ''),
+            metadataCallId: String(callMetadata?.callId || ''),
           });
           registerConnectionRef.current(call, remoteIdentityKey);
         } catch (err) {
@@ -864,40 +1012,6 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     };
   }, [localStream, activeCall.status, getUserMediaSafe, isVideoEnabled, isMuted, buildPreferredMediaConstraints, selectedAudioDevice, selectedVideoDevice]);
 
-  // --- PROPRIETARY TRANSCRIPTION PROTOCOL ---
-  useEffect(() => {
-    if (!transcriptionActive || activeCall.status === CallStatus.ENDED) return;
-    
-    // Simulation for demo purposes if no real backend stream is connected
-    const interval = setInterval(() => {
-      const phrases = [
-        "Analyzing the current cluster performance metrics...",
-        "I believe we need to update the HubSpot schema for better synchronization.",
-        "Could we schedule a follow-up for next Tuesday at 10 AM?",
-        "The neural bridge latency is currently within acceptable parameters.",
-        "Let's ensure the CRM records are dispatched before the meeting concludes."
-      ];
-      // Only add if not already dense
-      if ((activeCall.transcript?.length || 0) > 20) return;
-
-      const segment: TranscriptSegment = {
-        id: `ts_${Date.now()}`,
-        speaker: Math.random() > 0.5 ? 'teammate' : 'customer',
-        text: phrases[Math.floor(Math.random() * phrases.length)],
-        timestamp: Date.now()
-      };
-      
-      if (onUpdateCall) {
-        onUpdateCall({
-          ...activeCall,
-          transcript: [...(activeCall.transcript || []), segment]
-        });
-      }
-    }, 8000);
-
-    return () => clearInterval(interval);
-  }, [transcriptionActive, activeCall, onUpdateCall]);
-
   // --- HARDWARE ADMISSION (ROBUST) ---
   const admitHardware = useCallback(async (deviceId?: string, kind: 'video' | 'audio' = 'video') => {
     try {
@@ -983,6 +1097,209 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     appliedDeviceSelectionRef.current.audio = selectedAudioDevice;
     admitHardware(selectedAudioDevice, 'audio').catch(() => {});
   }, [localStream, selectedAudioDevice, admitHardware]);
+
+  const stopInternalCallRecorder = useCallback(() => {
+    const recorder = internalRecorderRef.current;
+    if (!recorder) return;
+    internalRecorderRef.current = null;
+    try {
+      if (recorder.state !== 'inactive') recorder.stop();
+    } catch {
+      // noop
+    }
+  }, [hasLiveVideoTrack, hasLiveVideoTrackOnConnection]);
+
+  const cleanupInternalRecorderGraph = useCallback(() => {
+    internalRecorderSourceNodesRef.current.forEach(({ source, gain }) => {
+      try { source.disconnect(); } catch {}
+      try { gain.disconnect(); } catch {}
+    });
+    internalRecorderSourceNodesRef.current.clear();
+    const destination = internalRecorderDestinationRef.current;
+    if (destination) {
+      destination.stream.getTracks().forEach((track) => {
+        try { track.stop(); } catch {}
+      });
+    }
+    internalRecorderDestinationRef.current = null;
+    const context = internalRecorderAudioContextRef.current;
+    internalRecorderAudioContextRef.current = null;
+    if (context) {
+      context.close().catch(() => {});
+    }
+  }, []);
+
+  const syncInternalCallRecorderSources = useCallback(() => {
+    const context = internalRecorderAudioContextRef.current;
+    const destination = internalRecorderDestinationRef.current;
+    if (!context || !destination) return;
+    const desired = new Map<string, MediaStreamTrack>();
+    const localAudioTracks = localStreamRef.current?.getAudioTracks?.() || [];
+    localAudioTracks.forEach((track) => {
+      if (track.readyState !== 'live') return;
+      desired.set(`local:${track.id}`, track);
+    });
+    remoteStreamsRef.current.forEach((stream, identityKey) => {
+      (stream?.getAudioTracks?.() || []).forEach((track) => {
+        if (track.readyState !== 'live') return;
+        desired.set(`remote:${identityKey}:${track.id}`, track);
+      });
+    });
+    desired.forEach((track, key) => {
+      if (internalRecorderSourceNodesRef.current.has(key)) return;
+      try {
+        const singleTrackStream = new MediaStream([track]);
+        const source = context.createMediaStreamSource(singleTrackStream);
+        const gain = context.createGain();
+        gain.gain.value = 1;
+        source.connect(gain);
+        gain.connect(destination);
+        internalRecorderSourceNodesRef.current.set(key, { source, gain });
+      } catch {
+        // best effort
+      }
+    });
+    Array.from(internalRecorderSourceNodesRef.current.keys()).forEach((key) => {
+      if (desired.has(key)) return;
+      const node = internalRecorderSourceNodesRef.current.get(key);
+      if (!node) return;
+      try { node.source.disconnect(); } catch {}
+      try { node.gain.disconnect(); } catch {}
+      internalRecorderSourceNodesRef.current.delete(key);
+    });
+  }, []);
+
+  const startInternalCallRecorder = useCallback(() => {
+    if (activeCall.direction !== 'internal') return;
+    if (activeCall.status !== CallStatus.ACTIVE) return;
+    if (typeof MediaRecorder === 'undefined') return;
+    const callId = String(activeCall.id || '').trim();
+    if (!callId) return;
+    if (internalRecorderCompletedCallsRef.current.has(callId)) return;
+    if (internalRecorderRef.current && internalRecorderCallIdRef.current === callId) {
+      syncInternalCallRecorderSources();
+      return;
+    }
+    if (internalRecorderRef.current && internalRecorderCallIdRef.current !== callId) {
+      stopInternalCallRecorder();
+      return;
+    }
+    const context = internalRecorderAudioContextRef.current || new AudioContext();
+    internalRecorderAudioContextRef.current = context;
+    const destination = internalRecorderDestinationRef.current || context.createMediaStreamDestination();
+    internalRecorderDestinationRef.current = destination;
+    if (context.state === 'suspended') {
+      context.resume().catch(() => {});
+    }
+    syncInternalCallRecorderSources();
+    if (internalRecorderSourceNodesRef.current.size === 0) return;
+    const recorderStream = destination.stream;
+    internalRecorderStreamRef.current = recorderStream;
+    internalRecorderCallIdRef.current = callId;
+    internalRecorderChunksRef.current = [];
+    const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+    const supportedMime = mimeCandidates.find((candidate) => {
+      try {
+        return (MediaRecorder as any).isTypeSupported?.(candidate);
+      } catch {
+        return false;
+      }
+    }) || '';
+    let recorder: MediaRecorder;
+    try {
+      recorder = supportedMime
+        ? new MediaRecorder(recorderStream, { mimeType: supportedMime })
+        : new MediaRecorder(recorderStream);
+    } catch {
+      recorderStream.getTracks().forEach((track) => {
+        try { track.stop(); } catch {}
+      });
+      internalRecorderStreamRef.current = null;
+      return;
+    }
+    recorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        internalRecorderChunksRef.current.push(event.data);
+      }
+    };
+    recorder.onstop = async () => {
+      const completedCallId = internalRecorderCallIdRef.current;
+      const chunks = internalRecorderChunksRef.current;
+      internalRecorderChunksRef.current = [];
+      internalRecorderCallIdRef.current = '';
+      const streamToStop = internalRecorderStreamRef.current;
+      internalRecorderStreamRef.current = null;
+      if (streamToStop) {
+        streamToStop.getTracks().forEach((track) => {
+          try { track.stop(); } catch {}
+        });
+      }
+      cleanupInternalRecorderGraph();
+      if (!completedCallId || !chunks.length) return;
+      if (internalRecorderCompletedCallsRef.current.has(completedCallId)) return;
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+      if (!blob.size) return;
+      if (internalRecorderUploadInFlightRef.current.has(completedCallId)) return;
+      internalRecorderUploadInFlightRef.current.add(completedCallId);
+      try {
+        const base64 = await toBase64(blob);
+        const ext = blob.type.includes('ogg') ? 'ogg' : 'webm';
+        await apiPost('/api/recordings/upload', {
+          base64,
+          mimeType: blob.type || 'audio/webm',
+          filename: `${completedCallId}-${Date.now()}.${ext}`,
+          callId: completedCallId,
+        });
+        internalRecorderCompletedCallsRef.current.add(completedCallId);
+      } catch (err) {
+        console.warn('Internal call recording upload failed:', err);
+      } finally {
+        internalRecorderUploadInFlightRef.current.delete(completedCallId);
+      }
+    };
+    internalRecorderRef.current = recorder;
+    try {
+      recorder.start(1000);
+    } catch {
+      internalRecorderRef.current = null;
+      cleanupInternalRecorderGraph();
+    }
+  }, [activeCall.direction, activeCall.status, activeCall.id, cleanupInternalRecorderGraph, stopInternalCallRecorder, syncInternalCallRecorderSources, toBase64]);
+
+  const internalRecorderTrackSignature = useMemo(() => {
+    const local = (localStream?.getAudioTracks?.() || []).map((track) => `local:${track.id}:${track.readyState}`);
+    const remote: string[] = [];
+    remoteStreams.forEach((stream, identityKey) => {
+      (stream?.getAudioTracks?.() || []).forEach((track) => {
+        remote.push(`remote:${identityKey}:${track.id}:${track.readyState}`);
+      });
+    });
+    return [...local, ...remote].sort().join('|');
+  }, [localStream, remoteStreams]);
+
+  useEffect(() => {
+    if (activeCall.direction !== 'internal') {
+      stopInternalCallRecorder();
+      return;
+    }
+    if (activeCall.status === CallStatus.ACTIVE) {
+      startInternalCallRecorder();
+      return;
+    }
+    stopInternalCallRecorder();
+  }, [activeCall.direction, activeCall.status, startInternalCallRecorder, stopInternalCallRecorder, cleanupInternalRecorderGraph]);
+
+  useEffect(() => {
+    if (!internalRecorderRef.current) return;
+    syncInternalCallRecorderSources();
+  }, [internalRecorderTrackSignature, syncInternalCallRecorderSources]);
+
+  useEffect(() => {
+    if (activeCall.direction !== 'internal') return;
+    if (activeCall.status !== CallStatus.ACTIVE) return;
+    if (internalRecorderRef.current) return;
+    startInternalCallRecorder();
+  }, [activeCall.direction, activeCall.status, activeCall.id, internalRecorderTrackSignature, startInternalCallRecorder]);
 
   // --- ROBUST SCREEN SHARE ---
   const replaceOutgoingVideoTrack = useCallback((track: MediaStreamTrack | null) => {
@@ -1280,8 +1597,16 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       
       let connected = false;
       let call: MediaConnection;
+      const metadata = PEER_METADATA_IDENTITY_ENABLED
+        ? {
+            identityKey: currentIdentityKey,
+            senderIdentityKey: currentIdentityKey,
+            roomId,
+            callId: activeCall.id,
+          }
+        : undefined;
       try {
-        call = currentPeer.call(targetPeerId, stream);
+        call = currentPeer.call(targetPeerId, stream, metadata ? { metadata } : undefined);
       } catch (error) {
         debugRouting('peer.dialError', { targetIdentityKey: identityKey, targetPeerId, error: String((error as any)?.message || error) });
         attemptDial();
@@ -1333,7 +1658,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     };
     
     attemptDial();
-  }, [localStream, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe, currentIdentityKey, roomId, buildPreferredMediaConstraints]);
+  }, [localStream, registerConnection, isVideoEnabled, isMuted, getUserMediaSafe, currentIdentityKey, roomId, activeCall.id, buildPreferredMediaConstraints]);
 
   const bindRemoteAudioEl = useCallback((remoteIdentityKey: string, element: HTMLAudioElement | null) => {
     if (!element) {
@@ -1434,6 +1759,7 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
   }, []);
 
   const teardownCallMedia = useCallback((resetState = true) => {
+    stopInternalCallRecorder();
     connectionsRef.current.forEach((connection) => {
       try {
         connection.close();
@@ -1480,13 +1806,24 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
       setNeedsRemoteAudioUnlock(false);
       setRemoteAudioDiagnostic('ok');
     }
-  }, [stopStreamTracks]);
+  }, [stopStreamTracks, stopInternalCallRecorder]);
 
   useEffect(() => {
     return () => {
       teardownCallMedia(false);
     };
   }, [teardownCallMedia]);
+
+  useEffect(() => {
+    const forceStop = () => {
+      stopInternalCallRecorder();
+      teardownCallMedia(true);
+    };
+    window.addEventListener('connectai:force-media-stop', forceStop);
+    return () => {
+      window.removeEventListener('connectai:force-media-stop', forceStop);
+    };
+  }, [teardownCallMedia, stopInternalCallRecorder]);
 
   useEffect(() => {
     if (activeCall.status !== CallStatus.ENDED) return;
@@ -1795,6 +2132,58 @@ export const VideoBridge: React.FC<VideoBridgeProps> = ({
     }, 2500);
     return () => window.clearInterval(interval);
   }, [peerId, activeCall.status, expectedRemoteIdentityKeys, remoteStreams, callUser, callParticipantMap]);
+
+  useEffect(() => {
+    if (!PEER_VIDEO_TRACK_RECOVERY_ENABLED) return;
+    if (!isVideoEnabled) return;
+    if (activeCall.status !== CallStatus.ACTIVE) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      expectedRemoteIdentityKeys.forEach((identityKey) => {
+        const connection = connectionsRef.current.get(identityKey);
+        if (!connection) {
+          videoTrackMissingSinceRef.current.delete(identityKey);
+          return;
+        }
+        const stream = remoteStreamsRef.current.get(identityKey);
+        const hasVideo = hasLiveVideoTrack(stream) || hasLiveVideoTrackOnConnection(connection);
+        if (hasVideo) {
+          videoTrackMissingSinceRef.current.delete(identityKey);
+          return;
+        }
+        const firstMissingAt = videoTrackMissingSinceRef.current.get(identityKey);
+        if (!firstMissingAt) {
+          videoTrackMissingSinceRef.current.set(identityKey, now);
+          return;
+        }
+        const cooldownUntil = Number(videoTrackRecoveryCooldownRef.current.get(identityKey) || 0);
+        if ((now - firstMissingAt) < VIDEO_TRACK_MISSING_GRACE_MS || now < cooldownUntil) return;
+        videoTrackRecoveryCooldownRef.current.set(identityKey, now + VIDEO_TRACK_RECOVERY_COOLDOWN_MS);
+        videoTrackMissingSinceRef.current.set(identityKey, now);
+        console.warn('peer.video_track_missing', {
+          callId: activeCall.id,
+          roomId,
+          identityKey,
+          graceMs: VIDEO_TRACK_MISSING_GRACE_MS,
+        });
+        try {
+          connection.close();
+        } catch {
+          // noop
+        }
+        connectionsRef.current.delete(identityKey);
+        dialingPeersRef.current.delete(identityKey);
+        setRemoteStreams((prev) => {
+          const next = new Map(prev);
+          next.delete(identityKey);
+          return next;
+        });
+        const participant = callParticipantMap.get(identityKey);
+        callUser(identityKey, participant?.id).catch(() => {});
+      });
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [activeCall.status, activeCall.id, roomId, expectedRemoteIdentityKeys, callParticipantMap, callUser, hasLiveVideoTrack, hasLiveVideoTrackOnConnection, isVideoEnabled]);
 
   useEffect(() => {
     if (activeCall.status !== CallStatus.ACTIVE) return;

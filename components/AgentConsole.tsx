@@ -11,7 +11,7 @@ import {
 import { Call, CallStatus, TranscriptSegment, AppSettings, Notification, Lead, User, AiSuggestion, AgentStatus, Message, CallAnalysis, CrmContact, Campaign, Conversation, Meeting, ToolAction, Attachment, Role, StartupGuardReport } from '../types';
 import { generateLeadBriefing, generateAiDraft, analyzeCallTranscript, extractToolActions, generateCampaignDraft, enrichLead, generateHelpAnswer } from '../services/geminiService';
 import { upsertCrmContact, fetchCrmContacts, fetchCrmDeals, createCrmTask } from '../services/crmService';
-import { updateCall as updateCallLog } from '../services/callLogService';
+import { fetchCallById, updateCall as updateCallLog } from '../services/callLogService';
 import * as dbService from '../services/dbService';
 import { buildInternalConversationId } from '../utils/chat';
 import { buildIdentityKey, normalizeEmail, normalizeName } from '../utils/identity';
@@ -44,6 +44,21 @@ interface AgentConsoleProps {
 
 const HOURS = Array.from({ length: 14 }, (_, i) => i + 8); 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+const TERMINAL_UNAVAILABLE_RE = /transcript unavailable/i;
+const normalizeWrapUpTranscriptionStatus = (call?: Call | null): 'pending' | 'processing' | 'ready' | 'unavailable' => {
+  const raw = String(call?.transcription?.status || '').trim().toLowerCase();
+  if (raw === 'pending' || raw === 'processing' || raw === 'ready' || raw === 'unavailable') return raw;
+  if ((call?.transcript || []).length > 0) return 'ready';
+  if (TERMINAL_UNAVAILABLE_RE.test(String(call?.analysis?.summary || ''))) return 'unavailable';
+  return 'pending';
+};
+const buildTranscriptUnavailableWrapUpSummary = (call?: Call | null) => {
+  const customer = call?.customerName || call?.phoneNumber || 'customer';
+  const duration = Math.max(0, Math.floor(Number(call?.durationSeconds || 0)));
+  return `Call with ${customer} ended after ${duration}s. Transcript unavailable; review recording and disposition.`;
+};
+const buildTranscriptProcessingWrapUpSummary = () =>
+  'Transcript is still processing. Summary will auto-refresh when transcription is ready.';
 const getConsentFramework = (jurisdiction: AppSettings['compliance']['jurisdiction']) => {
   if (jurisdiction === 'EU' || jurisdiction === 'UK') return 'GDPR';
   if (jurisdiction === 'US') return 'US Privacy';
@@ -143,19 +158,28 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   });
   const aiCallIntelligenceEnabled = settings.aiCallIntelligence?.enabled !== false;
   const autoCrmWrapUpEnabled = aiCallIntelligenceEnabled && settings.aiCallIntelligence?.autoSyncCrm !== false;
+  const wrapUpTranscriptionStatus = useMemo(
+    () => normalizeWrapUpTranscriptionStatus(lastEndedCall),
+    [lastEndedCall?.transcription?.status, lastEndedCall?.transcript, lastEndedCall?.analysis?.summary]
+  );
   const wrapUpStatusBadges = useMemo(() => {
     const workerDisabled = Boolean(
       startupGuardReport?.warnings?.some((warning) => warning.code === 'jobs.worker_disabled')
     );
-    const transcriptReady = Boolean((lastEndedCall?.transcript || []).length > 0);
-    const summaryReady = Boolean(wrapUpAnalysis?.summary);
+    const summaryReady = Boolean(lastEndedCall?.analysis?.summary);
     const crmSynced = Boolean(wrapUpActions.crmSynced || lastEndedCall?.crmData?.status === 'synced');
     const statuses: Array<{ key: string; label: string; tone: 'warn' | 'ready' | 'idle' }> = [];
     if (workerDisabled) {
       statuses.push({ key: 'worker', label: 'Worker disabled', tone: 'warn' });
     }
-    if (!summaryReady && transcriptReady && aiCallIntelligenceEnabled) {
-      statuses.push({ key: 'pending', label: 'Pending transcription', tone: 'idle' });
+    if (aiCallIntelligenceEnabled) {
+      if (wrapUpTranscriptionStatus === 'pending' || wrapUpTranscriptionStatus === 'processing') {
+        statuses.push({ key: 'pending', label: 'Pending transcription', tone: 'idle' });
+      } else if (wrapUpTranscriptionStatus === 'ready') {
+        statuses.push({ key: 'transcript_ready', label: 'Transcript ready', tone: 'ready' });
+      } else if (wrapUpTranscriptionStatus === 'unavailable') {
+        statuses.push({ key: 'transcript_unavailable', label: 'Transcript unavailable', tone: 'warn' });
+      }
     }
     if (summaryReady) {
       statuses.push({ key: 'summary', label: 'Summary ready', tone: 'ready' });
@@ -167,7 +191,7 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       statuses.push({ key: 'waiting', label: 'Wrap-up in progress', tone: 'idle' });
     }
     return statuses;
-  }, [startupGuardReport?.warnings, lastEndedCall?.transcript, lastEndedCall?.crmData?.status, wrapUpAnalysis?.summary, wrapUpActions.crmSynced, aiCallIntelligenceEnabled]);
+  }, [startupGuardReport?.warnings, lastEndedCall?.crmData?.status, lastEndedCall?.analysis?.summary, wrapUpActions.crmSynced, aiCallIntelligenceEnabled, wrapUpTranscriptionStatus]);
   const autoCrmSyncInFlightRef = useRef<Record<string, boolean>>({});
   const buildWrapUpActionsForCall = useCallback((call?: Call | null) => ({
     qaApproved: false,
@@ -188,6 +212,8 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
   const [messageInput, setMessageInput] = useState('');
   const [aiDraftText, setAiDraftText] = useState<string | null>(null);
   const [isDrafting, setIsDrafting] = useState(false);
+  const [wrapUpEmailDraftText, setWrapUpEmailDraftText] = useState('');
+  const [wrapUpDraftCopied, setWrapUpDraftCopied] = useState(false);
   const [showInboxMenu, setShowInboxMenu] = useState(false);
   const [showContactModal, setShowContactModal] = useState(false);
   const [showThreadSettings, setShowThreadSettings] = useState(false);
@@ -782,8 +808,11 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
         return;
       }
       if (transcriptLen === 0) {
+        const transcriptionStatus = normalizeWrapUpTranscriptionStatus(lastCall);
         const fallback: CallAnalysis = {
-          summary: `Call with ${lastCall.customerName || lastCall.phoneNumber || 'customer'} ended after ${Math.max(0, Math.floor(lastCall.durationSeconds || 0))}s. Transcript unavailable; review recording and disposition.`,
+          summary: transcriptionStatus === 'unavailable'
+            ? buildTranscriptUnavailableWrapUpSummary(lastCall)
+            : buildTranscriptProcessingWrapUpSummary(),
           sentimentScore: 50,
           sentimentLabel: 'Neutral',
           topics: ['Wrap-Up'],
@@ -811,8 +840,92 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
       setLastEndedCall(null);
       analyzedRef.current = { id: null, len: 0 };
       setWrapUpActions(buildWrapUpActionsForCall());
+      setWrapUpEmailDraftText('');
+      setWrapUpDraftCopied(false);
     }
   }, [agentStatus, history, isAnalyzing, aiCallIntelligenceEnabled, buildWrapUpActionsForCall]);
+
+  useEffect(() => {
+    if (agentStatus !== AgentStatus.WRAP_UP) return;
+    if (!lastEndedCall?.id) return;
+    let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    let attempts = 0;
+    const poll = async () => {
+      attempts += 1;
+      try {
+        const latest = await fetchCallById(lastEndedCall.id);
+        if (cancelled || !latest || latest.status !== CallStatus.ENDED) return;
+        const latestTranscriptLen = latest.transcript?.length || 0;
+        const latestSummary = latest.analysis?.summary || '';
+        const currentTranscriptLen = lastEndedCall.transcript?.length || 0;
+        const currentSummary = lastEndedCall.analysis?.summary || '';
+        if (
+          latestTranscriptLen !== currentTranscriptLen ||
+          latestSummary !== currentSummary ||
+          latest.recordingId !== lastEndedCall.recordingId ||
+          latest.recordingUrl !== lastEndedCall.recordingUrl
+        ) {
+          setLastEndedCall(latest);
+        }
+        if (latest.analysis?.summary) {
+          setWrapUpAnalysis({
+            summary: latest.analysis.summary,
+            sentimentScore: latest.analysis.sentimentScore ?? wrapUpAnalysis?.sentimentScore ?? 50,
+            sentimentLabel: latest.analysis.sentimentLabel ?? wrapUpAnalysis?.sentimentLabel ?? 'Neutral',
+            topics: latest.analysis.topics?.length ? latest.analysis.topics : (wrapUpAnalysis?.topics || ['Call Review']),
+            qaScore: latest.analysis.qaScore ?? wrapUpAnalysis?.qaScore ?? 75,
+            dispositionSuggestion: latest.analysis.dispositionSuggestion || wrapUpAnalysis?.dispositionSuggestion || 'Follow-up Needed',
+          });
+          setWrapUpActions(buildWrapUpActionsForCall(latest));
+        } else if (normalizeWrapUpTranscriptionStatus(latest) === 'unavailable') {
+          setWrapUpAnalysis((prev) => ({
+            summary: buildTranscriptUnavailableWrapUpSummary(latest),
+            sentimentScore: prev?.sentimentScore ?? 50,
+            sentimentLabel: prev?.sentimentLabel ?? 'Neutral',
+            topics: prev?.topics?.length ? prev.topics : ['Wrap-Up'],
+            qaScore: prev?.qaScore ?? 72,
+            dispositionSuggestion: prev?.dispositionSuggestion || 'Follow-up Needed',
+          }));
+        } else if (latestTranscriptLen > 0 && !isAnalyzing) {
+          setIsAnalyzing(true);
+          analyzeCallTranscript(latest.transcript || [])
+            .then((analysis) => {
+              if (cancelled) return;
+              setWrapUpAnalysis(analysis);
+              setLastEndedCall((prev) => prev ? { ...latest, analysis } : prev);
+              setWrapUpActions(buildWrapUpActionsForCall(latest));
+            })
+            .finally(() => {
+              if (!cancelled) setIsAnalyzing(false);
+            });
+        }
+        const transcriptionStatus = normalizeWrapUpTranscriptionStatus(latest);
+        const needsMoreData = !latest.analysis?.summary && (transcriptionStatus === 'pending' || transcriptionStatus === 'processing');
+        if (!cancelled && needsMoreData && attempts < 18) {
+          pollTimer = setTimeout(poll, 4000);
+        }
+      } catch {
+        if (!cancelled && attempts < 18) {
+          pollTimer = setTimeout(poll, 5000);
+        }
+      }
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (pollTimer) clearTimeout(pollTimer);
+    };
+  }, [
+    agentStatus,
+    lastEndedCall?.id,
+    lastEndedCall?.transcript?.length,
+    lastEndedCall?.analysis?.summary,
+    lastEndedCall?.recordingId,
+    lastEndedCall?.recordingUrl,
+    isAnalyzing,
+    buildWrapUpActionsForCall,
+  ]);
 
   const handleExecuteTool = (toolId: string) => {
     setLiveTools(prev => prev.map(t => t.id === toolId ? { ...t, status: 'executed' } : t));
@@ -1767,6 +1880,62 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
     await updateCallLog(updated.id, updated).catch(() => {});
   };
 
+  const buildWrapUpEmailDraft = useCallback((call: Call, analysis: CallAnalysis | null) => {
+    const customer = call.customerName || call.customerEmail || call.phoneNumber || 'Customer';
+    const durationSec = Math.max(0, Math.floor(call.durationSeconds || 0));
+    const summary = String(analysis?.summary || 'Call completed successfully.').trim();
+    const transcript = (call.transcript || [])
+      .slice(-8)
+      .map((segment) => `${segment.speaker}: ${segment.text}`)
+      .join('\n');
+    const actionLines = [
+      analysis?.dispositionSuggestion ? `- Disposition: ${analysis.dispositionSuggestion}` : '',
+      analysis?.topics?.length ? `- Topics: ${analysis.topics.join(', ')}` : '',
+      analysis?.qaScore !== undefined ? `- QA score: ${analysis.qaScore}/100` : '',
+    ].filter(Boolean);
+    return [
+      `Subject: Follow-up from our ConnectAI call with ${customer}`,
+      '',
+      `Hi ${customer},`,
+      '',
+      `Thanks again for your time today. Here is a quick recap of our ${durationSec}s conversation:`,
+      summary,
+      '',
+      actionLines.length ? 'Action items:' : '',
+      ...actionLines,
+      '',
+      transcript ? 'Key transcript highlights:' : '',
+      transcript || '',
+      '',
+      'Please reply with any corrections or next-step preferences.',
+      '',
+      `Best regards,`,
+      user.name,
+    ]
+      .filter((line, index, arr) => !(line === '' && arr[index - 1] === ''))
+      .join('\n');
+  }, [user.name]);
+
+  const handleDraftWrapUpEmail = useCallback(() => {
+    if (!lastEndedCall) return;
+    const draft = buildWrapUpEmailDraft(lastEndedCall, wrapUpAnalysis);
+    setWrapUpEmailDraftText(draft);
+    setWrapUpDraftCopied(false);
+    addNotification('success', 'Wrap-up email draft prepared.');
+  }, [addNotification, buildWrapUpEmailDraft, lastEndedCall, wrapUpAnalysis]);
+
+  const copyWrapUpEmailDraft = useCallback(async () => {
+    if (!wrapUpEmailDraftText.trim()) return;
+    try {
+      await navigator.clipboard.writeText(wrapUpEmailDraftText);
+      setWrapUpDraftCopied(true);
+      addNotification('success', 'Wrap-up email draft copied.');
+      setTimeout(() => setWrapUpDraftCopied(false), 1800);
+    } catch {
+      addNotification('error', 'Unable to copy draft in this browser.');
+    }
+  }, [addNotification, wrapUpEmailDraftText]);
+
   const handleApproveQa = async () => {
     if (!lastEndedCall || !wrapUpAnalysis) return;
     const qaEvaluation = {
@@ -2087,10 +2256,30 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                  <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4 flex items-center gap-2"><Terminal size={14}/> Summary</h4>
                                  <div className="bg-slate-50 p-6 rounded-2xl border border-slate-200 shadow-inner">
                                     <p className="text-sm font-medium italic text-slate-700 leading-relaxed">
-                                       {wrapUpAnalysis.summary.includes("timeout") 
-                                          ? "Call successfully archived. Neural analysis indicates standard interaction flow with positive closure." 
-                                          : `"${wrapUpAnalysis.summary}"`}
+                                       {`"${wrapUpAnalysis.summary}"`}
                                     </p>
+                                 </div>
+                              </section>
+
+                              <section>
+                                 <h4 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 mb-4 flex items-center gap-2"><MessageSquare size={14}/> Transcript</h4>
+                                 <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-inner max-h-56 overflow-y-auto space-y-2">
+                                   {(lastEndedCall?.transcript || []).length > 0 ? (
+                                     (lastEndedCall?.transcript || []).map((segment) => (
+                                       <div key={segment.id} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-2">
+                                         <p className="text-[9px] font-black uppercase tracking-widest text-slate-500">
+                                           {segment.speaker} {segment.timestamp ? `· ${new Date(segment.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}
+                                         </p>
+                                         <p className="text-xs font-semibold text-slate-700 mt-1">{segment.text}</p>
+                                       </div>
+                                     ))
+                                   ) : (
+                                     <p className="text-xs text-slate-500">
+                                       {wrapUpTranscriptionStatus === 'unavailable'
+                                         ? 'Transcript unavailable; verify recording/disposition manually.'
+                                         : 'Transcript is still processing. Recording has been captured and wrap-up will auto-refresh when transcription is ready.'}
+                                     </p>
+                                   )}
                                  </div>
                               </section>
                               
@@ -2151,6 +2340,27 @@ export const AgentConsole: React.FC<AgentConsoleProps> = ({
                                     >
                                       {wrapUpActions.followUpScheduled ? 'Scheduled' : 'Schedule Follow-up'}
                                     </button>
+                                    <button
+                                      onClick={handleDraftWrapUpEmail}
+                                      className="w-full py-3 border rounded-xl text-[10px] font-black uppercase tracking-widest transition-all bg-white/5 border-white/10 text-white hover:bg-white/10 flex items-center justify-center gap-2"
+                                    >
+                                      <Mail size={14}/> Draft As Email
+                                    </button>
+                                    {wrapUpEmailDraftText && (
+                                      <div className="space-y-2 rounded-xl border border-white/10 bg-white/5 p-3">
+                                        <textarea
+                                          className="w-full min-h-[140px] rounded-xl border border-white/10 bg-slate-950/50 p-3 text-xs text-slate-100 outline-none"
+                                          value={wrapUpEmailDraftText}
+                                          onChange={(e) => setWrapUpEmailDraftText(e.target.value)}
+                                        />
+                                        <button
+                                          onClick={copyWrapUpEmailDraft}
+                                          className="w-full py-2 rounded-lg border border-white/20 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/10"
+                                        >
+                                          {wrapUpDraftCopied ? 'Copied' : 'Copy Draft'}
+                                        </button>
+                                      </div>
+                                    )}
                                  </div>
                               </section>
                            </div>
